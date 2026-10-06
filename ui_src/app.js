@@ -1221,7 +1221,7 @@
     });
     on("[data-storage-path]", function (ev) {
       var id = ev.currentTarget.dataset.storagePath;
-      call("pick_folder").then(function (path) {
+      pickFolder().then(function (path) {
         if (!path) return;
         call("storage_set_path", { id: id, path: path }).then(function (res) {
           if (res && res.error) { toast(res.error, true); return; }
@@ -1281,8 +1281,18 @@
     return (state.storages || []).filter(function (s) { return s.id === id; })[0];
   }
 
+  function pickFolder() {
+    // Ответ - {path} | {cancelled} | {error}: ошибку показываем тостом,
+    // отмену принимаем молча. Раньше всё это было «null», и сломанный
+    // диалог выглядел как «нажал кнопку и ничего не произошло».
+    return call("pick_folder").then(function (res) {
+      if (res && res.error) { toast(res.error, true); return null; }
+      return res && res.path ? res.path : null;
+    });
+  }
+
   function pickAndAddStorage() {
-    call("pick_folder").then(function (path) {
+    pickFolder().then(function (path) {
       if (!path) return;
       call("storage_add", { path: path }).then(function (res) {
         if (!res) return;
@@ -2018,8 +2028,8 @@
         return Promise.resolve({ settings: settings, settings_rev: 1 });
       },
       pick_folder: function () {
-        // В превью «выбираем» новую папку: обновляем пути у превью-хранилищ.
-        return Promise.resolve("D:\\видео\\подборки");
+        // В превью «выбираем» новую папку - тот же контракт, что у окна.
+        return Promise.resolve({ path: "D:\\видео\\подборки" });
       },
       start_scan: function () {
         mockScan = { running: true, done: 0, total: 120,

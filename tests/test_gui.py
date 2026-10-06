@@ -190,6 +190,63 @@ class TestApi(GuiCase):
         self.assertEqual(second.get("error"), "Переиндексация уже идёт")
 
 
+class TestPickFolder(GuiCase):
+    """Диалог выбора папки: три исхода, и каждый должен быть виден.
+
+    Сам диалог руками в тесте не откроешь, поэтому подменяем окно:
+    проверяется НАША часть - что вызов идёт в метод окна (pywebview 6),
+    а не в модуль (pywebview 5), и что отмена отличается от поломки.
+    """
+
+    class FakeWindow:
+        def __init__(self, result=None, exc=None):
+            self.result = result
+            self.exc = exc
+            self.kinds = []
+
+        def create_file_dialog(self, kind, *args, **kwargs):
+            self.kinds.append(kind)
+            if self.exc is not None:
+                raise self.exc
+            return self.result
+
+    def test_path_from_window(self):
+        api = self.make_api()
+        window = self.FakeWindow(result=("D:\\новая папка",))
+        api.bind_window(window)
+        self.assertEqual(api.pick_folder(), {"path": "D:\\новая папка"})
+        # Диалог обязан зваться у ОКНА, а не у модуля webview.
+        import webview
+        self.assertEqual(window.kinds, [webview.FileDialog.FOLDER])
+
+    def test_tuple_result_takes_first(self):
+        api = self.make_api()
+        api.bind_window(self.FakeWindow(result=("D:\\a", "D:\\b")))
+        self.assertEqual(api.pick_folder(), {"path": "D:\\a"})
+
+    def test_cancel_is_not_an_error(self):
+        api = self.make_api()
+        api.bind_window(self.FakeWindow(result=None))
+        self.assertEqual(api.pick_folder(), {"cancelled": True})
+        # Отмена не должна оставлять след в журнале.
+        self.assertNotIn("Диалог", " ".join(api.poll(0)["logs"]))
+
+    def test_failure_is_reported_not_swallowed(self):
+        # Именно так и выглядел баг: исключение -> null -> «нажал и ничего».
+        api = self.make_api()
+        api.bind_window(self.FakeWindow(exc=RuntimeError("boom")))
+        result = api.pick_folder()
+        self.assertIn("error", result)
+        self.assertIn("boom", result["error"])
+        self.assertTrue(any("Диалог выбора папки" in line
+                            for line in api.poll(0)["logs"]))
+
+    def test_missing_window_reports_error(self):
+        api = self.make_api()
+        result = api.pick_folder()
+        self.assertIn("error", result, "без окна тихий null недопустим")
+
+
 class TestPage(GuiCase):
     def test_build_page_inlines_assets(self):
         page = ui.build_page()

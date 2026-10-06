@@ -87,6 +87,13 @@ class Api:
         self.dl = DownloadWorker(self.db, self._current_settings, log=self._log)
         settings.reload_if_changed(self._settings_cache)
         self._log("Индекс открыт: " + str(self.db.path))
+        # Версия pywebview в журнале: API между мажорными версиями
+        # меняется (диалог папки уже переезжал) - пусть видно, с чем работаем.
+        try:
+            from importlib.metadata import version as _package_version
+            self._log(f"pywebview {_package_version('pywebview')}")
+        except Exception:  # noqa: BLE001 - версия не обязательна для работы
+            pass
         if self._boot.get("created"):
             self._log("Хранилища перенесены из настроек: "
                       f"{self._boot['created']}, без хранилища осталось "
@@ -257,19 +264,45 @@ class Api:
                 "settings_rev": self._settings_rev}
 
     def pick_folder(self):
-        """Системный диалог выбора папки (из карточки настроек)."""
-        if self._window is None:
-            return None
+        """Системный диалог выбора папки.
+
+        Возвращает словарь, а не строку: «папка выбрана» ({path}),
+        «пользователь отменил» ({cancelled}) и «диалог не открылся»
+        ({error}) - три разных исхода. Раньше все три превращались в
+        null, и баг выглядел как «нажал и ничего».
+
+        pywebview 6: диалог живёт на ОКНЕ (Window.create_file_dialog),
+        модульной функции в нём больше нет - как раз её отсутствие и
+        ломало добавление папки.
+        """
         try:
             import webview
-            result = webview.create_file_dialog(webview.FOLDER_DIALOG)
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"pywebview недоступен: {exc}"}
+
+        win = self._window
+        if win is None:
+            # Страховка (как в Synfronia): окно могло ещё не привязаться.
+            win = webview.windows[0] if webview.windows else None
+        if win is None:
+            return {"error": "Окно ещё не готово - повторите через секунду"}
+
+        # В 6.x константа FileDialog.FOLDER, FOLDER_DIALOG оставлен как
+        # откат для 5.x (и там, и там значение 20).
+        folder_type = getattr(webview, "FileDialog", None)
+        kind = folder_type.FOLDER if folder_type is not None \
+            else webview.FOLDER_DIALOG
+        try:
+            result = win.create_file_dialog(kind)
         except Exception as exc:  # noqa: BLE001
             self._log(f"Диалог выбора папки не открылся: {exc}")
-            return None
+            return {"error": f"Не удалось открыть выбор папки: {exc}"}
+
         if not result:
-            return None
+            return {"cancelled": True}          # закрыли, ничего не выбрали
         picked = result[0] if isinstance(result, (list, tuple)) else result
-        return str(picked)
+        path = str(picked or "").strip()
+        return {"path": path} if path else {"cancelled": True}
 
     def open_path(self, path) -> None:
         """Открыть папку в проводнике (кнопка в карточке, M3)."""
