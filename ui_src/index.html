@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Omnistash</title>
+<style>__CSS__</style>
+</head>
+<body data-theme="dark">
+
+<div id="preview-badge" hidden>PREVIEW · данные вымышленные, pywebview не подключён</div>
+
+<header class="head">
+  <div class="brand">
+    <div class="logo">Omnistash</div>
+    <div class="sub">Загрузка · синхронизация · организация библиотеки</div>
+  </div>
+  <div class="head-stats" id="head-stats"></div>
+  <div class="head-actions">
+    <button id="rescan-btn" class="btn" title="Пройти папки библиотеки и обновить индекс">Переиндексировать</button>
+    <button id="stop-scan-btn" class="btn ghost" hidden>Отмена</button>
+    <button id="add-btn" class="btn primary" title="Добавить плейлист или канал">Добавить</button>
+  </div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-tab="library">Библиотека</button>
+  <button class="tab" data-tab="sync">Синхронизация</button>
+  <button class="tab" data-tab="queue">Очередь <span class="badge" id="queue-badge" hidden>0</span></button>
+  <button class="tab" data-tab="settings">Настройки</button>
+</nav>
+
+<main class="main">
+
+  <!-- ================= Библиотека ================= -->
+  <section class="panel split" id="panel-library">
+    <aside class="tree" id="tree"></aside>
+
+    <section class="list">
+      <div class="toolbar">
+        <input type="search" id="search" placeholder="Поиск по названию, описанию, тегам…" autocomplete="off">
+        <select id="status-filter" title="Фильтр по статусу"><option value="">все статусы</option></select>
+        <span class="spacer"></span>
+        <span class="muted" id="list-total"></span>
+      </div>
+
+      <div class="scan-bar" id="scan-bar" hidden>
+        <div class="scan-track"><div class="scan-fill" id="scan-fill"></div></div>
+        <div class="scan-text" id="scan-text"></div>
+      </div>
+
+      <div class="grid-head">
+        <span class="c-status">Статус</span>
+        <span class="c-title">Название</span>
+        <span class="c-channel">Канал</span>
+        <span class="c-dur">Время</span>
+        <span class="c-date">Дата</span>
+        <span class="c-size">Размер</span>
+      </div>
+
+      <div class="grid-body" id="grid-body" tabindex="0">
+        <div class="grid-spacer" id="grid-spacer"></div>
+        <div class="grid-rows" id="grid-rows"></div>
+        <div class="empty" id="grid-empty" hidden></div>
+      </div>
+    </section>
+  </section>
+
+  <!-- ================= Синхронизация ================= -->
+  <section class="panel" id="panel-sync" hidden>
+    <div class="toolbar">
+      <h2>Источники</h2>
+      <span class="spacer"></span>
+      <button class="btn" id="sync-all-btn" disabled title="Появится при подключении источников">Синхронизировать всё</button>
+    </div>
+    <div class="table-wrap">
+      <table class="table" id="sources-table">
+        <thead>
+          <tr><th>Источник</th><th>Тип</th><th>Режим</th><th>Всего</th>
+              <th>Скачано</th><th>Ожидает</th><th>Последний синк</th></tr>
+        </thead>
+        <tbody id="sources-body"></tbody>
+      </table>
+      <div class="empty" id="sources-empty">Источников пока нет.<br>
+        <span class="muted">Добавление плейлистов и каналов появится на этапе синхронизации.</span></div>
+    </div>
+
+    <div class="toolbar"><h2>Журнал запусков</h2></div>
+    <div class="table-wrap">
+      <table class="table" id="runs-table">
+        <thead><tr><th>Запуск</th><th>Начат</th><th>Завершён</th><th>Итог</th></tr></thead>
+        <tbody id="runs-body"></tbody>
+      </table>
+      <div class="empty" id="runs-empty">Журнал пуст.</div>
+    </div>
+  </section>
+
+  <!-- ================= Очередь ================= -->
+  <section class="panel" id="panel-queue" hidden>
+    <div class="toolbar">
+      <h2>Очередь загрузки</h2>
+      <span class="spacer"></span>
+      <button class="btn" id="queue-start-btn" disabled title="Появится при подключении загрузчика">Запустить</button>
+    </div>
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>Статус</th><th>Название</th><th>Ключ</th></tr></thead>
+        <tbody id="queue-body"></tbody>
+      </table>
+      <div class="empty" id="queue-empty">Очередь пуста.</div>
+    </div>
+  </section>
+
+  <!-- ================= Настройки ================= -->
+  <section class="panel" id="panel-settings" hidden>
+    <div id="settings-body" class="settings"></div>
+  </section>
+
+</main>
+
+<footer class="foot">
+  <div class="foot-status" id="status">Готов.</div>
+  <button class="link-btn" id="log-toggle">Журнал</button>
+  <div class="foot-version" id="version"></div>
+</footer>
+<pre id="log" class="log" hidden readonly></pre>
+
+<!-- Карточка видео -->
+<div class="overlay" id="detail-overlay" hidden>
+  <div class="card detail-card" role="dialog" aria-modal="true">
+    <div class="card-head">
+      <div class="card-title" id="detail-title">—</div>
+      <button class="icon-btn" id="detail-close" aria-label="Закрыть">✕</button>
+    </div>
+    <div class="card-body" id="detail-body"></div>
+  </div>
+</div>
+
+<!-- Добавление источника: фазы A (индексация) -> B (диалог со счётчиками)
+     -> C (поэтапное создание в БД) -> D (итог и выбор контента).
+     Разметку фаз рисует app.js по add_flow из poll(). -->
+<div class="overlay" id="add-overlay" hidden>
+  <div class="card" role="dialog" aria-modal="true">
+    <div class="card-head">
+      <div class="card-title" id="add-title">Добавить источник</div>
+      <button class="icon-btn" id="add-close" aria-label="Закрыть">✕</button>
+    </div>
+    <div class="card-body" id="add-body"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script>__JS__</script>
+</body>
+</html>

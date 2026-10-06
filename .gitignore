@@ -34,7 +34,8 @@ dist/
 Thumbs.db
 Desktop.ini
 
-# Служебное (opencode)
-_*.py
+# Служебное (opencode): временные скрипты в КОРНЕ проекта.
+# Со слэшем намеренно: без него `_*.py` съедает app/__init__.py.
+/_*.py
 *.bak_opencode
 result_log.txt

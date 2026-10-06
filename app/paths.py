@@ -1,0 +1,50 @@
+"""Пути Omnistash: код, профиль, рабочие папки.
+
+Два корня, которые не стоит путать:
+  base_dir()   - где лежит код (или exe при заморозке): сюда кладутся
+                 ui_src/, скачанное по умолчанию и то, что рядом с программой;
+  profile_dir() - постоянный профиль в %LOCALAPPDATA%\\Omnistash: настройки,
+                 база библиотеки, журналы. Переживает обновления exe.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+APP_NAME = "Omnistash"
+
+
+def base_dir() -> Path:
+    """Папка программы: рядом с exe в заморозке, с omnistash.py в исходниках."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+def ui_dir() -> Path:
+    """Исходники интерфейса (html/css/js), вшиваются в страницу окна."""
+    return base_dir() / "ui_src"
+
+
+def profile_dir() -> Path:
+    """%LOCALAPPDATA%\\Omnistash - создаётся при первом обращении."""
+    root = Path(os.environ.get("LOCALAPPDATA", str(base_dir()))) / APP_NAME
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def settings_path() -> Path:
+    """Файл настроек профиля."""
+    return profile_dir() / "settings.json"
+
+
+def db_path() -> Path:
+    """Файл базы библиотеки (индекс скачанного)."""
+    return profile_dir() / "library.db"
+
+
+def log_path() -> Path:
+    """Журнал приложения (плюс stdout в консоль при отладке)."""
+    return profile_dir() / "omnistash.log"
