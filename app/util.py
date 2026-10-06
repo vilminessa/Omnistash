@@ -12,6 +12,11 @@ import re
 import unicodedata
 from datetime import datetime
 
+# Имя sidecar-файла рядом с видео: "video.mp4" -> "video.post.json".
+# Общий для загрузчика (пишет), сканера (читает) и репозитория (удаляет
+# вместе с копией) - поэтому лежит здесь, а не в одном из них.
+SIDECAR_SUFFIX = ".post.json"
+
 # Запрещённые в Windows символы и управляющие коды.
 _ILLEGAL_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 # Имена, зарезервированные системой (с расширением тоже нельзя).

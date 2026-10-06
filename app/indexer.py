@@ -28,7 +28,7 @@ from pathlib import Path
 
 from . import repo, storages as storages_mod
 from .metadata import PLATFORM, normalize_video, slim_info, video_key
-from .util import norm_title, now_iso, sanitize_name
+from .util import SIDECAR_SUFFIX, norm_title, now_iso, sanitize_name
 
 # Расширения, которые считаем видео (индексируются как kind='video').
 MEDIA_EXT = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".flv", ".wmv",
@@ -36,7 +36,6 @@ MEDIA_EXT = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".flv", ".wmv",
 SUB_EXT = {".srt", ".vtt", ".ass", ".ssa", ".sub"}
 THUMB_EXT = {".jpg", ".jpeg", ".png", ".webp", ".avif"}
 
-SIDECAR_SUFFIX = ".post.json"
 # Токен из тех же символов, что и ID площадки (11 штук у YouTube).
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{11,}")
 # Суффиксы, которыми площадки/парсеры дописывают имя: их надо снять,
@@ -256,6 +255,8 @@ def scan(roots, db, *, progress=None, stop=None, compute_hash: bool = True,
     report = {"roots": [], "scanned": 0, "added": 0, "bound_sidecar": 0,
               "bound_id": 0, "bound_title": 0, "updated": 0, "unchanged": 0,
               "rebound": 0, "missing": 0, "skipped": 0, "sidecars": 0,
+              "duplicates": 0, "possible_moves": 0,
+              "dup_details": [], "move_details": [],
               "errors": [], "stopped": False}
 
     conn = db.conn
@@ -392,6 +393,69 @@ def _selfheal_sidecar(conn, lookups, video_id: int, file_path: str,
     return True
 
 
+DETAIL_LIMIT = 100          # сколько деталей дублей/переездов отдаём в отчёт
+
+
+def _storage_label(lookups, path: str) -> str:
+    """Метка хранилища, в котором лежал (или лежит) указанный путь."""
+    storage, _rel = storages_mod.split_path(lookups.storages, path)
+    return storage.get("label") if storage else ""
+
+
+def _video_title(conn, video_id: int) -> str | None:
+    """Название для отчёта (спрашиваем только когда деталь реально пишем)."""
+    row = conn.execute("SELECT title FROM videos WHERE id=?", (video_id,)).fetchone()
+    return row["title"] if row else None
+
+
+def _ensure_hash(conn, lookups, file_path: str, video_id: int,
+                 compute_hash: bool) -> str | None:
+    """Гарантировать хеш файла в индексе: без него не работает ни поиск
+    копий в другой папке, ни определение переезда.
+
+    Файлы, привязанные по ID или названию, иначе оставались бы без хеша
+    (он считается только при локальном импорте) - и копия лежала бы себе
+    спокойно в двух хранилищах, никому не мешая.
+    """
+    if not compute_hash:
+        return None
+    row = conn.execute("SELECT hash FROM files WHERE path=? AND kind='video'",
+                       (file_path,)).fetchone()
+    if row and row["hash"]:
+        return row["hash"]
+    try:
+        digest = file_hash(file_path)
+    except OSError:
+        return None
+    conn.execute("UPDATE files SET hash=? WHERE path=? AND kind='video'",
+                 (digest, file_path))
+    lookups.by_hash[digest] = (video_id, file_path)
+    return digest
+
+
+def _hash_case(lookups, old_path: str) -> str:
+    """Как понимать совпадение хеша: "moved" / "copy" / "maybe".
+
+    "maybe" - старое хранилище недоступно, выключено или отвязано: глазами
+    проверить нечем, поэтому НЕ гадаем и не двигаем записи молча - файл
+    получает свою строку, а вопрос уходит в отчёт («похоже на переезд»).
+    Догадка здесь хуже честной неопределённости: неверный переезд
+    оставляет бы в индексе путь, которого на диске уже нет.
+    """
+    storage, _rel = storages_mod.split_path(lookups.storages, old_path)
+    if storage is not None:
+        # Известное хранилище обязано быть живым, иначе проверить нечем.
+        if storage.get("status") != "active" or not storage.get("enabled", 1):
+            return "maybe"
+        if not storage.get("available"):
+            return "maybe"
+    # Путь вне хранилищ (или живое хранилище): решает сам файл.
+    try:
+        return "copy" if os.path.exists(old_path) else "moved"
+    except OSError:
+        return "maybe"
+
+
 def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
                compute_hash: bool, multi_title: set[str], report: dict,
                keep_sidecar: bool = True) -> str:
@@ -443,7 +507,9 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
             vid = lookups.by_key.get(key)
             if vid:
                 _register_media(conn, vid, file_path, size, mtime, None, lookups.storages)
-                heal(vid, file_path, None)
+                digest_for_sidecar = _ensure_hash(conn, lookups, file_path, vid,
+                                                  compute_hash)
+                heal(vid, file_path, digest_for_sidecar)
                 _attach_aux(conn, vid, media_path, size, mtime, None, lookups.storages)
                 report["bound_id"] += 1
                 lookups.by_path[file_path] = {"video_id": vid, "hash": None,
@@ -457,7 +523,8 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
             continue
         vid = ids[0]
         _register_media(conn, vid, file_path, size, mtime, None, lookups.storages)
-        heal(vid, file_path, None)
+        heal(vid, file_path, _ensure_hash(conn, lookups, file_path, vid,
+                                          compute_hash))
         _attach_aux(conn, vid, media_path, size, mtime, None, lookups.storages)
         report["bound_title"] += 1
         lookups.by_path[file_path] = {"video_id": vid, "hash": None,
@@ -469,13 +536,17 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
     if known is not None:
         vid = known["video_id"]
         _register_media(conn, vid, file_path, size, mtime, None, lookups.storages)
-        heal(vid, file_path, known.get("hash"))
+        heal(vid, file_path, _ensure_hash(conn, lookups, file_path, vid,
+                                          compute_hash))
         report["updated"] += 1
         lookups.by_path[file_path] = {"video_id": vid, "hash": known["hash"],
                                       "size": size, "mtime": mtime}
         return "changed"
 
-    # 5. хеш: файл мог переезжать
+    # 5. хеш: файл мог переезжать - а мог стать просто копией.
+    #    Три исхода, и путать их нельзя: строка «уехала» за файлом (переезд),
+    #    файл получил СВОЮ строку (честная копия) или старое хранилище
+    #    недоступно и решать может только человек (вероятный переезд).
     digest = None
     if compute_hash:
         try:
@@ -484,16 +555,38 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
             report["errors"].append(f"{file_path}: {exc}")
         if digest and digest in lookups.by_hash:
             vid, old_path = lookups.by_hash[digest]
-            # Переезд: строка едет за файлом (та же запись, новый путь и
-            # новое хранилище), а не плодит дубль со старым адресом.
+            case = _hash_case(lookups, old_path)
             storage, rel = storages_mod.split_path(lookups.storages, file_path)
-            conn.execute(
-                "UPDATE files SET path=?, storage_id=?, rel_path=?, size=?, "
-                "mtime=?, missing=0 WHERE video_id=? AND hash=? AND path=?",
-                (file_path, storage["id"] if storage else None,
-                 rel if storage else None, size, mtime, vid, digest, old_path))
-            if old_path != file_path:
+            if case == "moved":
+                # Старый путь пропал, хранилище живо: это переезд.
+                # Строка едет за файлом, дубль не появляется.
+                conn.execute(
+                    "UPDATE files SET path=?, storage_id=?, rel_path=?, size=?, "
+                    "mtime=?, missing=0 WHERE video_id=? AND hash=? AND path=?",
+                    (file_path, storage["id"] if storage else None,
+                     rel if storage else None, size, mtime, vid, digest, old_path))
                 report["rebound"] += 1
+            else:
+                # Строка остаётся на старом месте, файл получает свою: так
+                # индекс честен в обоих случаях («лежит где лежал» + «есть
+                # ещё и тут»), а разбор - в отчёте.
+                repo.record_file(conn, vid, file_path, "video", size=size,
+                                 mtime=mtime, digest=digest,
+                                 storages_list=lookups.storages)
+                if case == "copy":
+                    report["duplicates"] += 1
+                    if len(report["dup_details"]) < DETAIL_LIMIT:
+                        report["dup_details"].append(
+                            {"video_id": vid, "path": file_path,
+                             "other": old_path,
+                             "title": _video_title(conn, vid)})
+                else:
+                    report["possible_moves"] += 1
+                    if len(report["move_details"]) < DETAIL_LIMIT:
+                        report["move_details"].append(
+                            {"video_id": vid, "path": file_path,
+                             "other": old_path, "title": _video_title(conn, vid),
+                             "from": _storage_label(lookups, old_path)})
             lookups.by_path[file_path] = {"video_id": vid, "hash": digest,
                                           "size": size, "mtime": mtime}
             heal(vid, file_path, digest)

@@ -41,12 +41,20 @@
         <input type="search" id="search" placeholder="Поиск по названию, описанию, тегам…" autocomplete="off">
         <select id="status-filter" title="Фильтр по статусу"><option value="">все статусы</option></select>
         <span class="spacer"></span>
+        <button class="btn ghost" id="dedupe-btn"
+                title="Найти копии файлов и разобрать их">Дубликаты</button>
         <span class="muted" id="list-total"></span>
       </div>
 
       <div class="scan-bar" id="scan-bar" hidden>
         <div class="scan-track"><div class="scan-fill" id="scan-fill"></div></div>
         <div class="scan-text" id="scan-text"></div>
+      </div>
+
+      <div class="notice" id="dedupe-note" hidden>
+        <span id="dedupe-note-text"></span>
+        <span class="spacer"></span>
+        <button class="btn ghost" id="dedupe-note-btn">Разобрать</button>
       </div>
 
       <div class="sel-bar" id="sel-bar" hidden>
@@ -200,6 +208,17 @@
       <button class="icon-btn" id="add-close" aria-label="Закрыть">✕</button>
     </div>
     <div class="card-body" id="add-body"></div>
+  </div>
+</div>
+
+<!-- Сверка: копии файлов и «похоже на переезд» -->
+<div class="overlay" id="dedupe-overlay" hidden>
+  <div class="card" role="dialog" aria-modal="true">
+    <div class="card-head">
+      <div class="card-title">Сверка и дубликаты</div>
+      <button class="icon-btn" id="dedupe-close" aria-label="Закрыть">✕</button>
+    </div>
+    <div class="card-body" id="dedupe-body"></div>
   </div>
 </div>
 

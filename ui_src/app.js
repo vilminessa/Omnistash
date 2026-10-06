@@ -33,9 +33,11 @@
     selected: null,        // Set(id): мультивыбор в таблице
     storages: [],          // хранилища из poll (вместо старых корней)
     selStorage: "",        // явный выбор в панели выделения
-    wizardDismissed: false // «настроить позже» на первом запуске
+    wizardDismissed: false, // «настроить позже» на первом запуске
+    dedupeResolved: null   // Set путей: разобранные «возможные переезды»
   };
   state.selected = new Set();
+  state.dedupeResolved = new Set();
 
   /* ------------------------------------------------------------------ *
    *  Мост к Python
@@ -231,10 +233,14 @@
   }
 
   function renderScan(scan) {
+    state.scan = scan || null;
     var bar = $("scan-bar");
-    if (!scan) { bar.hidden = true; return; }
+    if (!scan) { bar.hidden = true; renderDedupeNote(null); return; }
     if (scan.running) {
+      // Новый прогон - новая сверка: прошлые разборы больше неактуальны.
+      state.dedupeResolved.clear();
       bar.hidden = false;
+      renderDedupeNote(null);
       var percent = scan.total ? Math.round(scan.done * 100 / scan.total) : 0;
       $("scan-fill").style.width = percent + "%";
       $("scan-text").textContent =
@@ -249,6 +255,149 @@
     } else {
       bar.hidden = true;
     }
+    renderDedupeNote(scan);
+  }
+
+  function renderDedupeNote(scan) {
+    // После скана стоит напомнить о том, что требует ручного решения:
+    // ни копии, ни «возможный переезд» не разрешаются сами.
+    var note = $("dedupe-note");
+    if (!scan || scan.running) { note.hidden = true; return; }
+    var parts = [];
+    // Разобранные строки больше не напоминают о себе: вычтем их из счётчика.
+    var moves = Math.max(0, (scan.move_count || 0) - state.dedupeResolved.size);
+    if (moves) parts.push("похоже на переезд: " + moves);
+    if (scan.dup_count) parts.push("копий найдено: " + scan.dup_count);
+    if (!parts.length) { note.hidden = true; return; }
+    note.hidden = false;
+    $("dedupe-note-text").textContent =
+      "Сверка нашла: " + parts.join(" · ") +
+      ". Разберите - в индексе должно остаться по одной копии.";
+  }
+
+  /* ------------------------------------------------------------------ *
+   *  Сверка: возможные переезды и дубликаты
+   * ------------------------------------------------------------------ */
+
+  function openDedupe() {
+    call("duplicates").then(function (data) {
+      data = data || { groups: [], count: 0, files: 0 };
+      // Разобранные строки показываем только до пересканирования.
+      var moves = ((state.scan && state.scan.possible_moves) || [])
+        .filter(function (move) {
+          return !state.dedupeResolved.has(move.path);
+        });
+      $("dedupe-body").innerHTML = dedupeHtml(data, moves);
+      $("dedupe-overlay").hidden = false;
+      bindDedupe(data, moves);
+      renderDedupeNote(state.scan);
+    });
+  }
+
+  function dedupeHtml(data, moves) {
+    var html = "";
+    if (moves.length) {
+      html += '<div class="field-label">Возможные переезды (' + moves.length + ")</div>" +
+        '<div class="field-hint">Файл совпал по хешу с записью, которая ' +
+        "указывает на недоступное хранилище: проверить нечем, поэтому я не " +
+        "стал гадать. Скажите, что произошло.</div>" +
+        '<div class="dedupe-group">' + moves.map(function (move, index) {
+          return '<div class="dedupe-row gone">' +
+            '<span class="dedupe-title">' + esc(move.title || move.path) + "</span>" +
+            '<span class="dedupe-actions">' +
+              '<button class="btn" data-move-keep="' + index + '">Переехал</button>' +
+              '<button class="link-btn" data-move-copy="' + index + '">Это копия</button>' +
+            "</span>" +
+            '<span class="dedupe-meta"><span class="path">' + esc(move.path) +
+            "</span><span>запись была в: " +
+            esc(move.from || "неизвестном месте") + "</span></span>" +
+            "</div>";
+        }).join("") + "</div>";
+    }
+
+    if (data.count) {
+      html += '<div class="field-label">Дубликаты (' + data.count +
+        " групп, " + data.files + " файлов)</div>" +
+        '<div class="field-hint">Оставьте одну копию - остальные будут ' +
+        "удалены с диска вместе с их сайдкарами.</div>" +
+        '<div class="dedupe-group">' + data.groups.map(function (group) {
+          return '<div class="dedupe-row" data-group="' + group.video_id + '">' +
+            '<span class="dedupe-title" title="' + esc(group.title) + '">' +
+            esc(group.title || group.key) + "</span>" +
+            '<span class="dedupe-actions">' +
+              '<button class="btn" data-dedupe="' + group.video_id +
+              '">Оставить выбранную</button></span>' +
+            '<span class="dedupe-meta">' + group.files.map(function (file, index) {
+              return "<label><input type=\"radio\" name=\"keep-" + group.video_id +
+                "\" value=\"" + file.id + "\"" + (index === 0 ? " checked" : "") +
+                '><span class="path">' + esc(file.path) + "</span><span>" +
+                humanSize(file.size) +
+                (file.storage ? " · " + esc(file.storage) : "") +
+                "</span></label>";
+            }).join("") + "</span></div>";
+        }).join("") + "</div>";
+    }
+
+    if (!html) {
+      html = '<div class="muted">Копий не найдено: у каждого видео на диске ' +
+        "лежит одна копия.</div>";
+    }
+    return html;
+  }
+
+  function bindDedupe(data, moves) {
+    var body = $("dedupe-body");
+
+    Array.prototype.forEach.call(
+      body.querySelectorAll("[data-move-keep]"), function (btn) {
+        btn.addEventListener("click", function () {
+          var move = moves[Number(btn.dataset.moveKeep)];
+          if (!move) return;
+          call("dedupe_resolve", { video_id: move.video_id, keep_path: move.path })
+            .then(function (res) {
+              if (!res || res.error) { toast(res && res.error, true); return; }
+              state.dedupeResolved.add(move.path);
+              toast("Оставлена копия: " + res.kept);
+              openDedupe();
+            });
+        });
+      });
+
+    Array.prototype.forEach.call(
+      body.querySelectorAll("[data-move-copy]"), function (btn) {
+        btn.addEventListener("click", function () {
+          var row = btn.closest(".dedupe-row");
+          var index = Number(btn.dataset.moveCopy);
+          var move = moves[index];
+          if (move) state.dedupeResolved.add(move.path);
+          if (row) row.remove();
+          toast("Принято: пара остаётся в разделе «Дубликаты»");
+          renderDedupeNote(state.scan);
+        });
+      });
+
+    Array.prototype.forEach.call(
+      body.querySelectorAll("[data-dedupe]"), function (btn) {
+        btn.addEventListener("click", function () {
+          var row = btn.closest(".dedupe-row");
+          var keep = row ? row.querySelector("input:checked") : null;
+          if (!keep) { toast("Выберите, какую копию оставить", true); return; }
+          var label = keep.closest("label");
+          var where = label ? label.querySelector(".path").textContent : "";
+          if (!confirm("Удалить остальные копии с диска?\n\nОстанется:\n" + where)) {
+            return;
+          }
+          call("dedupe_resolve", {
+            video_id: Number(btn.dataset.dedupe),
+            keep_file_id: Number(keep.value)
+          }).then(function (res) {
+            if (!res || res.error) { toast(res && res.error, true); return; }
+            toast("Оставлена копия: " + res.kept +
+              (res.errors && res.errors.length ? " (часть не удалилась)" : ""));
+            openDedupe();
+          });
+        });
+      });
   }
 
   function renderTree(tree) {
@@ -1421,6 +1570,13 @@
       switchTab("settings");
     });
 
+    // Сверка: копии файлов и «похоже на переезд».
+    $("dedupe-btn").addEventListener("click", openDedupe);
+    $("dedupe-note-btn").addEventListener("click", openDedupe);
+    $("dedupe-close").addEventListener("click", function () {
+      $("dedupe-overlay").hidden = true;
+    });
+
     $("queue-start-btn").addEventListener("click", function () {
       call("queue_start").then(function (res) {
         if (res && res.error) toast(res.error, true);
@@ -1556,6 +1712,21 @@
     ];
     // ?empty=1 - «первый запуск»: показать стартовый диалог выбора папки.
     if (location.search.indexOf("empty") >= 0) mockStorages.length = 0;
+    // Симуляция скана: заканчивается с находками сверки, чтобы были
+    // видны уведомление и раздел «Возможные переезды».
+    var mockScan = { running: false, done: 0, total: 0, summary: null,
+                     duplicates: [], possible_moves: [],
+                     dup_count: 0, move_count: 0 };
+    var mockDupes = [
+      { video_id: 7, key: "youtube:dup00000001", title: "Два раза",
+        copies: 2, bytes: 400000,
+        files: [
+          { id: 101, path: "D:\\видео\\библиотека\\Два раза [dup00000001].mp4",
+            size: 200000, storage: "библиотека", available: 1 },
+          { id: 102, path: "E:\\Внешний 4ТБ\\Два раза [dup00000001].mp4",
+            size: 200000, storage: "Внешний 4ТБ", available: 0 }
+        ] }
+    ];
     // Схема нужна, чтобы в превью рисовалась карточка настроек.
     // Должна совпадать с app/settings_schema.py (ключи и типы полей).
     var schema = [
@@ -1606,7 +1777,7 @@
                           total: 3, downloaded: 1, sync_mode: "partial",
                           last_synced_at: "2026-10-05T21:00:00" }]
           },
-          scan: null,
+          scan: JSON.parse(JSON.stringify(mockScan)),
           sources: [{ id: 1, title: "Тестовый плейлист", kind_label: "плейлист",
                       sync_mode: "partial", total: 3, downloaded: 1, pending: 2,
                       last_synced_at: "2026-10-06T16:38:45" }],
@@ -1688,6 +1859,40 @@
       pick_folder: function () {
         // В превью «выбираем» новую папку: обновляем пути у превью-хранилищ.
         return Promise.resolve("D:\\видео\\подборки");
+      },
+      start_scan: function () {
+        mockScan = { running: true, done: 0, total: 120,
+                     path: "D:\\видео\\библиотека", summary: null,
+                     duplicates: [], possible_moves: [], dup_count: 0,
+                     move_count: 0 };
+        setTimeout(function () {
+          mockScan = {
+            running: false, done: 120, total: 120, path: "",
+            summary: "Готово: скан 120 файлов, копий найдено 1, " +
+                     "похоже на переезд 1",
+            duplicates: [], dup_count: 1, move_count: 1,
+            possible_moves: [
+              { video_id: 7, title: "Переехавшее видео",
+                path: "D:\\видео\\подборки\\Переехавшее [mov00000001].mp4",
+                other: "E:\\Внешний 4ТБ\\Переехавшее [mov00000001].mp4",
+                from: "Внешний 4ТБ" }
+            ]
+          };
+        }, 1600);
+        return Promise.resolve({ ok: true });
+      },
+      stop_scan: function () { return Promise.resolve({ ok: true }); },
+      duplicates: function () {
+        return Promise.resolve({ groups: JSON.parse(JSON.stringify(mockDupes)),
+                                 count: mockDupes.length, files: 2 });
+      },
+      dedupe_resolve: function (req) {
+        mockDupes = mockDupes.filter(function (g) {
+          return g.video_id !== Number(req.video_id);
+        });
+        return Promise.resolve({ ok: true, removed: ["путь/к/файлу"],
+                                 errors: [], kept: "путь/к/оставленному",
+                                 title: "Два раза" });
       },
       storage_add: function (req) {
         if ((req || {}).path === "D:\\видео\\библиотека") {
@@ -1779,9 +1984,7 @@
         mockSync.queued = mockSync.new_total;
         return Promise.resolve({ queued: mockSync.new_total });
       },
-      add_start: function () { return Promise.resolve({ error: "в превью недоступно" }); },
-      start_scan: function () { return Promise.resolve({ error: "в превью недоступно" }); },
-      stop_scan: function () { return Promise.resolve({}); }
+      add_start: function () { return Promise.resolve({ error: "в превью недоступно" }); }
     };
     $("preview-badge").hidden = false;
     bootOnce();

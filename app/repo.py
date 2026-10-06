@@ -13,13 +13,15 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from collections import Counter
+from pathlib import Path
 
 from . import storages as storages_mod
 from .db import STATUSES, SYNC_MODES
 from .metadata import PLATFORM, local_key, video_key
-from .util import now_iso
+from .util import SIDECAR_SUFFIX, now_iso
 
 # Подписи статусов для таблицы и карточки.
 STATUS_LABELS = {
@@ -729,6 +731,167 @@ def sources(conn: sqlite3.Connection) -> list[dict]:
         item["kind_label"] = KIND_LABELS.get(item["kind"], item["kind"])
         out.append(item)
     return out
+
+
+def find_duplicates(conn, limit: int = 200) -> list[dict]:
+    """Группы видео, у которых на диске больше одной живой копии.
+
+    «Дубль» - производное состояние (у видео 2+ файлов kind='video'),
+    поэтому отдельной колонки не нужно: вопрос решается на месте - какую
+    копию оставить.
+    """
+    groups = []
+    rows = conn.execute(
+        """SELECT v.id AS video_id, v.key, v.title,
+                  COUNT(*) AS copies, SUM(COALESCE(f.size,0)) AS bytes
+             FROM videos v JOIN files f ON f.video_id = v.id
+            WHERE f.kind='video' AND f.missing=0
+            GROUP BY v.id HAVING COUNT(*) > 1
+            ORDER BY bytes DESC LIMIT ?""", (int(limit),)).fetchall()
+    for row in rows:
+        files = [dict(item) for item in conn.execute(
+            """SELECT f.id, f.path, f.size, f.mtime, s.label AS storage,
+                      s.available, s.status AS storage_status
+                 FROM files f LEFT JOIN storages s ON s.id = f.storage_id
+                WHERE f.video_id=? AND f.kind='video' AND f.missing=0
+                ORDER BY f.id""", (row["video_id"],))]
+        groups.append({"video_id": row["video_id"], "key": row["key"],
+                       "title": row["title"], "copies": row["copies"],
+                       "bytes": row["bytes"], "files": files})
+    return groups
+
+
+def _aux_stem(path: str) -> str:
+    """Стем файла с учётом составного суффикса сайдкара.
+
+    `Path('x.post.json').with_suffix('')` даёт 'x.post' - а сайдкар лежит
+    как 'x.post.json' рядом с 'x.mp4'. Сравнивать стемы надо по-настоящему,
+    иначе сайдкар уцелевает и становится сиротой после удаления копии.
+    """
+    target = Path(path)
+    name = target.name
+    if name.lower().endswith(SIDECAR_SUFFIX):
+        name = name[:-len(SIDECAR_SUFFIX)]
+    else:
+        name = target.stem
+    return str(target.parent / name).lower()
+
+
+def delete_file_cascade(conn, file_id: int) -> dict:
+    """Удалить файл с диска вместе с его строкой (и сайдкаром рядом).
+
+    Порядок намеренный: сначала диск, потом базу. Если файл снять не
+    удалось (занят, нет прав) - строка остаётся, и индекс не рассказывает
+    неправду о том, чего на диске больше нет.
+    """
+    row = conn.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
+    if not row:
+        return {"error": "Файл не найден"}
+    path = row["path"]
+
+    siblings = []
+    if row["kind"] == "video":
+        # Сайдкар/субтитры/обложка лежат рядом с тем же stem: после
+        # удаления копии они становятся сиротами.
+        stem = _aux_stem(path)
+        siblings = [dict(s) for s in conn.execute(
+            """SELECT id, path FROM files
+                WHERE video_id=? AND kind<>'video' AND missing=0""",
+            (row["video_id"],))
+            if _aux_stem(s["path"]) == stem]
+
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError as exc:
+        return {"error": f"Не удалось удалить {path}: {exc}"}
+
+    removed = [path]
+    with conn:
+        for sibling in siblings:
+            try:
+                if os.path.exists(sibling["path"]):
+                    os.remove(sibling["path"])
+                removed.append(sibling["path"])
+            except OSError:
+                continue  # файл занят - строку оставляем, её поймает скан
+            conn.execute("DELETE FROM files WHERE id=?", (sibling["id"],))
+        conn.execute("DELETE FROM files WHERE id=?", (file_id,))
+        # Если это была последняя живая копия - честно отмечаем пропажу.
+        left = conn.execute(
+            "SELECT COUNT(*) n FROM files WHERE video_id=? AND kind='video' "
+            "AND missing=0", (row["video_id"],)).fetchone()["n"]
+        if not left:
+            conn.execute(
+                "UPDATE videos SET status='missing', updated_at=? WHERE id=?",
+                (now_iso(), row["video_id"]))
+    return {"ok": True, "removed": removed, "video_id": row["video_id"]}
+
+
+def resolve_duplicates(conn, video_id: int, keep_file_id: int) -> dict:
+    """Оставить одну копию: удалить с диска все остальные файлы видео.
+
+    Работает и для «возможного переезда»: там оставляем новый файл, а
+    строку старого (в недоступном хранилище) убираем - если старая копия
+    однажды вернётся, скан найдёт её снова и снова предложит выбор.
+    """
+    keep = conn.execute(
+        "SELECT * FROM files WHERE id=? AND video_id=? AND kind='video'",
+        (keep_file_id, video_id)).fetchone()
+    if not keep:
+        return {"error": "Не выбран файл, который оставить"}
+
+    others = conn.execute(
+        "SELECT id, path FROM files WHERE video_id=? AND kind='video' "
+        "AND id<>? AND missing=0", (video_id, keep_file_id)).fetchall()
+    errors = []
+    removed = []
+    for other in others:
+        result = delete_file_cascade(conn, other["id"])
+        if result.get("error"):
+            errors.append(result["error"])
+        else:
+            removed.extend(result.get("removed") or [])
+    title = conn.execute("SELECT title FROM videos WHERE id=?",
+                         (video_id,)).fetchone()
+    return {"ok": not errors, "removed": removed, "errors": errors,
+            "kept": keep["path"],
+            "title": title["title"] if title else None}
+
+
+def rebind_file(conn, file_id: int, video_id: int) -> dict:
+    """Привязать файл к другой записи вручную (остаток, который не опознался).
+
+    Локальное видео, оставшееся без файлов, удаляется: знать о нём больше
+    нечего.
+    """
+    file_row = conn.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
+    if not file_row:
+        return {"error": "Файл не найден"}
+    target = conn.execute("SELECT id, title FROM videos WHERE id=?",
+                          (video_id,)).fetchone()
+    if not target:
+        return {"error": "Видео не найдено"}
+    old_video = file_row["video_id"]
+    if old_video == video_id:
+        return {"error": "Файл уже привязан к этому видео"}
+
+    with conn:
+        conn.execute("UPDATE files SET video_id=? WHERE id=?", (video_id, file_id))
+        if file_row["kind"] == "video":
+            conn.execute(
+                """UPDATE videos SET status='downloaded', updated_at=?
+                   WHERE id=? AND status IN ('known','queued','downloading',
+                                             'failed','missing','detached')""",
+                (now_iso(), video_id))
+        left = conn.execute(
+            "SELECT COUNT(*) n FROM files WHERE video_id=?", (old_video,)).fetchone()["n"]
+        if not left:
+            old = conn.execute("SELECT platform FROM videos WHERE id=?",
+                               (old_video,)).fetchone()
+            if old and old["platform"] == "local":
+                conn.execute("DELETE FROM videos WHERE id=?", (old_video,))
+    return {"ok": True, "title": target["title"]}
 
 
 def next_queued(conn: sqlite3.Connection) -> dict | None:

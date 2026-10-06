@@ -352,7 +352,8 @@ class Api:
             return
 
         stats = {k: v for k, v in report.items()
-                 if k not in ("roots", "errors", "stopped")}
+                 if k not in ("roots", "errors", "stopped",
+                              "dup_details", "move_details")}
         stats["duration_s"] = report["duration_s"]
         repo.finish_run(self.db.conn, run_id, stats)
         for line in report["roots"]:
@@ -373,6 +374,10 @@ class Api:
             parts.append(f"переехало {report['rebound']}")
         if report.get("sidecars"):
             parts.append(f"дописано сайдкаров {report['sidecars']}")
+        if report.get("duplicates"):
+            parts.append(f"копий найдено {report['duplicates']}")
+        if report.get("possible_moves"):
+            parts.append(f"похоже на переезд {report['possible_moves']}")
         if report["missing"]:
             parts.append(f"пропало {report['missing']}")
         if report["errors"]:
@@ -383,14 +388,81 @@ class Api:
             summary = "Готово: " + ", ".join(parts)
 
         with self._lock:
-            self._scan = {"running": False, "done": report["scanned"],
-                          "total": report["scanned"], "summary": summary}
+            self._scan = {
+                "running": False, "done": report["scanned"],
+                "total": report["scanned"], "summary": summary,
+                # Детали для раздела «Дубликаты»: копии и вероятные переезды,
+                # найденные только что (список групп дублей тянется отдельно).
+                "duplicates": report.get("dup_details") or [],
+                "possible_moves": report.get("move_details") or [],
+                "dup_count": report.get("duplicates") or 0,
+                "move_count": report.get("possible_moves") or 0,
+            }
             self._busy = False
             self._status = "Готово" if not report["stopped"] else "Остановлено"
             self._heavy_at = 0.0
         self._log(summary + f" ({report['duration_s']} c)")
 
     # ------------------------------------------------------------------ #
+    #  Сверка: дубликаты и вероятные переезды
+    # ------------------------------------------------------------------ #
+
+    def duplicates(self) -> dict:
+        """Группы видео с несколькими живыми копиями (полный список)."""
+        groups = repo.find_duplicates(self.db.conn)
+        return {"groups": groups, "count": len(groups),
+                "files": sum(g["copies"] for g in groups)}
+
+    def dedupe_resolve(self, request=None) -> dict:
+        """«Оставить выбранную копию»: удалить остальные с диска.
+
+        Работает и для «возможного переезда»: там оставляют новый файл.
+        """
+        request = request or {}
+        try:
+            video_id = int(request.get("video_id"))
+            keep_file_id = int(request.get("keep_file_id") or 0)
+        except (TypeError, ValueError, KeyError):
+            return {"error": "Не выбран файл, который оставить"}
+        if not keep_file_id and request.get("keep_path"):
+            # Для «возможного переезда» у UI есть путь нового файла,
+            # а его id - только в базе.
+            row = self.db.conn.execute(
+                "SELECT id FROM files WHERE path=? AND kind='video'",
+                (str(request["keep_path"]),)).fetchone()
+            if not row:
+                return {"error": "Файл-кандидат не найден в индексе"}
+            keep_file_id = int(row["id"])
+            if row:
+                keep_file_id = int(row["id"])
+        if not keep_file_id:
+            return {"error": "Не выбран файл, который оставить"}
+        result = repo.resolve_duplicates(self.db.conn, video_id, keep_file_id)
+        if result.get("error"):
+            return result
+        self._touch()
+        self._log("Дубликаты: оставлена копия {kept} ({title}), удалено файлов "
+                  "{n}".format(kept=result["kept"],
+                               title=result.get("title") or "?",
+                               n=len(result["removed"])))
+        for error in result.get("errors") or []:
+            self._log("Не удалилось: " + error)
+        return result
+
+    def rebind_file(self, request=None) -> dict:
+        """Привязать неопознанный файл к видео из библиотеки вручную."""
+        request = request or {}
+        try:
+            file_id = int(request.get("file_id"))
+            video_id = int(request.get("video_id"))
+        except (TypeError, ValueError, KeyError):
+            return {"error": "Не выбран файл или видео"}
+        result = repo.rebind_file(self.db.conn, file_id, video_id)
+        if result.get("error"):
+            return result
+        self._touch()
+        self._log(f"Файл привязан вручную к «{result['title']}»")
+        return result
 
     # ------------------------------------------------------------------ #
     #  Добавление источника: A индексация -> B диалог -> C создание -> D итог

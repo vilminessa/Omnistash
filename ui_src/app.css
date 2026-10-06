@@ -590,6 +590,30 @@ body[data-theme="light"] .row { border-bottom-color: rgba(0, 0, 0, .05); }
 .storage-default input { accent-color: var(--accent); }
 .storage-toolbar { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
 
+/* ---------------------------- сверка/дубликаты ----------------------- */
+
+.dedupe-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.dedupe-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto;
+  gap: 8px 12px;
+  align-items: center;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.dedupe-row.gone { border-style: dashed; border-color: var(--warn); }
+.dedupe-title { font-weight: 600; font-size: 12.5px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.dedupe-meta { grid-column: 1 / -1; display: flex; flex-direction: column;
+  gap: 2px; font-size: 11.5px; color: var(--muted); }
+.dedupe-meta .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dedupe-actions { display: flex; gap: 8px; align-items: center; justify-self: end; }
+.dedupe-actions label { display: inline-flex; gap: 5px; align-items: center;
+  font-size: 11.5px; color: var(--muted); cursor: pointer; }
+.dedupe-actions input { accent-color: var(--accent); }
+
 /* ---------------------------- низ окна ---------------------------- */
 
 .foot {

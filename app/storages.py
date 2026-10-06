@@ -243,13 +243,19 @@ def add(conn, path: str, *, label: str | None = None, kind: str = "local",
             root_key = None      # нет прав на запись - работаем и без маркера
 
     now = now_iso()
+    free = total = None
+    try:
+        free, total, _used = shutil.disk_usage(normalized)
+    except OSError:
+        pass
     conn.execute(
         """INSERT INTO storages (id, path, label, kind, status, enabled,
-                                 recursive, root_key, last_seen_at, created_at,
-                                 updated_at)
-           VALUES (?,?,?,?,'active',?,?,?,?,?,?)""",
+                                 recursive, root_key, available, last_seen_at,
+                                 free_bytes, total_bytes, created_at, updated_at)
+           VALUES (?,?,?,?,'active',?,?,?,?,?,?,?,?,?)""",
         (storage_id, normalized, label or label_for(normalized), kind,
-         1 if enabled else 0, 1 if recursive else 0, root_key, now, now, now))
+         1 if enabled else 0, 1 if recursive else 0, root_key, 1, now,
+         free, total, now, now))
     return get(conn, storage_id)
 
 
