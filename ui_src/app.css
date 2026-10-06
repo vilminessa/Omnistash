@@ -516,6 +516,8 @@ body[data-theme="light"] .row { border-bottom-color: rgba(0, 0, 0, .05); }
 
 .kv-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; }
 
+.detail-actions { justify-content: flex-start; padding-top: 0; }
+
 .picker {
   max-height: 300px;
   overflow: auto;

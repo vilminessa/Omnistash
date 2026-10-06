@@ -431,6 +431,32 @@
       }).join("\n"));
 
       var html = '<dl class="kv">' + kv.join("") + "</dl>";
+
+      // Действия по статусу: качаем только то, чего нет; скачанное -
+      // открываем там, где оно лежит.
+      var actions = [];
+      if (["known", "failed", "missing"].indexOf(data.status) >= 0) {
+        actions.push('<button class="btn primary" data-detail="download">Скачать</button>');
+      }
+      if (data.status === "queued" || data.status === "downloading") {
+        actions.push('<button class="btn" data-detail="queue">К очереди</button>');
+      }
+      if (data.status === "downloaded") {
+        var localFile = (data.files || []).filter(function (f) {
+          return f.kind === "video" && !f.missing;
+        })[0];
+        if (localFile) {
+          actions.push('<button class="btn" data-detail="folder">Открыть папку</button>');
+        }
+      }
+      if (data.webpage_url) {
+        actions.push('<button class="btn ghost" data-detail="source">Открыть на площадке</button>');
+      }
+      if (actions.length) {
+        html = '<div class="card-actions detail-actions">' +
+          actions.join("") + "</div>" + html;
+      }
+
       var raw = data.raw && Object.keys(data.raw).length
         ? '<div class="muted">raw_json (полные метаданные площадки)</div>' +
           '<pre class="json">' + esc(JSON.stringify(data.raw, null, 1)) + "</pre>"
@@ -438,7 +464,38 @@
           "синхронизации или загрузки.</div>";
       $("detail-body").innerHTML = html + raw;
       $("detail-overlay").hidden = false;
+      bindDetail(data);
     });
+  }
+
+  function bindDetail(data) {
+    Array.prototype.forEach.call(
+      document.querySelectorAll("#detail-body [data-detail]"), function (btn) {
+        btn.addEventListener("click", function () {
+          var action = btn.dataset.detail;
+          if (action === "download") {
+            call("enqueue", { ids: [data.id] }).then(function (res) {
+              if (res && res.error) { toast(res.error, true); return; }
+              toast("В очередь поставлено: " + (res ? res.queued : 0));
+              $("detail-overlay").hidden = true;
+              switchTab("queue");
+            });
+          } else if (action === "queue") {
+            $("detail-overlay").hidden = true;
+            switchTab("queue");
+          } else if (action === "folder") {
+            // Папка - это каталог самого видео, а не его родитель от корня.
+            var file = (data.files || []).filter(function (f) {
+              return f.kind === "video" && !f.missing;
+            })[0];
+            if (file) {
+              call("open_path", file.path.replace(/[\\/][^\\/]*$/, ""));
+            }
+          } else if (action === "source" && data.webpage_url) {
+            call("open_url", data.webpage_url);
+          }
+        });
+      });
   }
 
   /* ------------------------------------------------------------------ *
@@ -1291,9 +1348,18 @@
       get_video: function (id) {
         var row = rows.filter(function (r) { return r.id === id; })[0] || rows[0];
         return Promise.resolve(Object.assign({}, row, {
-          origin: "preview", raw: { preview: true, id: row.key }
+          origin: "preview",
+          webpage_url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+          files: [{ kind: "video", size: 240000000, missing: 0,
+                    path: "D:\\видео\\библиотека\\Ночной дождик [dQw4w9WgXcQ].mp4" }],
+          raw: { preview: true, id: row.key }
         }));
       },
+      enqueue: function (req) {
+        return Promise.resolve({ queued: ((req || {}).ids || []).length });
+      },
+      open_path: function () { return Promise.resolve(null); },
+      open_url: function () { return Promise.resolve(null); },
       save_setting: function (pair) {
         settings[pair.key] = pair.value;
         return Promise.resolve({ settings: settings, settings_rev: 1 });

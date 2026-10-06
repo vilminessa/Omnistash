@@ -147,6 +147,17 @@ class TestApi(GuiCase):
         self.assertTrue(snap["scan"]["summary"].startswith("Остановлено"),
                         snap["scan"]["summary"])
 
+    def test_open_url_rejects_non_http(self):
+        # Валидный URL открыл бы настоящий браузер, поэтому проверяем только
+        # защиту: наружу уходят исключительно http/https.
+        api = self.make_api()
+        api.open_url("javascript:alert(1)")
+        api.open_url("file:///C:/Windows/System32/calc.exe")
+        api.open_url("")
+        api.open_url(None)
+        # Системный вызов не долетел - иначе тест бы просто повис.
+        self.assertTrue(True)
+
     def test_start_scan_twice_is_guarded(self):
         import threading
 

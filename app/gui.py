@@ -229,6 +229,17 @@ class Api:
         except OSError as exc:
             self._log(f"Не открылось {path}: {exc}")
 
+    def open_url(self, url) -> None:
+        """Открыть страницу площадки в браузере по умолчанию."""
+        text = str(url or "").strip()
+        if not text.startswith(("http://", "https://")):
+            return
+        try:
+            import webbrowser
+            webbrowser.open(text)
+        except Exception as exc:  # noqa: BLE001 - браузер может быть не настроен
+            self._log(f"Не открылось {text}: {exc}")
+
     # ------------------------------------------------------------------ #
     #  Переиндексация
     # ------------------------------------------------------------------ #
