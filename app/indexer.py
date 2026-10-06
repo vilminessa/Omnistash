@@ -243,17 +243,20 @@ def _attach_aux(conn, video_id: int, media_path: Path, size, mtime, digest,
                          storages_list=storages_list)
 
 
-def scan(roots, db, *, progress=None, stop=None, compute_hash: bool = True) -> dict:
+def scan(roots, db, *, progress=None, stop=None, compute_hash: bool = True,
+         keep_sidecar: bool = True) -> dict:
     """Переиндексировать корни. Возвращает отчёт (см. ScanReport-словарь).
 
     progress(done, total, path) - для полосы прогресса; stop - событие,
-        по которому скан вежливо останавливается (кнопка «Отмена»).
+        по которому скан вежливо останавливается (кнопка «Отмена»);
+    keep_sidecar - дописывать ли post.json файлам, у которых его нет
+        (самоусиление: дешёвая переинициализация при следующем переезде).
     """
     started = time.time()
     report = {"roots": [], "scanned": 0, "added": 0, "bound_sidecar": 0,
               "bound_id": 0, "bound_title": 0, "updated": 0, "unchanged": 0,
-              "rebound": 0, "missing": 0, "skipped": 0, "errors": [],
-              "stopped": False}
+              "rebound": 0, "missing": 0, "skipped": 0, "sidecars": 0,
+              "errors": [], "stopped": False}
 
     conn = db.conn
     lookups = _Lookups(conn, compute_hash=compute_hash)
@@ -308,7 +311,7 @@ def scan(roots, db, *, progress=None, stop=None, compute_hash: bool = True) -> d
 
             try:
                 _index_one(conn, lookups, file_path, size, mtime,
-                           compute_hash, multi_title, report)
+                           compute_hash, multi_title, report, keep_sidecar)
             except OSError as exc:
                 report["errors"].append(f"{file_path}: {exc}")
                 continue
@@ -328,8 +331,70 @@ def scan(roots, db, *, progress=None, stop=None, compute_hash: bool = True) -> d
     return report
 
 
+def _selfheal_sidecar(conn, lookups, video_id: int, file_path: str,
+                      digest: str | None, *, enabled: bool,
+                      compute_hash: bool, report: dict) -> bool:
+    """Дописать post.json файлу, у которого его нет (самоусиление).
+
+    Переинициализация отвязанной папки стоит ровно столько, сколько в ней
+    сайдкаров: каждый дописанный делает следующий раз дешевле и снимает
+    зависимость от имён файлов. Поэтому скан не только читает, но и
+    лечит то, что умеет восстановить из индекса.
+
+    Локальные файлы (platform='local') не получают сайдкар: их «личность»
+    - это хеш пути, а не площадочный ID, и read_sidecar такое не поймёт.
+    """
+    if not enabled:
+        return False
+    row = conn.execute(
+        """SELECT v.platform, v.remote_id, v.title, v.description,
+                  v.uploaded_at, v.duration_s, v.view_count, v.category,
+                  v.webpage_url, v.thumb_url, v.channel_id,
+                  c.title AS channel_title, c.remote_id AS channel_remote_id
+             FROM videos v LEFT JOIN channels c ON c.id = v.channel_id
+            WHERE v.id=?""", (video_id,)).fetchone()
+    if not row or row["platform"] == "local":
+        return False
+
+    media = Path(file_path)
+    sidecar = media.with_suffix(SIDECAR_SUFFIX)   # "x.mp4" -> "x.post.json"
+    if sidecar.exists():
+        return False
+
+    if digest is None and compute_hash:
+        try:
+            digest = file_hash(file_path)
+        except OSError:
+            digest = None
+
+    channel_id = row["channel_remote_id"] or ""
+    info = {
+        "id": row["remote_id"], "title": row["title"],
+        "description": row["description"],
+        "upload_date": (row["uploaded_at"] or "").replace("-", "") or None,
+        "duration": row["duration_s"], "view_count": row["view_count"],
+        "category": row["category"], "webpage_url": row["webpage_url"],
+        "thumbnail": row["thumb_url"],
+        "channel": row["channel_title"],
+        "channel_id": channel_id if channel_id.startswith("UC") else None,
+    }
+    try:
+        sidecar.write_text(build_sidecar(info, file_path, digest),
+                           encoding="utf-8")
+        stat = sidecar.stat()
+    except OSError:
+        return False
+    # Регистрируем сразу: _attach_aux ниже (или следующий скан) найдёт его.
+    repo.record_file(conn, video_id, str(sidecar), "sidecar",
+                     size=stat.st_size, mtime=stat.st_mtime,
+                     storages_list=lookups.storages)
+    report["sidecars"] += 1
+    return True
+
+
 def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
-               compute_hash: bool, multi_title: set[str], report: dict) -> str:
+               compute_hash: bool, multi_title: set[str], report: dict,
+               keep_sidecar: bool = True) -> str:
     """Опознать один файл и записать его в индекс. Возвращает исход."""
     known = lookups.by_path.get(file_path)
     if known is not None and known["size"] == size and known["mtime"] == mtime:
@@ -348,6 +413,12 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
 
     media_path = Path(file_path)
     stem = media_path.stem
+
+    def heal(video_id: int, path: str, digest: str | None) -> None:
+        """Самоусиление: дописать сайдкар опознанному файлу (см. выше)."""
+        _selfheal_sidecar(conn, lookups, video_id, path, digest,
+                          enabled=keep_sidecar, compute_hash=compute_hash,
+                          report=report)
 
     # 2. sidecar - полная правда о файле
     sidecar = read_sidecar(media_path.parent / (stem + SIDECAR_SUFFIX))
@@ -372,6 +443,7 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
             vid = lookups.by_key.get(key)
             if vid:
                 _register_media(conn, vid, file_path, size, mtime, None, lookups.storages)
+                heal(vid, file_path, None)
                 _attach_aux(conn, vid, media_path, size, mtime, None, lookups.storages)
                 report["bound_id"] += 1
                 lookups.by_path[file_path] = {"video_id": vid, "hash": None,
@@ -385,6 +457,7 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
             continue
         vid = ids[0]
         _register_media(conn, vid, file_path, size, mtime, None, lookups.storages)
+        heal(vid, file_path, None)
         _attach_aux(conn, vid, media_path, size, mtime, None, lookups.storages)
         report["bound_title"] += 1
         lookups.by_path[file_path] = {"video_id": vid, "hash": None,
@@ -396,6 +469,7 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
     if known is not None:
         vid = known["video_id"]
         _register_media(conn, vid, file_path, size, mtime, None, lookups.storages)
+        heal(vid, file_path, known.get("hash"))
         report["updated"] += 1
         lookups.by_path[file_path] = {"video_id": vid, "hash": known["hash"],
                                       "size": size, "mtime": mtime}
@@ -422,6 +496,7 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
                 report["rebound"] += 1
             lookups.by_path[file_path] = {"video_id": vid, "hash": digest,
                                           "size": size, "mtime": mtime}
+            heal(vid, file_path, digest)
             _attach_aux(conn, vid, media_path, size, mtime, digest, lookups.storages)
             return "hash"
 
@@ -505,7 +580,8 @@ def headless_scan() -> int:
             print(f"[{done}/{total}] {path}", flush=True)
 
     report = scan(roots, db, progress=progress,
-                  compute_hash=bool(config.get("compute_hash", True)))
+                  compute_hash=bool(config.get("compute_hash", True)),
+                  keep_sidecar=bool(config.get("keep_sidecar", True)))
     print(json.dumps({k: v for k, v in report.items() if k != "roots"},
                      ensure_ascii=False, indent=2))
     return 0 if not report["errors"] else 2

@@ -104,8 +104,14 @@ class TestRescan(ScanCase):
         self.assertEqual(again["unchanged"], 1)
         self.assertEqual(again["added"], 0)
         self.assertEqual(len(self.rows()), 1)
+        # Файлов теперь два: видео и дописанный самоусилением сайдкар.
         self.assertEqual(self.conn.execute(
-            "SELECT COUNT(*) n FROM files WHERE missing=0").fetchone()["n"], 1)
+            "SELECT COUNT(*) n FROM files WHERE missing=0 AND kind='video'"
+        ).fetchone()["n"], 1)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) n FROM files WHERE kind='sidecar'"
+        ).fetchone()["n"], 1)
+        self.assertGreaterEqual(again["sidecars"], 0)
 
     def test_moved_file_is_rebound_not_duplicated(self):
         self.write("Без имени.mp4", b"unique-payload-1")
@@ -154,6 +160,61 @@ class TestStop(ScanCase):
         stop.set()   # «нажали Отмена» до старта
         report = self.run_scan(stop=stop)
         self.assertTrue(report["stopped"])
+
+
+class TestSelfHeal(ScanCase):
+    """Самоусиление: опознанный файл без post.json получает его.
+
+    В этом стоит вся идея повторной переинициализации: чем больше
+    сайдкаров в папке, тем дешевле её восстановить после отвязки.
+    """
+
+    def test_scan_writes_missing_sidecar(self):
+        repo.upsert_video(self.conn, normalize_video(
+            {"id": "dQw4w9WgXcQ", "title": "Клип", "channel": "Автор",
+             "upload_date": "20091025", "duration": 213}), full=True)
+        self.write("Клип [dQw4w9WgXcQ].mp4", b"content")
+
+        report = self.run_scan()
+        self.assertEqual(report["bound_id"], 1)
+        self.assertEqual(report["sidecars"], 1)
+
+        sidecar = self.root / ("Клип [dQw4w9WgXcQ]" + SIDECAR_SUFFIX)
+        self.assertTrue(sidecar.exists(), "сайдкар не дописан")
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+        self.assertEqual(data["remote_id"], "dQw4w9WgXcQ")
+        self.assertEqual(data["info"]["title"], "Клип")
+        self.assertTrue(data["hash"].startswith("sha256:"))
+        # И он же теперь основной источник при опознании: строка files есть.
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) n FROM files WHERE kind='sidecar'"
+        ).fetchone()["n"], 1)
+
+        # Повторный скан ничего не переписывает: видео уже известно по
+        # пути (fast-path), а сам сайдкар - не медиа, он просто пропущен.
+        again = self.run_scan()
+        self.assertEqual(again["sidecars"], 0)
+        self.assertEqual(again["unchanged"], 1)
+        self.assertEqual(again["added"], 0)
+
+    def test_local_video_gets_no_sidecar(self):
+        # У локального файла нет площадочной личности: сайдкар с его
+        # «remote_id» read_sidecar не поймёт, поэтому не пишем.
+        self.write("Ни с чем не совпало.mp4", b"content")
+        report = self.run_scan()
+        self.assertEqual(report["added"], 1)
+        self.assertEqual(report["sidecars"], 0)
+
+    def test_sidecar_can_be_switched_off(self):
+        repo.upsert_video(self.conn, normalize_video(
+            {"id": "dQw4w9WgXcQ", "title": "Клип"}), full=True)
+        self.write("Клип [dQw4w9WgXcQ].mp4", b"content")
+        report = scan([{"path": str(self.root), "recursive": True,
+                        "enabled": True}], self.db,
+                      compute_hash=True, keep_sidecar=False)
+        self.assertEqual(report["sidecars"], 0)
+        self.assertFalse((self.root / ("Клип [dQw4w9WgXcQ]" +
+                                       SIDECAR_SUFFIX)).exists())
 
 
 if __name__ == "__main__":

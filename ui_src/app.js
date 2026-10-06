@@ -991,19 +991,42 @@
       call("storage_add", { path: path }).then(function (res) {
         if (!res) return;
         if (res.error) { toast(res.error, true); return; }
-        if (res.hint === "detached") {
-          toast("Это отвязанная папка - нажмите «вернуть» в списке", true);
-          return;
-        }
         if (res.hint === "already") {
           toast("Это хранилище уже добавлено");
           return;
         }
-        if (res.hint === "known_root") {
-          toast("Папка уже известна как «" + res.storage.label + "»", true);
+        // Папку раньше отвязали: спрашиваем, вернуть ли её. Это и есть
+        // «переинициализация» - дальше файлы вернёт обычный скан.
+        if (res.hint === "detached" || (res.hint === "known_root" &&
+                                        res.storage.status !== "active")) {
+          var label = res.storage.label;
+          if (confirm("Папка уже была в библиотеке как «" + label + "».\n\n" +
+                      "Вернуть её? Файлы восстановятся при переиндексации, " +
+                      "без перекачки.")) {
+            call("storage_restore", { id: res.storage.id }).then(function (r) {
+              if (r && r.error) { toast(r.error, true); return; }
+              toast("«" + label + "» возвращено - запустите переиндексацию");
+            });
+          }
           return;
         }
-        toast("Хранилище добавлено: " + res.storage.label);
+        // Маркер нашёлся у активного хранилища с другим путём: это переезд
+        // (диск переименовали) - предлагаем указать новый путь.
+        if (res.hint === "known_root" && res.storage.path !== path) {
+          if (confirm("Это хранилище «" + res.storage.label + "», но раньше " +
+                      "оно лежало по другому пути:\n" + res.storage.path +
+                      "\n\nУказать новый путь? Файлы перепривяжу, ничего " +
+                      "не перекачивая.")) {
+            call("storage_set_path", { id: res.storage.id, path: path })
+              .then(function (r) {
+                if (r && r.error) { toast(r.error, true); return; }
+                toast("Переехало файлов: " + r.files + ", найдено на месте: " +
+                  r.present);
+              });
+          }
+          return;
+        }
+        toast("Хранилище добавлено: " + (res.storage ? res.storage.label : ""));
       });
     });
   }

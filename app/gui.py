@@ -317,6 +317,7 @@ class Api:
 
     def _scan_worker(self, roots: list[dict], compute_hash: bool) -> None:
         run_id = repo.start_run(self.db.conn, "scan")
+        keep_sidecar = bool(self._current_settings().get("keep_sidecar", True))
         # Сначала доступность: недоступный носитель не должен получить
         # отметки «пропало» за все свои файлы.
         try:
@@ -334,7 +335,9 @@ class Api:
 
         try:
             report = indexer.scan(roots, self.db, progress=progress,
-                                  stop=self._stop_scan, compute_hash=compute_hash)
+                                  stop=self._stop_scan,
+                                  compute_hash=compute_hash,
+                                  keep_sidecar=keep_sidecar)
         except Exception as exc:  # noqa: BLE001 - фон не должен молча умереть
             self._log("Переиндексация упала: " + str(exc))
             self._log(traceback.format_exc(limit=3))
@@ -368,6 +371,8 @@ class Api:
             parts.append(f"новых {report['added']}")
         if report["rebound"]:
             parts.append(f"переехало {report['rebound']}")
+        if report.get("sidecars"):
+            parts.append(f"дописано сайдкаров {report['sidecars']}")
         if report["missing"]:
             parts.append(f"пропало {report['missing']}")
         if report["errors"]:

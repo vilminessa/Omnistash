@@ -138,10 +138,9 @@ class TestApi(GuiCase):
         from app import indexer as indexer_mod
         real_scan = indexer_mod.scan
 
-        def slow_scan(roots, db, progress=None, stop=None, compute_hash=True):
+        def slow_scan(roots, db, progress=None, stop=None, **kwargs):
             stop.wait(10)
-            return real_scan(roots, db, progress=progress, stop=stop,
-                             compute_hash=compute_hash)
+            return real_scan(roots, db, progress=progress, stop=stop, **kwargs)
 
         with mock.patch("app.gui.indexer.scan", side_effect=slow_scan):
             api.start_scan()
@@ -179,10 +178,9 @@ class TestApi(GuiCase):
         from app import indexer as indexer_mod
         real_scan = indexer_mod.scan
 
-        def gated(roots, db, progress=None, stop=None, compute_hash=True):
+        def gated(roots, db, progress=None, stop=None, **kwargs):
             gate.wait(10)
-            return real_scan(roots, db, progress=progress, stop=stop,
-                             compute_hash=compute_hash)
+            return real_scan(roots, db, progress=progress, stop=stop, **kwargs)
 
         with mock.patch("app.gui.indexer.scan", side_effect=gated):
             api.start_scan()

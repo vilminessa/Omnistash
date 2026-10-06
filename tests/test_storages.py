@@ -12,6 +12,8 @@ import unittest
 from pathlib import Path
 
 from app import repo, settings as settings_mod, storages
+from app.indexer import SIDECAR_SUFFIX
+from app.metadata import normalize_video
 from tests.test_gui import GuiCase
 
 
@@ -436,6 +438,106 @@ class TestScanBindsStorage(GuiCase):
         report = indexer.scan([storage], api.db, compute_hash=False)
         self.assertEqual(report["missing"], 0,
                          "недоступный корень не должен помечать пропало")
+
+
+class TestRestoreFlow(StorageCase):
+    """Критерий M6: отвязал папку -> вернул -> файлы вернулись сами.
+
+    Восстановление опирается на содержимое папки (сайдкар/ID/название),
+    а не на строки в базе - их при отвязке уже нет.
+    """
+
+    def _filled_storage(self):
+        from app import indexer
+        root = self.dir / "library"
+        root.mkdir()
+        # Видео, скачанное Omnistash: файл + sidecar, всё как делает очередь.
+        info = {"id": "dQw4w9WgXcQ", "title": "Клип", "channel": "Автор",
+                "channel_id": "UCaaaaaaaaaaaaaaaaaaaaaa",
+                "upload_date": "20091025", "duration": 213}
+        vid, _ = repo.upsert_video(self.api.db.conn,
+                                   normalize_video(info), full=True)
+        media = root / "Клип [dQw4w9WgXcQ].mp4"
+        media.write_bytes(b"content")
+        sidecar = root / ("Клип [dQw4w9WgXcQ]" + SIDECAR_SUFFIX)
+        sidecar.write_text(
+            json.dumps({"omnistash": 1, "platform": "youtube",
+                        "remote_id": "dQw4w9WgXcQ", "path": str(media),
+                        "hash": "sha256:aa", "info": info},
+                       ensure_ascii=False), encoding="utf-8")
+        storage = self.add_storage(self.api, root)
+        report = indexer.scan([storage], self.api.db, compute_hash=True)
+        self.assertEqual(report["bound_sidecar"], 1, report)
+        return storage, vid, root, sidecar
+
+    def test_detach_then_restore_then_scan(self):
+        from app import indexer
+        storage, vid, root, sidecar = self._filled_storage()
+
+        preview = self.api.storage_preview_detach({"id": storage["id"]})
+        self.assertEqual(preview["files"], 2)      # видео + сайдкар
+        self.assertEqual(preview["detached"], 1)
+
+        result = self.api.storage_detach({"id": storage["id"],
+                                          "keep_trace": True})
+        self.assertTrue(result["ok"], result)
+        # Папка забыта: ни строк files, ни «скачано».
+        self.assertEqual(self.api.db.conn.execute(
+            "SELECT COUNT(*) n FROM files").fetchone()["n"], 0)
+        self.assertEqual(self.api.db.conn.execute(
+            "SELECT status FROM videos WHERE id=?", (vid,)).fetchone()["status"],
+            "detached")
+
+        restored = self.api.storage_restore({"id": storage["id"]})
+        self.assertTrue(restored["ok"], restored)
+
+        # Скан восстановления: сайдкар отдаёт личность файла.
+        row = restored["storage"]
+        report = indexer.scan([row], self.api.db, compute_hash=True)
+        self.assertEqual(report["bound_sidecar"], 1, report)
+        self.assertEqual(report["missing"], 0, report)
+        self.assertEqual(self.api.db.conn.execute(
+            "SELECT status FROM videos WHERE id=?", (vid,)).fetchone()["status"],
+            "downloaded")
+        # Сайдкар остался на месте (скан его читал, а не пересоздавал).
+        self.assertTrue(sidecar.exists())
+
+    def test_restore_without_sidecar_binds_by_id(self):
+        from app import indexer
+        root = self.dir / "library"
+        root.mkdir()
+        vid, _ = repo.upsert_video(self.api.db.conn, normalize_video(
+            {"id": "abcdefghijk", "title": "Без сайдкара"}), full=True)
+        path = root / "Без сайдкара [abcdefghijk].mp4"
+        path.write_bytes(b"x")
+        storage = self.add_storage(self.api, root)
+        indexer.scan([storage], self.api.db, compute_hash=True)
+
+        self.api.storage_detach({"id": storage["id"], "keep_trace": False})
+        # Следа в базе нет совсем.
+        self.assertIsNone(storages.get(self.api.db.conn, storage["id"]))
+
+        # Забыли совсем -> добавляем заново (маркер в папке всё ещё наш).
+        added = self.api.storage_add({"path": str(root)})
+        self.assertIsInstance(added, dict)
+        if added.get("hint") == "known_root":
+            self.assertEqual(added["storage"]["id"], storage["id"])
+            self.api.storage_restore({"id": storage["id"]})
+            target = storages.get(self.api.db.conn, storage["id"])
+        else:
+            self.assertNotIn(added.get("hint"), ("already", "detached"))
+            target = added["storage"]
+        report = indexer.scan([target], self.api.db, compute_hash=True)
+        # ID в имени файла хватило, чтобы вернуть запись.
+        self.assertEqual(report["bound_id"] + report["bound_sidecar"], 1, report)
+        self.assertEqual(self.api.db.conn.execute(
+            "SELECT status FROM videos WHERE id=?", (vid,)).fetchone()["status"],
+            "downloaded")
+
+    def write_in(self, root: Path, name: str, payload: bytes = b"x") -> Path:
+        path = root / name
+        path.write_bytes(payload)
+        return path
 
 
 if __name__ == "__main__":
