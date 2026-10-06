@@ -124,7 +124,9 @@ class TestLiveDownload(LiveCase):
         api = self.make_api()
         dest = self.dir / "downloads"
         dest.mkdir(parents=True, exist_ok=True)
-        api.save_setting({"key": "dest_dir", "value": str(dest)})
+        # Куда качать - выбор человека: в тесте это хранилище по умолчанию.
+        storage = self.add_storage(api, dest)
+        api.save_setting({"key": "default_storage_id", "value": storage["id"]})
         api.save_setting({"key": "subtitles", "value": "none"})
 
         # 1. заносим канал в индекс
@@ -168,12 +170,15 @@ class TestLiveDownload(LiveCase):
 
         # 5. переезд библиотеки: СВЕЖАЯ база (путь она не знает) обязана
         #    опознать файл по сайдкару, а не завести «неизвестный».
+        from app import storages as storages_mod
         from app.db import Database as FreshDatabase
 
         fresh = FreshDatabase(self.dir / "library_move.db")
         try:
-            report = indexer.scan([{"path": str(dest), "recursive": True,
-                                    "enabled": True}], fresh, compute_hash=True)
+            # Как это делает человек: сначала добавляет папку, потом скан.
+            fresh_storage = storages_mod.add(fresh.conn, str(dest))
+            self.assertTrue(fresh_storage.get("id"), fresh_storage)
+            report = indexer.scan([fresh_storage], fresh, compute_hash=True)
             self.assertGreaterEqual(report["bound_sidecar"] + report["bound_id"],
                                     1, report)
             self.assertEqual(report["added"], 0,
@@ -185,12 +190,17 @@ class TestLiveDownload(LiveCase):
             self.assertEqual(len(moved), 1, [dict(r) for r in moved])
             self.assertEqual(moved[0]["key"], row["key"])
             self.assertEqual(moved[0]["status"], "downloaded")
+            # Путь записан канонически: хранилище + относительный.
+            bound = fresh.conn.execute(
+                "SELECT storage_id, rel_path FROM files WHERE kind='video'"
+            ).fetchone()
+            self.assertEqual(bound["storage_id"], fresh_storage["id"])
+            self.assertTrue(bound["rel_path"], bound["rel_path"])
         finally:
             fresh.close()
 
         # А повторный скан в той же базе ничего не меняет (fast-path).
-        again = indexer.scan([{"path": str(dest), "recursive": True,
-                               "enabled": True}], api.db, compute_hash=True)
+        again = indexer.scan([storage], api.db, compute_hash=True)
         self.assertEqual(again["added"] + again["rebound"], 0, again)
         self.assertEqual(again["missing"], 0, again)
 
