@@ -1,0 +1,40 @@
+# Загруженный контент и рабочие данные
+downloads/
+library/
+staging/
+*.jsonl
+
+# Приватные настройки и ключи
+settings.json
+config.local.*
+*.conf
+!*.conf.example
+ftp.conf
+
+# Журналы
+*.log
+out*.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# Редакторы и система
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+
+# Служебное (opencode)
+_*.py
+*.bak_opencode
+result_log.txt
