@@ -71,8 +71,20 @@
     <div class="toolbar">
       <h2>Источники</h2>
       <span class="spacer"></span>
-      <button class="btn" id="sync-all-btn" disabled title="Появится при подключении источников">Синхронизировать всё</button>
+      <button class="btn primary" id="sync-all-btn">Синхронизировать всё</button>
+      <button class="btn ghost" id="sync-stop-btn" hidden>Остановить</button>
     </div>
+
+    <div class="dl-bar" id="sync-bar" hidden>
+      <div class="dl-meta">
+        <b id="sync-title">—</b>
+        <span class="muted" id="sync-sub"></span>
+        <span class="spacer"></span>
+        <span class="muted" id="sync-counters"></span>
+      </div>
+      <div class="scan-track"><div class="scan-fill" id="sync-fill"></div></div>
+    </div>
+
     <div class="table-wrap">
       <table class="table" id="sources-table">
         <thead>
@@ -82,7 +94,21 @@
         <tbody id="sources-body"></tbody>
       </table>
       <div class="empty" id="sources-empty">Источников пока нет.<br>
-        <span class="muted">Добавление плейлистов и каналов появится на этапе синхронизации.</span></div>
+        <span class="muted">Добавьте плейлист или канал кнопкой «Добавить» в шапке.</span></div>
+    </div>
+
+    <div class="table-wrap" id="sync-results-wrap" hidden>
+      <div class="toolbar sync-results-head">
+        <h2>Итог синхронизации</h2>
+        <span class="spacer"></span>
+        <button class="btn primary" id="sync-queue-btn" hidden>Поставить новые в очередь</button>
+      </div>
+      <table class="table">
+        <thead><tr><th>Источник</th><th>Режим</th><th class="num">Новых</th>
+                   <th class="num">Уже было</th><th class="num">Убрано</th>
+                   <th class="num">В очередь</th><th>Ошибка</th></tr></thead>
+        <tbody id="sync-results-body"></tbody>
+      </table>
     </div>
 
     <div class="toolbar"><h2>Журнал запусков</h2></div>

@@ -195,5 +195,35 @@ class TestLiveDownload(LiveCase):
         self.assertEqual(again["missing"], 0, again)
 
 
+class TestLiveSync(LiveCase):
+    def test_sync_over_both_sources_finds_nothing_new(self):
+        """Реальный переснапшот: плейлист и канал уже занесены -> 0 новых."""
+        api = self.make_api()
+        for url in (PLAYLIST_URL, CHANNEL_URL):
+            self.assertTrue(api.add_start({"url": url, "mode": "manual"})["ok"])
+            self.wait(api, "confirm")
+            api.add_confirm()
+            self.wait(api, "done")
+            api.add_close()
+
+        total_before = api.poll(0)["stats"]["total"]
+        self.assertGreater(total_before, 0)
+
+        self.assertTrue(api.sync_start().get("ok"))
+        sync = self.wait_sync(api)
+        self.assertEqual(len(sync["results"]), 2, sync)
+        for row in sync["results"]:
+            self.assertIsNone(row["error"], row)
+            self.assertEqual(row["new"], 0,
+                             f"площадка отдала новое: {row}")
+            self.assertEqual(row["removed"], 0, row)
+        self.assertEqual(sync["new_total"], 0)
+        self.assertEqual(api.poll(0)["stats"]["total"], total_before,
+                         "синк не должен менять базу без изменений на площадке")
+        # Кнопки «поставить в очередь» быть не должно.
+        self.assertEqual(api.sync_queue_new()["error"],
+                         "Новых для загрузки нет")
+
+
 if __name__ == "__main__":
     unittest.main()

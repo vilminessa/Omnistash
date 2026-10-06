@@ -70,15 +70,6 @@ class AddFlowCase(GuiCase):
     def api(self) -> Api:
         return self.make_api()
 
-    def wait_phase(self, api, phase, timeout=15.0):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if api.poll(0)["add_flow"]["phase"] == phase:
-                return api.poll(0)["add_flow"]
-            time.sleep(0.02)
-        self.fail(f"фаза {phase} не наступила, сейчас "
-                  f"{api.poll(0)['add_flow']['phase']}")
-
     def patch_fetch(self, snapshot, delay=0.0):
         def fake(url, settings=None, on_progress=None, stop=None):
             total = snapshot["total"]

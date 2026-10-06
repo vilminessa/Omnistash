@@ -161,6 +161,7 @@
     if (changed("runs", snap.runs)) renderRuns(snap.runs);
     if (changed("queue", snap.queue)) renderQueue(snap.queue);
     if (changed("dl", snap.dl)) renderDl(snap.dl);
+    if (changed("sync", snap.sync)) renderSync(snap.sync);
     if (changed("add", snap.add_flow)) renderAddFlow(snap.add_flow);
     appendLogs(snap.logs);
 
@@ -493,6 +494,70 @@
 
   function humanSpeed(bytes) {
     return humanSize(bytes) + "/с";
+  }
+
+  var STAGE_TITLES = { playlist: "Плейлист", channels: "Авторы",
+                       videos: "Видео", links: "Связи" };
+
+  function renderSync(sync) {
+    if (!sync) return;
+    $("sync-all-btn").hidden = !!sync.running;
+    $("sync-stop-btn").hidden = !sync.running;
+
+    var results = sync.results || [];
+    var bar = $("sync-bar");
+    if (sync.running) {
+      bar.hidden = false;
+      var percent = 0;
+      if (sync.fetch && sync.fetch.total) {
+        percent = Math.round(sync.fetch.got * 100 / sync.fetch.total);
+      } else if (sync.stage && sync.stage.total) {
+        percent = Math.round(sync.stage.current * 100 / sync.stage.total);
+      } else if (sync.total) {
+        percent = Math.round(Math.max(0, (sync.index || 0) - 1) * 100 / sync.total);
+      }
+      $("sync-fill").style.width = percent + "%";
+      $("sync-title").textContent = sync.current || "…";
+      var sub = "источник " + Math.max(sync.index || 0, 1) + " / " + (sync.total || 1);
+      if (sync.fetch && sync.fetch.total) {
+        sub += " · записей " + sync.fetch.got + " / " + sync.fetch.total;
+      }
+      if (sync.stage && STAGE_TITLES[sync.stage.id]) {
+        sub += " · " + STAGE_TITLES[sync.stage.id] +
+          (sync.stage.total ? " " + sync.stage.current + " / " + sync.stage.total : "");
+      }
+      $("sync-sub").textContent = sub;
+      $("sync-counters").textContent = results.length
+        ? "новых " + sync.new_total : "";
+    } else if (results.length) {
+      bar.hidden = false;
+      $("sync-fill").style.width = "100%";
+      $("sync-title").textContent = sync.error ? "Синхронизация прервана" : "Синхронизация завершена";
+      $("sync-sub").textContent = sync.error ? sync.error : "";
+      $("sync-counters").textContent = "источников " + results.length +
+        " / " + (sync.total || results.length) + " · новых " + (sync.new_total || 0);
+    } else {
+      bar.hidden = true;
+    }
+
+    // Итог: таблица по источникам + кнопка постановки новых в очередь.
+    var wrap = $("sync-results-wrap");
+    wrap.hidden = !results.length;
+    if (!results.length) return;
+    $("sync-results-body").innerHTML = results.map(function (row) {
+      return "<tr><td>" + esc(row.title) + "</td>" +
+        "<td>" + esc(modeLabel(row.mode)) + "</td>" +
+        '<td class="num">' + (row.new || 0) + "</td>" +
+        '<td class="num">' + (row.known || 0) + "</td>" +
+        '<td class="num">' + (row.removed || 0) + "</td>" +
+        '<td class="num">' + (row.queued || 0) + "</td>" +
+        "<td class=\"muted\">" + esc(row.error || "") + "</td></tr>";
+    }).join("");
+
+    var pending = Math.max(0, (sync.new_total || 0) - (sync.queued || 0));
+    var queueBtn = $("sync-queue-btn");
+    queueBtn.hidden = !(pending > 0 && !sync.running);
+    queueBtn.textContent = "Поставить в очередь (" + pending + ")";
   }
 
   function renderDl(dl) {
@@ -1009,6 +1074,21 @@
     $("queue-stop-btn").addEventListener("click", function () { call("queue_stop"); });
     $("queue-retry-btn").addEventListener("click", function () { call("queue_retry"); });
 
+    $("sync-all-btn").addEventListener("click", function () {
+      call("sync_start").then(function (res) {
+        if (res && res.error) toast(res.error, true);
+        else switchTab("sync");
+      });
+    });
+    $("sync-stop-btn").addEventListener("click", function () { call("sync_stop"); });
+    $("sync-queue-btn").addEventListener("click", function () {
+      call("sync_queue_new").then(function (res) {
+        if (res && res.error) { toast(res.error, true); return; }
+        toast("В очередь поставлено: " + (res ? res.queued : 0));
+        switchTab("queue");
+      });
+    });
+
     $("add-btn").addEventListener("click", function () {
       addOpen = true;
       renderAddFlow(lastAddFlow);
@@ -1099,6 +1179,10 @@
     // (кнопки, полоса, счётчики) должно быть проверяемо.
     var mockDl = { running: false, done: 3, failed: 1, attempted: 4,
                    current: null, error: null };
+    // Симуляция синхронизации: fetch растёт, затем падает в результат.
+    var mockSync = { running: false, index: 0, total: 0, current: null,
+                     fetch: null, stage: null, results: [], new_ids: [],
+                     new_total: 0, queued: 0, error: null };
     // Схема нужна, чтобы в превью рисовалась карточка настроек.
     var schema = [
       { key: "library_roots", type: "roots", section: "Библиотека",
@@ -1145,7 +1229,14 @@
                           total: 3, downloaded: 1, sync_mode: "partial",
                           last_synced_at: "2026-10-05T21:00:00" }]
           },
-          scan: null, sources: [], runs: [], queue: [],
+          scan: null,
+          sources: [{ id: 1, title: "Тестовый плейлист", kind_label: "плейлист",
+                      sync_mode: "partial", total: 3, downloaded: 1, pending: 2,
+                      last_synced_at: "2026-10-06T16:38:45" }],
+          runs: [{ id: 1, kind: "add", started_at: "2026-10-06T16:38:45",
+                   finished_at: "2026-10-06T16:38:46",
+                   stats: { new_videos: 3, links_to_create: 3 } }],
+          queue: [],
           dl: (function () {
             if (mockDl.running && mockDl.current) {
               mockDl.current.percent += 9;
@@ -1157,6 +1248,28 @@
             return { running: mockDl.running, done: mockDl.done,
                      failed: mockDl.failed, attempted: mockDl.attempted,
                      current: mockDl.current, error: null };
+          })(),
+          sync: (function () {
+            if (mockSync.running) {
+              mockSync.fetch = mockSync.fetch || { got: 0, total: 3 };
+              mockSync.fetch.got += 1;
+              if (mockSync.fetch.got === 2) {
+                mockSync.stage = { id: "videos", state: "active",
+                                   current: 1, total: 3 };
+              }
+              if (mockSync.fetch.got >= mockSync.fetch.total) {
+                mockSync.running = false;
+                mockSync.fetch = null;
+                mockSync.stage = null;
+                mockSync.results = [{ title: "Тестовый плейлист",
+                                      kind: "плейлист", mode: "partial",
+                                      new: 2, known: 1, removed: 0,
+                                      queued: 0, error: null }];
+                mockSync.new_total = 2;
+                mockSync.new_ids = [11, 12];
+              }
+            }
+            return JSON.parse(JSON.stringify(mockSync));
           })(),
           add_flow: { phase: "idle", mode: "partial", url: "", fetch: null,
                       plan: null, stages: [], result: null, error: null },
@@ -1202,6 +1315,27 @@
         var retried = mockDl.failed;
         mockDl.failed = 0;
         return Promise.resolve({ ok: true, retried: retried });
+      },
+      sync_start: function () {
+        mockSync.running = true;
+        mockSync.index = 1;
+        mockSync.total = 1;
+        mockSync.current = "Тестовый плейлист";
+        mockSync.results = [];
+        mockSync.new_total = 0;
+        mockSync.queued = 0;
+        mockSync.fetch = { got: 0, total: 3 };
+        return Promise.resolve({ ok: true, sources: 1 });
+      },
+      sync_stop: function () {
+        mockSync.running = false;
+        mockSync.fetch = null;
+        mockSync.stage = null;
+        return Promise.resolve({ ok: true });
+      },
+      sync_queue_new: function () {
+        mockSync.queued = mockSync.new_total;
+        return Promise.resolve({ queued: mockSync.new_total });
       },
       add_start: function () { return Promise.resolve({ error: "в превью недоступно" }); },
       start_scan: function () { return Promise.resolve({ error: "в превью недоступно" }); },

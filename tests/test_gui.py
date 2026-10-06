@@ -33,6 +33,29 @@ class GuiCase(unittest.TestCase):
         self.addCleanup(api.close)
         return api
 
+    def wait_phase(self, api, phase, timeout=15.0):
+        """Дождаться фазы добавления; неожиданная ошибка - провал с текстом."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            flow = api.poll(0)["add_flow"]
+            if flow["phase"] == phase:
+                return flow
+            if phase != "error" and flow["phase"] == "error":
+                self.fail(f"ошибка вместо «{phase}»: {flow.get('error')}")
+            time.sleep(0.02)
+        self.fail(f"фаза {phase} не наступила, сейчас "
+                  f"{api.poll(0)['add_flow']['phase']}")
+
+    def wait_sync(self, api, timeout=20.0):
+        """Дождаться конца синхронизации: total>0 ставится при старте."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            sync = api.poll(0)["sync"]
+            if sync.get("total") and not sync.get("running"):
+                return sync
+            time.sleep(0.02)
+        self.fail(f"синхронизация не завершилась: {api.poll(0)['sync']}")
+
 
 class TestApi(GuiCase):
     def test_initial_and_poll_shape(self):

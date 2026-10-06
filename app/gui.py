@@ -57,6 +57,14 @@ class Api:
         self._add_stop = threading.Event()   # отмена фазы A (сеть)
         self._add_cancel = threading.Event()  # отмена фазы C (транзакция)
         self._add_thread: threading.Thread | None = None
+        # Синхронизация источников: свой воркер и свой стоп, чтобы не
+        # мешать ни добавлению, ни переиндексации.
+        self._sync: dict = {"running": False, "index": 0, "total": 0,
+                            "current": None, "fetch": None, "stage": None,
+                            "results": [], "new_ids": [], "new_total": 0,
+                            "queued": 0, "error": None}
+        self._sync_stop = threading.Event()
+        self._sync_thread: threading.Thread | None = None
         # Качалка: очередь живёт в таблице videos, воркер - фоновый поток.
         self.dl = DownloadWorker(self.db, self._current_settings, log=self._log)
         settings.reload_if_changed(self._settings_cache)
@@ -131,6 +139,9 @@ class Api:
             add_flow = dict(self._add)
             add_flow["stages"] = [dict(s) for s in self._add.get("stages", [])]
             dl_state = self.dl.state
+            sync_state = dict(self._sync)
+            sync_state["results"] = [dict(r) for r in self._sync.get("results", [])]
+            sync_state["new_ids"] = list(self._sync.get("new_ids") or [])[:200]
         config = settings.as_public(self._current_settings())
         heavy = self._heavy_snapshot()
         return {
@@ -141,6 +152,7 @@ class Api:
             "scan": scan,
             "add_flow": add_flow,
             "dl": dl_state,
+            "sync": sync_state,
             "settings": config,
             "settings_rev": rev,
             **heavy,
@@ -603,13 +615,169 @@ class Api:
             self.dl.start()
         return result
 
+    # ------------------------------------------------------------------ #
+    #  Синхронизация источников: переснять каждый источник и применить diff
+    # ------------------------------------------------------------------ #
+
+    def sync_start(self) -> dict:
+        """Фаза A+C для всех источников сразу: снапшот -> diff -> запись.
+
+        Режим каждого источника решает, что делать с новым: «Полная»
+        ставит в очередь сразу, «Частичная»/«Ручная» показывают счётчики и
+        дают кнопку «поставить новые в очередь» (качалка всё равно ждёт).
+        """
+        with self._lock:
+            if self._sync.get("running"):
+                return {"error": "Синхронизация уже идёт"}
+            if self._add.get("phase") in ("fetching", "committing"):
+                return {"error": "Сначала закончите добавление источника"}
+            if self._scan and self._scan.get("running"):
+                return {"error": "Дождитесь переиндексации"}
+            sources_list = [s for s in repo.sources(self.db.conn)
+                            if s.get("url") and s.get("kind") in
+                            ("uploads", "remote", "mix")]
+            if not sources_list:
+                return {"error": "Нет источников для синхронизации"}
+            config = dict(self._current_settings())
+            self._sync_stop.clear()
+            self._sync = {"running": True, "index": 0,
+                          "total": len(sources_list), "current": None,
+                          "fetch": None, "stage": None, "results": [],
+                          "new_ids": [], "new_total": 0, "queued": 0,
+                          "error": None}
+            self._busy = True
+            self._status = f"Синхронизация 0/{len(sources_list)}"
+        self._log(f"Синхронизация: источников {len(sources_list)}")
+        thread = threading.Thread(target=self._sync_worker,
+                                  args=(sources_list, config),
+                                  name="omnistash-sync", daemon=True)
+        self._sync_thread = thread
+        thread.start()
+        return {"ok": True, "sources": len(sources_list)}
+
+    def sync_stop(self) -> dict:
+        """Остановить между источниками и между чанками (БД не пострадает)."""
+        if self._sync.get("running"):
+            self._sync_stop.set()
+            self._log("Синхронизация остановлена пользователем")
+            return {"ok": True}
+        return {"ok": False}
+
+    def sync_queue_new(self) -> dict:
+        """«Поставить новые в очередь» после синка в частичном/ручном режиме."""
+        with self._lock:
+            ids = list(self._sync.get("new_ids") or [])
+        if not ids:
+            return {"queued": 0, "error": "Новых для загрузки нет"}
+        result = self.enqueue({"ids": ids})
+        return result
+
+    def _sync_worker(self, sources_list: list[dict], config: dict) -> None:
+        conn = self.db.conn
+        stop = self._sync_stop
+        new_ids: list[int] = []
+        queued_total = 0
+        try:
+            for index, source in enumerate(sources_list, start=1):
+                if stop.is_set():
+                    break
+                title = source.get("title") or source.get("remote_id") or "?"
+                with self._lock:
+                    self._sync.update(
+                        index=index, current=title, fetch={"got": 0, "total": 0},
+                        stage=None)
+                    self._status = (f"Синхронизация {index}/{len(sources_list)}"
+                                    f" · {title}")
+
+                entry = {"title": title, "kind": source.get("kind_label"),
+                         "mode": source.get("sync_mode"), "new": 0,
+                         "known": 0, "removed": 0, "queued": 0, "error": None}
+                try:
+                    snapshot = sources.fetch_snapshot(
+                        source["url"], settings=config, stop=stop,
+                        on_progress=lambda got, want: self._sync_fetch(got, want))
+                except sources.Aborted:
+                    break
+                except Exception as exc:  # noqa: BLE001 - сбой одной площадки не валит синк
+                    entry["error"] = str(exc)
+                    self._log(f"Синк {title}: {exc}")
+                    with self._lock:
+                        self._sync["results"].append(entry)
+                    continue
+
+                plan = repo.plan_diff(conn, snapshot)
+
+                def on_stage(name, state, current, total):
+                    if stop.is_set():
+                        raise sources.Aborted()
+                    with self._lock:
+                        self._sync["stage"] = {"id": name, "state": state,
+                                               "current": current, "total": total}
+
+                try:
+                    stats = repo.commit_plan(conn, snapshot, plan,
+                                             on_stage=on_stage)
+                except sources.Aborted:
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    entry["error"] = str(exc)
+                    self._log(f"Синк {title}: запись не удалась - {exc}")
+                    with self._lock:
+                        self._sync["results"].append(entry)
+                    continue
+
+                # Новые строки: их id пригодятся для кнопки «в очередь».
+                for item in plan["new_videos"]:
+                    vid = repo.video_id_by_key(conn, item["key"])
+                    if vid:
+                        new_ids.append(vid)
+                entry.update(new=stats["new_videos"],
+                             known=stats["known_videos"],
+                             removed=stats.get("removed") or 0)
+                if source.get("sync_mode") == "full" and stats["playlist_id"]:
+                    entry["queued"] = repo.enqueue_playlist(conn,
+                                                            stats["playlist_id"])
+                    queued_total += entry["queued"]
+
+                with self._lock:
+                    self._sync["results"].append(entry)
+                    self._sync["new_total"] = len(new_ids)
+                    self._heavy_at = 0.0
+                if stats["new_videos"] or stats.get("removed"):
+                    self._log(f"{title}: новых {stats['new_videos']}, "
+                              f"убрано {stats.get('removed') or 0}")
+        except Exception as exc:  # noqa: BLE001 - воркер не должен молча умереть
+            self._log(f"Синхронизация упала: {exc}")
+            with self._lock:
+                self._sync["error"] = str(exc)
+        finally:
+            done = len(self._sync.get("results") or [])
+            stopped = stop.is_set()
+            with self._lock:
+                self._sync.update(running=False, current=None, fetch=None,
+                                  stage=None,
+                                  new_ids=new_ids[:5000],
+                                  new_total=len(new_ids),
+                                  queued=queued_total)
+                self._busy = False
+                self._status = "Синхронизация завершена" if not stopped \
+                    else "Синхронизация остановлена"
+                self._heavy_at = 0.0
+            self._log(("Остановлено" if stopped else "Готово") +
+                      f": источников {done}/{len(sources_list)}")
+
+    def _sync_fetch(self, got: int, total: int) -> None:
+        with self._lock:
+            self._sync["fetch"] = {"got": got, "total": total}
+
     def close(self) -> None:
         """Остановить фон и закрыть соединения (включая воркеров)."""
         self._stop_scan.set()
         self._add_stop.set()
         self._add_cancel.set()
+        self._sync_stop.set()
         self.dl.stop()
-        for thread in (self._scan_thread, self._add_thread):
+        for thread in (self._scan_thread, self._add_thread, self._sync_thread):
             if thread is not None and thread.is_alive():
                 thread.join(timeout=10)
         self.dl.wait(timeout=15)
