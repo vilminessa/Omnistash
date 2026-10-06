@@ -38,4 +38,8 @@ Desktop.ini
 # Со слэшем намеренно: без него `_*.py` съедает app/__init__.py.
 /_*.py
 *.bak_opencode
+*.md.tmp
 result_log.txt
+
+# Превью интерфейса - сборка tools/build_preview.py, в git не идёт
+preview.html

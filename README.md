@@ -126,6 +126,29 @@ python omnistash.py             # окно
 python omnistash.py --scan      # переиндексация без окна (для watchdog)
 ```
 
+### Разработка: debug.bat
+
+`debug.bat` — консоль управления проектом. Запуск без аргументов открывает
+меню, с номером пункта — сразу выполняет его (удобно для скриптов):
+
+```powershell
+debug.bat            # меню (Enter показывает список)
+debug.bat 4          # тесты офлайн
+debug.bat 5          # тесты + живые на YouTube
+debug.bat 6          # проверка синтаксиса python и node
+debug.bat 7          # собрать preview.html и открыть в браузере
+debug.bat 9          # git статус и последние коммиты
+debug.bat A          # git add + commit + push (спросит сообщение)
+debug.bat B          # убить процессы Omnistash
+debug.bat C          # копия базы библиотеки в %LOCALAPPDATA%\Omnistash\backup
+```
+
+**Превью интерфейса** (`tools/build_preview.py` → `preview.html`, в git не
+идёт) — та же страница окна, но с вымышленными данными: мост pywebview не
+подключён, и app.js сам подставляет мок-бэкенд. Так интерфейс можно
+смотреть и править без запущенного Python; `--first` показывает стартовый
+диалог первого запуска, `?empty=1` — и вручную.
+
 ## Как пользоваться
 
 ### Добавить источник
