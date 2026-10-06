@@ -174,14 +174,17 @@ def _paths_after_download(info: dict) -> list[tuple[str, str]]:
 
 
 def download(video: dict, settings: dict, *, stop: threading.Event,
-             on_progress=None) -> dict:
+             on_progress=None, dest: str | None = None) -> dict:
     """Скачать одно видео и подготовить всё для записи в индекс.
 
     video - строка videos (нужны key/title/webpage_url/remote_id);
+    dest - хранилище, которое выбрал человек (null здесь быть не должно:
+    очередь обязана разрешить цель ДО вызова); на случай прямых вызовов
+    остаётся fallback в settings.dest_dir.
     возвращает {"cancelled": bool, "files": [(путь, kind)], "info": {...},
     "error": str|None}. Ничего в БД не пишет - это делает очередь.
     """
-    dest_dir = Path(settings.get("dest_dir") or ".").expanduser()
+    dest_dir = Path(dest or settings.get("dest_dir") or ".").expanduser()
     dest_dir.mkdir(parents=True, exist_ok=True)
     url = video.get("webpage_url") or (
         "https://www.youtube.com/watch?v=" + str(video.get("remote_id") or ""))

@@ -276,7 +276,7 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 
 .grid-head, .row {
   display: grid;
-  grid-template-columns: 116px minmax(180px, 1fr) 190px 72px 100px 92px;
+  grid-template-columns: 26px 116px minmax(180px, 1fr) 190px 72px 100px 92px;
   gap: 8px;
   align-items: center;
 }
@@ -543,6 +543,53 @@ body[data-theme="light"] .row { border-bottom-color: rgba(0, 0, 0, .05); }
 #add-url { width: 100%; }
 #add-body { gap: 12px; }
 
+/* ---------------------------- панель выделения ------------------------ */
+
+.sel-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-size: 12.5px;
+}
+.sel-bar select { max-width: 280px; }
+.c-check { display: flex; align-items: center; justify-content: center; }
+.row input.row-check { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+.row.picked { background: var(--widget); }
+
+/* ---------------------------- хранилища ------------------------------- */
+
+.storages { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+
+.storage-row {
+  display: grid;
+  grid-template-columns: auto minmax(120px, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 10px;
+}
+.storage-row.off { opacity: .55; }
+.storage-row.detached { border-style: dashed; border-color: var(--warn); }
+.storage-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+.storage-dot.bad { background: transparent; box-shadow: inset 0 0 0 1.5px var(--err); }
+.storage-dot.off { background: transparent; box-shadow: inset 0 0 0 1.5px var(--muted); }
+.storage-name { display: flex; flex-direction: column; min-width: 0; }
+.storage-name b { font-size: 12.5px; }
+.storage-path { color: var(--muted); font-size: 11px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.storage-free { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.storage-actions { display: flex; gap: 10px; align-items: center; }
+.storage-default { display: inline-flex; gap: 5px; align-items: center;
+  font-size: 11.5px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.storage-default input { accent-color: var(--accent); }
+.storage-toolbar { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+
 /* ---------------------------- низ окна ---------------------------- */
 
 .foot {
@@ -593,6 +640,6 @@ body[data-theme="light"] .row { border-bottom-color: rgba(0, 0, 0, .05); }
 
 @media (max-width: 900px) {
   .tree { width: 180px; flex-basis: 180px; }
-  .grid-head, .row { grid-template-columns: 104px minmax(140px, 1fr) 130px 64px 88px 78px; }
+  .grid-head, .row { grid-template-columns: 26px 104px minmax(140px, 1fr) 130px 64px 88px 78px; }
   .field { grid-template-columns: 1fr; }
 }

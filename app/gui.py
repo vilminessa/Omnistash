@@ -18,6 +18,7 @@ import time
 import traceback
 
 from . import __version__, indexer, repo, settings, settings_schema, sources
+from . import storages as storages_mod
 from .db import SYNC_MODES, Database
 from .queue import DownloadWorker
 
@@ -34,6 +35,14 @@ class Api:
 
     def __init__(self) -> None:
         self.db = Database()
+        # Перенос старых корней (library_roots/dest_dir) в таблицу хранилищ:
+        # строго до первого save(), иначе эти ключи уйдут из файла вместе с
+        # убранными из схемы полями и переносить станет нечего.
+        self._boot = storages_mod.bootstrap(self.db, settings.read_raw())
+        if self._boot.get("default") and not settings.read_raw().get(
+                "default_storage_id"):
+            settings.set_value("default_storage_id", self._boot["default"])
+        self._boot_purged = settings.purge_transferred()
         self._lock = threading.RLock()
         self._logs: list[str] = []
         self._status = "Готов."
@@ -69,6 +78,23 @@ class Api:
         self.dl = DownloadWorker(self.db, self._current_settings, log=self._log)
         settings.reload_if_changed(self._settings_cache)
         self._log("Индекс открыт: " + str(self.db.path))
+        if self._boot.get("created"):
+            self._log("Хранилища перенесены из настроек: "
+                      f"{self._boot['created']}, без хранилища осталось "
+                      f"{self._boot.get('orphans', 0)} файл(ов)")
+        for path in self._boot.get("missing") or []:
+            self._log(f"Старая папка не найдена и не перенесена: {path}")
+        if self._boot_purged.get("purged"):
+            self._log("Ключи настроек перенесены в базу: "
+                      + ", ".join(self._boot_purged["purged"]))
+        # Доступность хранилищ - в фоне: сетевой путь может висеть.
+        # Поток обязан быть дожидаем в close(): иначе он может открыть
+        # соединение уже после закрытия - файл базы останется занятым.
+        self._storage_checking = False
+        self._avail_thread = threading.Thread(
+            target=self._availability_worker, daemon=True,
+            name="omnistash-storages")
+        self._avail_thread.start()
 
     # ------------------------------------------------------------------ #
     #  Служебное
@@ -104,9 +130,24 @@ class Api:
                     "sources": repo.sources(conn),
                     "runs": repo.runs(conn),
                     "queue": repo.queue_rows(conn),
+                    "storages": storages_mod.all_storages(conn,
+                                                          include_detached=True),
                 }
                 self._heavy_at = now
             return self._heavy
+
+    def _availability_worker(self) -> None:
+        """Проверить доступность хранилищ, не мешая старту окна."""
+        try:
+            state = storages_mod.refresh_availability(self.db.conn)
+        except Exception as exc:  # noqa: BLE001 - фон не должен валить старт
+            self._log(f"Проверка хранилищ не удалась: {exc}")
+            return
+        with self._lock:
+            self._heavy_at = 0.0
+        if state.get("lost"):
+            self._log(f"Хранилищ недоступно: {state['lost']} "
+                      f"(проверено {state['checked']})")
 
     # ------------------------------------------------------------------ #
     #  API для окна
@@ -245,12 +286,12 @@ class Api:
     # ------------------------------------------------------------------ #
 
     def start_scan(self) -> dict:
-        """Запустить скан всех корней в фоне (кнопка «Переиндексировать»)."""
-        config = self._current_settings()
-        roots = [r for r in (config.get("library_roots") or [])
-                 if r.get("enabled", True) and r.get("path")]
+        """Запустить скан всех хранилищ в фоне (кнопка «Переиндексировать»)."""
+        roots = [row for row in storages_mod.all_storages(self.db.conn)
+                 if row.get("enabled", 1)]
         if not roots:
-            return {"error": "Сначала добавьте папки библиотеки в настройках"}
+            return {"error": "Сначала добавьте папку-хранилище в настройках"}
+        config = self._current_settings()
         with self._lock:
             if self._scan and self._scan.get("running"):
                 return {"error": "Переиндексация уже идёт"}
@@ -258,7 +299,7 @@ class Api:
             self._scan = {"running": True, "done": 0, "total": 0, "path": ""}
             self._busy = True
             self._status = "Переиндексация…"
-        self._log(f"Переиндексация: {len(roots)} корн.(-ей)")
+        self._log(f"Переиндексация: хранилищ {len(roots)}")
         thread = threading.Thread(target=self._scan_worker,
                                   args=(roots, bool(config.get("compute_hash", True))),
                                   name="omnistash-scan", daemon=True)
@@ -276,6 +317,13 @@ class Api:
 
     def _scan_worker(self, roots: list[dict], compute_hash: bool) -> None:
         run_id = repo.start_run(self.db.conn, "scan")
+        # Сначала доступность: недоступный носитель не должен получить
+        # отметки «пропало» за все свои файлы.
+        try:
+            storages_mod.refresh_availability(self.db.conn,
+                                              [r["id"] for r in roots if r.get("id")])
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Проверка хранилищ не удалась: {exc}")
         started = time.time()
 
         def progress(done: int, total: int, path: str) -> None:
@@ -438,22 +486,29 @@ class Api:
         return {"ok": True, "phase": "idle"}
 
     def enqueue(self, request=None) -> dict:
-        """«Загрузить выбранные» из пикера: id строк -> статус queued."""
-        ids = (request or {}).get("ids") or []
+        """«Загрузить выбранные»: id строк (+куда) -> статус queued."""
+        request = request or {}
+        ids = request.get("ids") or []
         try:
             ids = [int(i) for i in ids]
         except (TypeError, ValueError):
             return {"error": "Некорректный список"}
         if not ids:
             return {"queued": 0}
-        queued = repo.enqueue(self.db.conn, ids)
+        storage_id = str(request.get("storage_id") or "") or None
+        if storage_id:
+            storage = storages_mod.get(self.db.conn, storage_id)
+            if not storage or storage["status"] != "active":
+                return {"error": "Хранилище не найдено или отвязано"}
+        queued = repo.enqueue(self.db.conn, ids, storage_id=storage_id)
         with self._lock:
             self._heavy_at = 0.0
-        self._log(f"В очередь поставлено: {queued}")
+        self._log(f"В очередь поставлено: {queued}"
+                  + (f" -> {storage['label']}" if storage_id else ""))
         if queued:
             # Пользователь явно попросил качать - стартуем сразу.
             self.dl.start()
-        return {"queued": queued}
+        return {"queued": queued, "storage_id": storage_id}
 
     def _add_fetch_worker(self, url: str, config: dict) -> None:
         def progress(got: int, total: int) -> None:
@@ -601,6 +656,165 @@ class Api:
             f", в очередь {queued}" if queued else ""))
 
     # ------------------------------------------------------------------ #
+    #  Хранилища
+    # ------------------------------------------------------------------ #
+
+    def storages_list(self) -> dict:
+        """Список хранилищ + выбранное по умолчанию."""
+        return {
+            "storages": storages_mod.all_storages(self.db.conn,
+                                                  include_detached=True),
+            "default_storage_id": self._current_settings().get(
+                "default_storage_id") or "",
+        }
+
+    def storage_add(self, request=None) -> dict:
+        """Добавить папку-хранилище (путь приходит из системного диалога)."""
+        request = request or {}
+        path = str(request.get("path") or "").strip()
+        if not path:
+            return {"error": "Не выбрана папка"}
+        label = str(request.get("label") or "").strip() or None
+        result = storages_mod.add(self.db.conn, path, label=label)
+        if isinstance(result, dict) and (result.get("error") or result.get("hint")):
+            # error - «папка не найдена»; hint - «уже есть»/«я эту папку
+            # знаю»: плодить дубль нельзя, решение за окном.
+            return result
+        storage = result
+        try:
+            storages_mod.refresh_availability(self.db.conn, [storage["id"]])
+        except Exception:  # noqa: BLE001 - не смог проверить не мешает добавлению
+            pass
+        self._make_default_if_unset(storage["id"])
+        self._touch()
+        self._log(f"Хранилище добавлено: {storage['label']} ({storage['path']})")
+        return {"ok": True, "storage": storages_mod.get(self.db.conn, storage["id"]),
+                "default_storage_id": self._current_settings().get(
+                    "default_storage_id")}
+
+    def storage_set_path(self, request=None) -> dict:
+        """Переезд корня: новый путь вместо старого, файлы перепривязываются."""
+        request = request or {}
+        result = storages_mod.set_path(self.db.conn, str(request.get("id") or ""),
+                                       str(request.get("path") or ""))
+        if isinstance(result, dict) and result.get("error"):
+            return result
+        self._touch()
+        self._log(f"Хранилище переехало: {result['old_path']} -> "
+                  f"{result['new_path']} (файлов {result['files']}, "
+                  f"найдено на месте {result['present']})")
+        return result
+
+    def storage_preview_detach(self, request=None) -> dict:
+        """Сколько будет забыто - для диалога подтверждения."""
+        return storages_mod.preview_detach(self.db.conn,
+                                           str((request or {}).get("id") or ""))
+
+    def storage_detach(self, request=None) -> dict:
+        """Отвязать папку: keep_trace=1 оставить след для быстрого возврата."""
+        request = request or {}
+        keep = bool(request.get("keep_trace", True))
+        result = storages_mod.detach(self.db.conn,
+                                     str(request.get("id") or ""),
+                                     keep_trace=keep)
+        if isinstance(result, dict) and result.get("error"):
+            return result
+        self._touch()
+        self._log("Хранилище отвязано: {} (забыто файлов {}, удалено локальных {}, "
+                  "отмечено detached {}, след {})".format(
+                      result["label"], result["files_removed"],
+                      result["local_deleted"], result["detached"],
+                      "остался" if result["kept_trace"] else "нет"))
+        return result
+
+    def storage_forget(self, request=None) -> dict:
+        """Убрать след отвязанной папки совсем."""
+        result = storages_mod.forget(self.db.conn,
+                                     str((request or {}).get("id") or ""))
+        if isinstance(result, dict) and result.get("error"):
+            return result
+        self._touch()
+        self._log(f"След хранилища удалён: {result['label']}")
+        return result
+
+    def storage_restore(self, request=None) -> dict:
+        """Вернуть отвязанную папку (файлы вернёт следующий скан)."""
+        result = storages_mod.restore(self.db.conn,
+                                      str((request or {}).get("id") or ""))
+        if isinstance(result, dict) and result.get("error"):
+            return result
+        self._touch()
+        self._log(f"Хранилище возвращено: {result['storage']['label']} - "
+                  "запустите переиндексацию, чтобы вернуть файлы")
+        return result
+
+    def storage_enable(self, request=None) -> dict:
+        """Временно выключить/включить сканирование хранилища."""
+        request = request or {}
+        result = storages_mod.set_enabled(self.db.conn,
+                                          str(request.get("id") or ""),
+                                          bool(request.get("enabled", True)))
+        if isinstance(result, dict) and result.get("error"):
+            return result
+        self._touch()
+        return result
+
+    def storage_set_default(self, request=None) -> dict:
+        """Глобальное хранилище, предвыбранное при загрузке."""
+        storage_id = str((request or {}).get("id") or "")
+        if storage_id:
+            storage = storages_mod.get(self.db.conn, storage_id)
+            if not storage or storage["status"] != "active":
+                return {"error": "Хранилище не найдено или отвязано"}
+        settings.set_value("default_storage_id", storage_id)
+        with self._lock:
+            self._settings_rev += 1
+            self._settings_cache.clear()
+        settings.reload_if_changed(self._settings_cache)
+        self._log("Хранилище по умолчанию: "
+                  + (storage["label"] if storage_id else "снято"))
+        return {"ok": True, "default_storage_id": storage_id}
+
+    def storage_check(self) -> dict:
+        """Перепроверить доступность всех хранилищ (в фоне: сеть виснет)."""
+        if getattr(self, "_storage_checking", False):
+            return {"ok": True, "busy": True}
+        self._storage_checking = True
+
+        def work():
+            try:
+                state = storages_mod.refresh_availability(self.db.conn)
+                self._log("Проверка хранилищ: доступно {available} из "
+                          "{checked}".format(**state))
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"Проверка хранилищ не удалась: {exc}")
+            finally:
+                self._storage_checking = False
+                self._touch()
+
+        thread = threading.Thread(target=work, name="omnistash-probe",
+                                  daemon=True)
+        self._check_thread = thread
+        thread.start()
+        return {"ok": True}
+
+    def _make_default_if_unset(self, storage_id: str) -> None:
+        """Первое хранилище само становится выбранным по умолчанию."""
+        config = self._current_settings()
+        if config.get("default_storage_id"):
+            return
+        settings.set_value("default_storage_id", storage_id)
+        with self._lock:
+            self._settings_rev += 1
+            self._settings_cache.clear()
+        settings.reload_if_changed(self._settings_cache)
+
+    def _touch(self) -> None:
+        """Сразу пересчитать агрегаты: состояние изменилось руками."""
+        with self._lock:
+            self._heavy_at = 0.0
+
+    # ------------------------------------------------------------------ #
     #  Очередь загрузки
     # ------------------------------------------------------------------ #
 
@@ -674,14 +888,15 @@ class Api:
             return {"ok": True}
         return {"ok": False}
 
-    def sync_queue_new(self) -> dict:
+    def sync_queue_new(self, request=None) -> dict:
         """«Поставить новые в очередь» после синка в частичном/ручном режиме."""
+        request = request or {}
         with self._lock:
             ids = list(self._sync.get("new_ids") or [])
         if not ids:
             return {"queued": 0, "error": "Новых для загрузки нет"}
-        result = self.enqueue({"ids": ids})
-        return result
+        return self.enqueue({"ids": ids,
+                             "storage_id": request.get("storage_id")})
 
     def _sync_worker(self, sources_list: list[dict], config: dict) -> None:
         conn = self.db.conn
@@ -788,9 +1003,11 @@ class Api:
         self._add_cancel.set()
         self._sync_stop.set()
         self.dl.stop()
-        for thread in (self._scan_thread, self._add_thread, self._sync_thread):
+        for thread in (self._scan_thread, self._add_thread, self._sync_thread,
+                       getattr(self, "_avail_thread", None),
+                       getattr(self, "_check_thread", None)):
             if thread is not None and thread.is_alive():
-                thread.join(timeout=10)
+                thread.join(timeout=15)
         self.dl.wait(timeout=15)
         self.db.close()
 

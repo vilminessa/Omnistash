@@ -26,7 +26,7 @@ import re
 import time
 from pathlib import Path
 
-from . import repo
+from . import repo, storages as storages_mod
 from .metadata import PLATFORM, normalize_video, slim_info, video_key
 from .util import norm_title, now_iso, sanitize_name
 
@@ -130,6 +130,9 @@ class _Lookups:
         self.titles: dict[str, list[int]] = {}
         self.by_key: dict[str, int] = {}
         self.compute_hash = compute_hash
+        # Кэш хранилищ на весь прогон: без него record_file на каждом файле
+        # читал бы таблицу заново (десятки тысяч лишних запросов).
+        self.storages = storages_mod.all_storages(conn, include_detached=True)
 
         for row in conn.execute(
                 """SELECT f.path, f.video_id, f.hash, f.size, f.mtime, f.missing,
@@ -196,7 +199,8 @@ def _walk(root: Path, recursive: bool, with_stat: bool = True):
             yield entry.path, stat.st_size, stat.st_mtime
 
 
-def _attach_aux(conn, video_id: int, media_path: Path, size, mtime, digest) -> None:
+def _attach_aux(conn, video_id: int, media_path: Path, size, mtime, digest,
+                storages_list: list[dict] | None = None) -> None:
     """Сайдкар, субтитры и обложка рядом с видео -> строки files того же видео.
 
     Обход - os.listdir, а не glob: имена вида «Title [dQw4w9WgXcQ].mp4»
@@ -212,7 +216,8 @@ def _attach_aux(conn, video_id: int, media_path: Path, size, mtime, digest) -> N
             stat = None
         if stat:
             repo.record_file(conn, video_id, str(sidecar), "sidecar",
-                             size=stat.st_size, mtime=stat.st_mtime)
+                             size=stat.st_size, mtime=stat.st_mtime,
+                             storages_list=storages_list)
     try:
         names = os.listdir(parent)
     except OSError:
@@ -234,7 +239,8 @@ def _attach_aux(conn, video_id: int, media_path: Path, size, mtime, digest) -> N
         except OSError:
             continue
         repo.record_file(conn, video_id, str(candidate), kind,
-                         size=stat.st_size, mtime=stat.st_mtime)
+                         size=stat.st_size, mtime=stat.st_mtime,
+                         storages_list=storages_list)
 
 
 def scan(roots, db, *, progress=None, stop=None, compute_hash: bool = True) -> dict:
@@ -259,13 +265,16 @@ def scan(roots, db, *, progress=None, stop=None, compute_hash: bool = True) -> d
         if not root.get("enabled", True) or not path:
             continue
         if not os.path.isdir(path):
+            # Недоступный корень НЕ помечает свои файлы пропавшими:
+            # отключённый диск - не потеря (см. _mark_missing).
             report["roots"].append({"path": path, "state": "unavailable"})
             continue
-        active.append((Path(path), bool(root.get("recursive", True))))
+        active.append((Path(path), bool(root.get("recursive", True)),
+                       root.get("id")))
 
     # Общий счётчик для полосы: только подсчёт имён, без stat.
     total = 0
-    for path, recursive in active:
+    for path, recursive, _sid in active:
         for _file in _walk(path, recursive, with_stat=False):
             total += 1
     if progress:
@@ -274,7 +283,7 @@ def scan(roots, db, *, progress=None, stop=None, compute_hash: bool = True) -> d
     done = 0
     seen_paths: set[str] = set()
 
-    for root_path, recursive in active:
+    for root_path, recursive, storage_id in active:
         if stop is not None and stop.is_set():
             report["stopped"] = True
             break
@@ -310,7 +319,8 @@ def scan(roots, db, *, progress=None, stop=None, compute_hash: bool = True) -> d
         # недоступность не должна помечать всю библиотеку потерянной.
         # Записи уже на диске: соединения в autocommit, отдельный коммит
         # прогону не нужен - прогресс виден сразу.
-        missing = _mark_missing(conn, root_path, seen_paths)
+        missing = _mark_missing(conn, root_path, seen_paths,
+                                storage_id=storage_id)
         report["missing"] += missing
         root_state["missing"] = missing
 
@@ -348,8 +358,8 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
             data["key"] = video_key(PLATFORM, sidecar["remote_id"])
         vid, _created = repo.upsert_video(conn, data, full=True)
         if vid:
-            _register_media(conn, vid, file_path, size, mtime, None)
-            _attach_aux(conn, vid, media_path, size, mtime, None)
+            _register_media(conn, vid, file_path, size, mtime, None, lookups.storages)
+            _attach_aux(conn, vid, media_path, size, mtime, None, lookups.storages)
             report["bound_sidecar"] += 1
             lookups.by_path[file_path] = {"video_id": vid, "hash": sidecar.get("hash"),
                                           "size": size, "mtime": mtime}
@@ -361,8 +371,8 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
             key = video_key(PLATFORM, token)
             vid = lookups.by_key.get(key)
             if vid:
-                _register_media(conn, vid, file_path, size, mtime, None)
-                _attach_aux(conn, vid, media_path, size, mtime, None)
+                _register_media(conn, vid, file_path, size, mtime, None, lookups.storages)
+                _attach_aux(conn, vid, media_path, size, mtime, None, lookups.storages)
                 report["bound_id"] += 1
                 lookups.by_path[file_path] = {"video_id": vid, "hash": None,
                                               "size": size, "mtime": mtime}
@@ -374,8 +384,8 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
         if not ids or variant in multi_title:
             continue
         vid = ids[0]
-        _register_media(conn, vid, file_path, size, mtime, None)
-        _attach_aux(conn, vid, media_path, size, mtime, None)
+        _register_media(conn, vid, file_path, size, mtime, None, lookups.storages)
+        _attach_aux(conn, vid, media_path, size, mtime, None, lookups.storages)
         report["bound_title"] += 1
         lookups.by_path[file_path] = {"video_id": vid, "hash": None,
                                       "size": size, "mtime": mtime}
@@ -385,7 +395,7 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
     # кто-то другой - привязываем новый файл к той же записи.
     if known is not None:
         vid = known["video_id"]
-        _register_media(conn, vid, file_path, size, mtime, None)
+        _register_media(conn, vid, file_path, size, mtime, None, lookups.storages)
         report["updated"] += 1
         lookups.by_path[file_path] = {"video_id": vid, "hash": known["hash"],
                                       "size": size, "mtime": mtime}
@@ -400,20 +410,26 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
             report["errors"].append(f"{file_path}: {exc}")
         if digest and digest in lookups.by_hash:
             vid, old_path = lookups.by_hash[digest]
-            conn.execute("UPDATE files SET path=?, size=?, mtime=?, missing=0 "
-                         "WHERE video_id=? AND hash=?",
-                         (file_path, size, mtime, vid, digest))
+            # Переезд: строка едет за файлом (та же запись, новый путь и
+            # новое хранилище), а не плодит дубль со старым адресом.
+            storage, rel = storages_mod.split_path(lookups.storages, file_path)
+            conn.execute(
+                "UPDATE files SET path=?, storage_id=?, rel_path=?, size=?, "
+                "mtime=?, missing=0 WHERE video_id=? AND hash=? AND path=?",
+                (file_path, storage["id"] if storage else None,
+                 rel if storage else None, size, mtime, vid, digest, old_path))
             if old_path != file_path:
                 report["rebound"] += 1
             lookups.by_path[file_path] = {"video_id": vid, "hash": digest,
                                           "size": size, "mtime": mtime}
-            _attach_aux(conn, vid, media_path, size, mtime, digest)
+            _attach_aux(conn, vid, media_path, size, mtime, digest, lookups.storages)
             return "hash"
 
     # 6. ничего не подошло - честный импорт без площадочной личности
     vid = repo.insert_local_video(conn, title=sanitize_name(stem), path=file_path,
-                                   size=size, mtime=mtime, digest=digest)
-    _attach_aux(conn, vid, media_path, size, mtime, digest)
+                                   size=size, mtime=mtime, digest=digest,
+                                   storages_list=lookups.storages)
+    _attach_aux(conn, vid, media_path, size, mtime, digest, lookups.storages)
     if digest:
         lookups.by_hash[digest] = (vid, file_path)
     lookups.by_path[file_path] = {"video_id": vid, "hash": digest,
@@ -423,30 +439,37 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
 
 
 def _register_media(conn, video_id: int, file_path: str, size: int,
-                    mtime: float, digest: str | None) -> None:
-    """Привязать видеофайл к записи (и снять с неё флаг «пропало»)."""
-    conn.execute(
-        """INSERT INTO files (video_id, kind, path, size, hash, mtime, missing)
-           VALUES (?, 'video', ?, ?, ?, ?, 0)
-           ON CONFLICT (path) DO UPDATE SET
-               video_id=excluded.video_id, size=excluded.size,
-               mtime=excluded.mtime,
-               hash=coalesce(excluded.hash, files.hash), missing=0""",
-        # порядок аргументов = порядку ? в запросе: size, hash, mtime
-        (video_id, file_path, size, digest, mtime))
-    conn.execute(
-        """UPDATE videos SET status='downloaded', updated_at=?
-           WHERE id=? AND status IN ('known','queued','failed','missing')""",
-        (now_iso(), video_id))
+                    mtime: float, digest: str | None,
+                    storages_list: list[dict] | None = None) -> None:
+    """Привязать видеофайл к записи (и снять с неё флаг «пропало»).
+
+    Вся логика - в repo.record_file: туда же сводится привязка к хранилищу
+    (storage_id/rel_path) и перевод статуса в downloaded.
+    """
+    repo.record_file(conn, video_id, file_path, "video", size=size,
+                     mtime=mtime, digest=digest, storages_list=storages_list)
 
 
-def _mark_missing(conn, root_path: Path, seen: set[str]) -> int:
-    """Файлы этого корня, не встреченные в прогоне, пометить пропавшими."""
-    prefix = str(root_path).rstrip(os.sep) + os.sep
-    rows = conn.execute(
-        """SELECT f.path, f.video_id FROM files f
-            WHERE f.kind='video' AND f.missing=0 AND f.path LIKE ?""",
-        (prefix + "%",)).fetchall()
+def _mark_missing(conn, root_path: Path, seen: set[str],
+                  storage_id: str | None = None) -> int:
+    """Файлы этого корня, не встреченные в прогоне, пометить пропавшими.
+
+    Предпочтительен storage_id (индекс, без LIKE); префикс остаётся
+    запасным путём для вызовов, где хранилище неизвестно. Вызывается только
+    для доступных и включённых корней - недоступный носитель не должен
+    разом пометить тысячи файлов потерянными.
+    """
+    if storage_id:
+        rows = conn.execute(
+            """SELECT f.path, f.video_id FROM files f
+                WHERE f.kind='video' AND f.missing=0 AND f.storage_id=?""",
+            (storage_id,)).fetchall()
+    else:
+        prefix = str(root_path).rstrip(os.sep) + os.sep
+        rows = conn.execute(
+            """SELECT f.path, f.video_id FROM files f
+                WHERE f.kind='video' AND f.missing=0 AND f.path LIKE ?""",
+            (prefix + "%",)).fetchall()
     lost = 0
     for row in rows:
         if row["path"] in seen:
@@ -469,12 +492,13 @@ def headless_scan() -> int:
     from . import settings
     from .db import Database
 
-    config = settings.load()
-    roots = config.get("library_roots") or []
-    if not roots:
-        print("Нет корней библиотеки: добавьте папки в настройках.")
-        return 1
     db = Database()
+    roots = [row for row in storages_mod.all_storages(db.conn)
+             if row.get("enabled", 1)]
+    if not roots:
+        print("Нет хранилищ: добавьте папку в настройках.")
+        return 1
+    config = settings.load()
 
     def progress(done, total, path):
         if done % 200 == 0 or done == total:

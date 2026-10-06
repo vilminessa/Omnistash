@@ -40,15 +40,21 @@ class QueueCase(GuiCase):
         self.dest = self.dir / "downloads"
         self.dest.mkdir(parents=True, exist_ok=True)
         self.api = self.make_api()
-        self.api.save_setting({"key": "dest_dir", "value": str(self.dest)})
+        # Куда качать - выбирается вручную: здесь назначаем глобальное
+        # хранилище (в приложении это делает диалог/панель выделения).
+        storage = self.add_storage(self.api, self.dest)
+        self.api.save_setting({"key": "default_storage_id",
+                               "value": storage["id"]})
 
     def fake_download(self, behaviour=None):
-        """Подмена downloader.download: пишет файл и сайдкар в dest_dir."""
+        """Подмена downloader.download: пишет файл и сайдкар в хранилище."""
 
-        def download(video, settings, *, stop, on_progress=None):
+        def download(video, settings, *, stop, on_progress=None, dest=None):
             if behaviour:
-                return behaviour(video, settings, stop=stop, on_progress=on_progress)
-            target = pathlib.Path(settings.get("dest_dir") or ".")
+                return behaviour(video, settings, stop=stop,
+                                 on_progress=on_progress, dest=dest)
+            # dest приходит из очереди - цель, которую выбрал человек.
+            target = pathlib.Path(dest or ".")
             target.mkdir(parents=True, exist_ok=True)
             path = target / f"{video['remote_id']}.mp4"
             path.write_bytes(b"payload-" + video["remote_id"].encode())
@@ -97,7 +103,7 @@ class TestWorker(QueueCase):
     def test_failure_marks_failed_and_counts(self):
         vid = make_video(self.api, "vid000000002", "Плохое")
 
-        def broken(video, settings, *, stop, on_progress=None):
+        def broken(video, settings, *, stop, on_progress=None, dest=None):
             return {"cancelled": False, "files": [], "info": {},
                     "error": "площадка не отдала файл", "hash": None}
 
@@ -122,7 +128,7 @@ class TestWorker(QueueCase):
         make_video(self.api, "vid000000003", "Долгое")
         started = {"hit": False}
 
-        def slow(video, settings, *, stop, on_progress=None):
+        def slow(video, settings, *, stop, on_progress=None, dest=None):
             started["hit"] = True
             stop.wait(10)          # качаем, пока не нажмут Стоп
             return {"cancelled": stop.is_set(), "files": [], "info": {},

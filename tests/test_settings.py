@@ -28,27 +28,25 @@ class TestCoerce(unittest.TestCase):
         self.assertEqual(settings_schema.coerce("quality", "ultra"), "high")
         self.assertEqual(settings_schema.coerce("default_sync_mode", "мусор"), "partial")
 
-    def test_unknown_key_passes_through(self):
+    def test_coerce_unknown_key_passes_through(self):
         # Ключа нет в схеме - значение не трогаем (отсечётся при записи).
         self.assertEqual(settings_schema.coerce("что-то", 42), 42)
 
-    def test_roots_normalization(self):
-        roots = settings_schema.coerce("library_roots", [
-            "C:/видео",
-            {"path": "  D:\\films  ", "recursive": False, "enabled": "нет"},
-            {"path": ""},                       # пустой отбрасывается
-            {"path": "C:/видео"},               # дубль отбрасывается
-            42,                                 # мусор отбрасывается
-        ])
-        self.assertEqual(roots, [
-            {"path": "C:/видео", "recursive": True, "enabled": True},
-            {"path": "D:\\films", "recursive": False, "enabled": False},
-        ])
-
-    def test_defaults_are_independent(self):
-        first = settings_schema.defaults()
-        first["library_roots"].append({"path": "x", "recursive": True, "enabled": True})
-        self.assertEqual(settings_schema.defaults()["library_roots"], [])
+    def test_deprecated_keys_are_gone(self):
+        # library_roots/dest_dir перенесены в таблицу storages: их не должно
+        # быть ни в дефолтах, ни в схеме - иначе файл настроек будет
+        # тихо хранить два источника правды.
+        defaults = settings_schema.defaults()
+        self.assertNotIn("library_roots", defaults)
+        self.assertNotIn("dest_dir", defaults)
+        keys = {f["key"] for f in settings_schema.FIELDS}
+        self.assertNotIn("library_roots", keys)
+        self.assertNotIn("dest_dir", keys)
+        # Вместо них - поле-виджет хранилищ (не пишется в файл) и выбор
+        # глобального хранилища.
+        self.assertIn("_storages", keys)
+        self.assertIn("default_storage_id", keys)
+        self.assertTrue(settings_schema.field("_storages").get("transient"))
 
 
 class TestPersistence(unittest.TestCase):

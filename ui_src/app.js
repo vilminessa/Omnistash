@@ -30,8 +30,12 @@
     rev: -1,
     logLines: [],
     busy: false,
-    selected: null
+    selected: null,        // Set(id): мультивыбор в таблице
+    storages: [],          // хранилища из poll (вместо старых корней)
+    selStorage: "",        // явный выбор в панели выделения
+    wizardDismissed: false // «настроить позже» на первом запуске
   };
+  state.selected = new Set();
 
   /* ------------------------------------------------------------------ *
    *  Мост к Python
@@ -155,6 +159,7 @@
     // Рисуем только то, что реально изменилось: перестройка innerHTML на
     // каждом тике (2 раза в секунду) ломала бы открытые селекты и клики.
     if (changed("stats", snap.stats)) renderStats(snap.stats);
+    if (changed("storages", snap.storages)) renderStorages(snap.storages);
     if (changed("scan", snap.scan)) renderScan(snap.scan);
     if (changed("tree", snap.tree)) renderTree(snap.tree);
     if (changed("sources", snap.sources)) renderSources(snap.sources);
@@ -300,12 +305,119 @@
    *  Таблица библиотеки (виртуализация)
    * ------------------------------------------------------------------ */
 
+  /* ------------------------------------------------------------------ *
+   *  Хранилища, мультивыбор и стартовый диалог
+   * ------------------------------------------------------------------ */
+
+  function activeStorages() {
+    return (state.storages || []).filter(function (storage) {
+      return storage.status === "active" && storage.enabled;
+    });
+  }
+
+  function defaultStorageId() {
+    var active = activeStorages();
+    if (!active.length) return "";
+    var chosen = state.settings.default_storage_id;
+    if (chosen && active.some(function (s) { return s.id === chosen; })) {
+      return chosen;
+    }
+    // Одно хранилище - сомневаться не о чем; несколько - выбираем первое
+    // видимым селектом, пользователь всегда может поменять.
+    return active[0].id;
+  }
+
+  function storageOptionsHtml(selected) {
+    var active = activeStorages();
+    if (!active.length) {
+      return '<option value="">нет хранилищ - добавьте в настройках</option>';
+    }
+    if (!selected) selected = defaultStorageId();
+    return active.map(function (storage) {
+      var label = storage.label + (storage.available ? "" : " (нет носителя)");
+      return '<option value="' + storage.id + '"' +
+        (storage.id === selected ? " selected" : "") + ">" +
+        esc(label) + "</option>";
+    }).join("");
+  }
+
+  function fillStorageSelects() {
+    Array.prototype.forEach.call(
+      document.querySelectorAll("[data-storage-select]"), function (el) {
+        var preferred = el.id === "sel-storage"
+          ? (state.selStorage || defaultStorageId())
+          : (el.dataset.prefer || defaultStorageId());
+        var current = el.value || preferred;
+        el.innerHTML = storageOptionsHtml(current);
+        if (current && !el.value) el.value = current;
+      });
+  }
+
+  function renderStorages(list) {
+    state.storages = list || [];
+    fillStorageSelects();
+    updateWizard();
+    // Виджет в настройках рисуется из этого списка - перерисовываем,
+    // если карточка открыта (иначе кнопки останутся на старых данных).
+    if (state.tab === "settings") renderSettings();
+  }
+
+  function renderSelBar() {
+    var count = state.selected.size;
+    $("sel-bar").hidden = count === 0;
+    $("sel-count").textContent = "Выбрано: " + count;
+    fillStorageSelects();
+  }
+
+  function toggleSelected(id, on, node) {
+    if (on) state.selected.add(id);
+    else state.selected.delete(id);
+    if (node) node.classList.toggle("picked", on);
+    renderSelBar();
+  }
+
+  function clearSelection() {
+    state.selected.clear();
+    var all = $("sel-all");
+    if (all) all.checked = false;
+    renderSelBar();
+    paintGrid();
+  }
+
+  function updateWizard() {
+    // Первый запуск (и пока хранилищ нет): спрашиваем, где хранить.
+    var need = (state.storages || []).length === 0 && !state.wizardDismissed;
+    $("storage-overlay").hidden = !need;
+  }
+
+  function enqueueSelection() {
+    var ids = Array.from(state.selected);
+    if (!ids.length) return;
+    var storageId = $("sel-storage").value;
+    if (!storageId) {
+      toast("Не выбрано хранилище - добавьте папку в настройках", true);
+      switchTab("settings");
+      return;
+    }
+    call("enqueue", { ids: ids, storage_id: storageId }).then(function (res) {
+      if (!res) return;
+      if (res.error) { toast(res.error, true); return; }
+      toast("В очередь поставлено: " + res.queued);
+      clearSelection();
+      switchTab("queue");
+    });
+  }
+
   function renderGrid(reset) {
     if (reset) {
       state.pages = {};
       state.total = 0;
       $("grid-body").scrollTop = 0;
       $("grid-rows").style.transform = "translateY(0)";
+      // Смена контекста (фильтр/канал/поиск) сбрасывает выделение:
+      // id из другого набора в очереди ничего не значат.
+      state.selected.clear();
+      renderSelBar();
     }
     loadPage(0);
   }
@@ -369,6 +481,14 @@
         node.addEventListener("click", function () {
           openDetail(Number(node.dataset.id));
         });
+        // Чекбокс переключает выделение и НЕ открывает карточку.
+        var box = node.querySelector(".row-check");
+        if (box) {
+          box.addEventListener("click", function (event) {
+            event.stopPropagation();
+            toggleSelected(Number(box.dataset.id), box.checked, node);
+          });
+        }
       });
     });
   }
@@ -381,7 +501,12 @@
   }
 
   function rowHtml(row, index) {
-    return '<div class="row" data-id="' + row.id + '" data-i="' + index + '">' +
+    var picked = state.selected.has(row.id);
+    return '<div class="row' + (picked ? " picked" : "") + '" data-id="' +
+      row.id + '" data-i="' + index + '">' +
+      '<span class="c-check"><input type="checkbox" class="row-check" data-id="' +
+        row.id + '"' + (picked ? " checked" : "") +
+        ' aria-label="Выбрать строку"></span>' +
       '<span class="cell status" data-s="' + esc(row.status) + '">' +
         esc(row.status_label || statusLabel(row.status)) + "</span>" +
       '<span class="cell c-title" title="' + esc(row.title) + '">' + esc(row.title || "—") + "</span>" +
@@ -435,7 +560,11 @@
       // Действия по статусу: качаем только то, чего нет; скачанное -
       // открываем там, где оно лежит.
       var actions = [];
-      if (["known", "failed", "missing"].indexOf(data.status) >= 0) {
+      if (["known", "failed", "missing", "detached"].indexOf(data.status) >= 0) {
+        // Выбор хранилища - здесь же: фоновая очередь спрашивать не может.
+        actions.push('<select class="detail-storage" data-storage-select ' +
+          'data-prefer="' + esc(defaultStorageId()) + '" aria-label="Хранилище">' +
+          storageOptionsHtml(defaultStorageId()) + "</select>");
         actions.push('<button class="btn primary" data-detail="download">Скачать</button>');
       }
       if (data.status === "queued" || data.status === "downloading") {
@@ -474,12 +603,16 @@
         btn.addEventListener("click", function () {
           var action = btn.dataset.detail;
           if (action === "download") {
-            call("enqueue", { ids: [data.id] }).then(function (res) {
-              if (res && res.error) { toast(res.error, true); return; }
-              toast("В очередь поставлено: " + (res ? res.queued : 0));
-              $("detail-overlay").hidden = true;
-              switchTab("queue");
-            });
+            var pick = document.querySelector(
+              "#detail-body [data-storage-select]");
+            var storageId = pick ? pick.value : defaultStorageId();
+            call("enqueue", { ids: [data.id], storage_id: storageId })
+              .then(function (res) {
+                if (res && res.error) { toast(res.error, true); return; }
+                toast("В очередь поставлено: " + (res ? res.queued : 0));
+                $("detail-overlay").hidden = true;
+                switchTab("queue");
+              });
           } else if (action === "queue") {
             $("detail-overlay").hidden = true;
             switchTab("queue");
@@ -685,8 +818,8 @@
       control = '<input type="text" data-key="' + field.key + '" value="' +
         esc(value) + '"><button class="btn ghost" data-browse="' + field.key +
         '">…</button>';
-    } else if (field.type === "roots") {
-      control = rootsHtml(value || []);
+    } else if (field.type === "storages") {
+      control = storagesHtml();
     } else {
       control = '<input type="text" data-key="' + field.key + '" value="' +
         esc(value) + '">';
@@ -697,19 +830,61 @@
       '<div class="field-control">' + control + "</div></div>";
   }
 
-  function rootsHtml(roots) {
-    var rows = roots.map(function (root, index) {
-      return '<div class="root-row' + (root.enabled ? "" : " off") + '" data-i="' + index + '">' +
-        '<span class="root-path" title="' + esc(root.path) + '">' + esc(root.path) + "</span>" +
-        '<label class="check"><input type="checkbox" data-root-recursive="' + index + '"' +
-          (root.recursive ? " checked" : "") + "><span>вглубь</span></label>" +
-        '<label class="check"><input type="checkbox" data-root-enabled="' + index + '"' +
-          (root.enabled ? " checked" : "") + "><span>включён</span></label>" +
-        '<button class="link-btn" data-root-remove="' + index + '">убрать</button>' +
+  function storagesHtml() {
+    var rows = (state.storages || []).map(function (storage) {
+      var active = storage.status === "active";
+      var dot = !active ? "off" : (storage.available ? "" : "bad");
+      var cls = "storage-row" + (storage.enabled ? "" : " off") +
+        (active ? "" : " detached");
+      var free;
+      if (!active) {
+        free = "отвязано";
+      } else if (!storage.available) {
+        free = "нет носителя";
+      } else if (storage.free_bytes) {
+        free = humanSize(storage.free_bytes) + " свободно";
+      } else {
+        free = "—";
+      }
+      var actions = [];
+      if (active) {
+        actions.push('<label class="storage-default"><input type="radio" ' +
+          'name="storage-default" data-storage-default="' + storage.id + '"' +
+          (state.settings.default_storage_id === storage.id ? " checked" : "") +
+          "><span>по умолчанию</span></label>");
+        actions.push('<button class="link-btn" data-storage-toggle="' +
+          storage.id + '">' + (storage.enabled ? "отключить" : "включить") +
+          "</button>");
+        actions.push('<button class="link-btn" data-storage-path="' +
+          storage.id + '">путь…</button>');
+        actions.push('<button class="link-btn" data-storage-detach="' +
+          storage.id + '">отвязать</button>');
+      } else {
+        actions.push('<button class="link-btn" data-storage-restore="' +
+          storage.id + '">вернуть</button>');
+        actions.push('<button class="link-btn" data-storage-forget="' +
+          storage.id + '">забыть навсегда</button>');
+      }
+      return '<div class="' + cls + '">' +
+        '<span class="storage-dot ' + dot + '" title="' +
+        (active ? (storage.available ? "доступно" : "недоступно") : "отвязано") +
+        '"></span>' +
+        '<span class="storage-name"><b>' + esc(storage.label) + "</b>" +
+        '<span class="storage-path" title="' + esc(storage.path) + '">' +
+        esc(storage.path) + "</span></span>" +
+        '<span class="storage-free">' + esc(free) + "</span>" +
+        '<span class="storage-actions">' + actions.join("") + "</span>" +
         "</div>";
     }).join("");
-    return '<div class="roots">' + rows +
-      '<div><button class="btn ghost" id="roots-add">+ Добавить папку</button></div></div>';
+    if (!rows) {
+      rows = '<div class="muted">Хранилищ нет. Добавьте папку, в которую ' +
+        "будете скачивать и которую будем индексировать.</div>";
+    }
+    return '<div class="storages">' + rows +
+      '<div class="storage-toolbar">' +
+      '<button class="btn ghost" id="storage-add">+ Добавить папку</button>' +
+      '<button class="btn ghost" id="storage-check">Проверить доступность</button>' +
+      "</div></div>";
   }
 
   function bindSettings() {
@@ -722,49 +897,115 @@
         });
       });
 
-    Array.prototype.forEach.call(
-      document.querySelectorAll("#settings-body [data-browse]"), function (btn) {
-        btn.addEventListener("click", function () {
-          call("pick_folder").then(function (path) {
-            if (!path) return;
-            saveSetting(btn.dataset.browse, path);
-          });
-        });
-      });
+    bindStorageActions(document.getElementById("settings-body"));
+  }
 
-    var add = document.getElementById("roots-add");
-    if (add) add.addEventListener("click", function () {
+  function bindStorageActions(root) {
+    if (!root) return;
+    var on = function (selector, handler) {
+      Array.prototype.forEach.call(root.querySelectorAll(selector), function (el) {
+        el.addEventListener("click", handler);
+      });
+    };
+
+    on("#storage-add, .storage-add", function () { pickAndAddStorage(); });
+    on("#storage-check", function () {
+      call("storage_check").then(function () { toast("Проверяем…"); });
+    });
+    on("[data-storage-default]", function (ev) {
+      call("storage_set_default", { id: ev.currentTarget.dataset.storageDefault })
+        .then(function (res) {
+          if (res && res.error) toast(res.error, true);
+        });
+    });
+    on("[data-storage-toggle]", function (ev) {
+      var id = ev.currentTarget.dataset.storageToggle;
+      var storage = findStorage(id);
+      call("storage_enable", { id: id, enabled: !(storage && storage.enabled) });
+    });
+    on("[data-storage-path]", function (ev) {
+      var id = ev.currentTarget.dataset.storagePath;
       call("pick_folder").then(function (path) {
         if (!path) return;
-        var roots = (state.settings.library_roots || []).slice();
-        roots.push({ path: path, recursive: true, enabled: true });
-        saveSetting("library_roots", roots);
+        call("storage_set_path", { id: id, path: path }).then(function (res) {
+          if (res && res.error) { toast(res.error, true); return; }
+          toast("Переехало файлов: " + res.files + ", найдено на месте: " +
+            res.present);
+        });
       });
     });
-
-    Array.prototype.forEach.call(
-      document.querySelectorAll("#settings-body [data-root-remove]"), function (btn) {
-        btn.addEventListener("click", function () {
-          var roots = (state.settings.library_roots || []).slice();
-          roots.splice(Number(btn.dataset.rootRemove), 1);
-          saveSetting("library_roots", roots);
-        });
-      });
-
-    Array.prototype.forEach.call(
-      document.querySelectorAll("#settings-body [data-root-recursive], " +
-        "#settings-body [data-root-enabled]"), function (input) {
-        input.addEventListener("change", function () {
-          var roots = (state.settings.library_roots || []).map(function (r) {
-            return { path: r.path, recursive: r.recursive, enabled: r.enabled };
+    on("[data-storage-detach]", function (ev) {
+      var id = ev.currentTarget.dataset.storageDetach;
+      call("storage_preview_detach", { id: id }).then(function (preview) {
+        if (!preview || preview.error) {
+          toast(preview && preview.error, true);
+          return;
+        }
+        var text = "Отвязать «" + preview.label + "»?\n\n" +
+          "Будет забыто файлов: " + preview.files + "\n" +
+          "Видео останется без файла («откреплено»): " + preview.detached + "\n" +
+          "Будут удалены как локальные (без площадочной личности): " +
+          preview.local_deleted + "\n" +
+          "Копия в другом хранилище не пострадает: " + preview.kept_elsewhere;
+        // Шаг 1: согласие на отвязку (Отмена = ничего не делать).
+        if (!confirm(text + "\n\nОтвязать?")) return;
+        // Шаг 2: что оставить про саму папку - спрашиваем каждый раз.
+        var keepTrace = confirm(
+          "Оставить след папки?\n\n" +
+          "ОК - оставить след: при следующем добавлении я узнаю папку и " +
+          "предложю вернуть её без перекачки.\n" +
+          "Отмена - забыть совсем: не останется ничего, восстановление " +
+          "будет только обычной переиндексацией.");
+        call("storage_detach", { id: id, keep_trace: keepTrace })
+          .then(function (res) {
+            if (res && res.error) { toast(res.error, true); return; }
+            toast("Отвязано «" + res.label + "»: забыто файлов " +
+              res.files_removed + (res.kept_trace ? ", след остался" : ""));
           });
-          var index = Number(input.dataset.rootRecursive !== undefined
-            ? input.dataset.rootRecursive : input.dataset.rootEnabled);
-          if (input.dataset.rootRecursive !== undefined) roots[index].recursive = input.checked;
-          else roots[index].enabled = input.checked;
-          saveSetting("library_roots", roots);
-        });
       });
+    });
+    on("[data-storage-restore]", function (ev) {
+      call("storage_restore", { id: ev.currentTarget.dataset.storageRestore })
+        .then(function (res) {
+          if (res && res.error) { toast(res.error, true); return; }
+          toast("Возвращено - запустите переиндексацию, чтобы вернуть файлы");
+        });
+    });
+    on("[data-storage-forget]", function (ev) {
+      var id = ev.currentTarget.dataset.storageForget;
+      if (!confirm("Удалить след папки совсем? Восстановить её после этого " +
+                   "получится только обычной переиндексацией.")) return;
+      call("storage_forget", { id: id }).then(function (res) {
+        if (res && res.error) toast(res.error, true);
+      });
+    });
+  }
+
+  function findStorage(id) {
+    return (state.storages || []).filter(function (s) { return s.id === id; })[0];
+  }
+
+  function pickAndAddStorage() {
+    call("pick_folder").then(function (path) {
+      if (!path) return;
+      call("storage_add", { path: path }).then(function (res) {
+        if (!res) return;
+        if (res.error) { toast(res.error, true); return; }
+        if (res.hint === "detached") {
+          toast("Это отвязанная папка - нажмите «вернуть» в списке", true);
+          return;
+        }
+        if (res.hint === "already") {
+          toast("Это хранилище уже добавлено");
+          return;
+        }
+        if (res.hint === "known_root") {
+          toast("Папка уже известна как «" + res.storage.label + "»", true);
+          return;
+        }
+        toast("Хранилище добавлено: " + res.storage.label);
+      });
+    });
   }
 
   function saveSetting(key, value) {
@@ -940,6 +1181,9 @@
           }).join("") + "</div>" +
           '<div class="card-actions">' +
           '<button class="btn ghost" data-act="pick-all">Выбрать все</button>' +
+          '<select data-storage-select data-prefer="' + esc(defaultStorageId()) +
+            '" id="pick-storage" aria-label="Хранилище">' +
+            storageOptionsHtml(defaultStorageId()) + "</select>" +
           '<button class="btn" data-act="close">Позже</button>' +
           '<button class="btn primary" data-act="download" id="pick-go" disabled>Загрузить выбранные</button>' +
           "</div>";
@@ -1045,7 +1289,9 @@
     }
     if (action === "download") {
       var ids = Object.keys(addForm.picked).map(Number);
-      call("enqueue", { ids: ids }).then(function (res) {
+      var pick = document.getElementById("pick-storage");
+      call("enqueue", { ids: ids, storage_id: pick ? pick.value : "" })
+        .then(function (res) {
         if (res && res.error) { toast(res.error, true); return; }
         toast("В очередь поставлено: " + (res ? res.queued : 0));
         addForm.picked = {};
@@ -1090,6 +1336,10 @@
       $("panel-" + panel).hidden = panel !== name;
     });
     if (name === "library") paintGrid();
+    // Карточка настроек рисуется из schema+storages: на вкладке её надо
+    // перерисовать, иначе виджет хранилищ останется пустым (он рисовался
+    // до того, как пришли данные).
+    if (name === "settings") renderSettings();
   }
 
   /* ------------------------------------------------------------------ *
@@ -1123,6 +1373,31 @@
     $("rescan-btn").addEventListener("click", startScan);
     $("stop-scan-btn").addEventListener("click", function () { call("stop_scan"); });
 
+    // Мультивыбор в таблице библиотеки.
+    $("sel-clear").addEventListener("click", clearSelection);
+    $("sel-download").addEventListener("click", enqueueSelection);
+    $("sel-storage").addEventListener("change", function () {
+      state.selStorage = $("sel-storage").value;
+    });
+    $("sel-all").addEventListener("change", function () {
+      var on = $("sel-all").checked;
+      Array.prototype.forEach.call(
+        document.querySelectorAll("#grid-rows .row-check"), function (box) {
+          box.checked = on;
+          toggleSelected(Number(box.dataset.id), on, box.closest(".row"));
+        });
+    });
+
+    // Стартовый выбор хранилища.
+    $("wizard-pick").addEventListener("click", function () {
+      pickAndAddStorage();
+    });
+    $("wizard-later").addEventListener("click", function () {
+      state.wizardDismissed = true;
+      updateWizard();
+      switchTab("settings");
+    });
+
     $("queue-start-btn").addEventListener("click", function () {
       call("queue_start").then(function (res) {
         if (res && res.error) toast(res.error, true);
@@ -1139,11 +1414,13 @@
     });
     $("sync-stop-btn").addEventListener("click", function () { call("sync_stop"); });
     $("sync-queue-btn").addEventListener("click", function () {
-      call("sync_queue_new").then(function (res) {
-        if (res && res.error) { toast(res.error, true); return; }
-        toast("В очередь поставлено: " + (res ? res.queued : 0));
-        switchTab("queue");
-      });
+      var pick = document.getElementById("sync-storage");
+      call("sync_queue_new", { storage_id: pick ? pick.value : "" })
+        .then(function (res) {
+          if (res && res.error) { toast(res.error, true); return; }
+          toast("В очередь поставлено: " + (res ? res.queued : 0));
+          switchTab("queue");
+        });
     });
 
     $("add-btn").addEventListener("click", function () {
@@ -1225,6 +1502,7 @@
     ];
     var settings = {
       library_roots: [{ path: "D:\\видео\\библиотека", recursive: true, enabled: true }],
+      default_storage_id: "st_preview1",
       default_sync_mode: "partial", keep_sidecar: true, compute_hash: true,
       dest_dir: "D:\\видео\\downloads",
       output_template: "%(channel)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s",
@@ -1240,11 +1518,30 @@
     var mockSync = { running: false, index: 0, total: 0, current: null,
                      fetch: null, stage: null, results: [], new_ids: [],
                      new_total: 0, queued: 0, error: null };
+    // Хранилища в превью: одно активное, одно отвязанное - чтобы видеть
+    // оба состояния списка в настройках.
+    var mockStorages = [
+      { id: "st_preview1", path: "D:\\видео\\библиотека", label: "библиотека",
+        kind: "local", status: "active", enabled: 1, recursive: 1,
+        available: 1, free_bytes: 412345678901, total_bytes: 999000000000,
+        missing_since: null, detached_at: null, root_key: "rt_preview" },
+      { id: "st_preview2", path: "E:\\Внешний 4ТБ", label: "Внешний 4ТБ",
+        kind: "removable", status: "detached", enabled: 1, recursive: 1,
+        available: 0, free_bytes: null, total_bytes: null,
+        missing_since: null, detached_at: "2026-10-05T12:00:00",
+        root_key: "rt_preview2" }
+    ];
+    // ?empty=1 - «первый запуск»: показать стартовый диалог выбора папки.
+    if (location.search.indexOf("empty") >= 0) mockStorages.length = 0;
     // Схема нужна, чтобы в превью рисовалась карточка настроек.
+    // Должна совпадать с app/settings_schema.py (ключи и типы полей).
     var schema = [
-      { key: "library_roots", type: "roots", section: "Библиотека",
-        label: "Папки библиотеки", hint: "Что сканировать при переиндексации.",
-        default: [] },
+      { key: "_storages", type: "storages", section: "Библиотека",
+        label: "Хранилища",
+        hint: "Папки, которые индексируются и в которые можно качать.",
+        transient: true, default: [] },
+      { key: "default_storage_id", type: "str", section: "", label: "",
+        hint: "", hidden: true, default: "" },
       { key: "default_sync_mode", type: "choice", section: "Библиотека",
         label: "Режим синхронизации по умолчанию",
         hint: "Что делать с новыми видео источника.",
@@ -1255,8 +1552,8 @@
         hint: "Позволяет переиндексировать библиотеку после переезда.",
         default: true },
       { key: "dest_dir", type: "path", section: "Загрузка",
-        label: "Куда скачивать", hint: "Корень для новых загрузок.",
-        default: "D:\\видео\\downloads" },
+        label: "Куда скачивать", hint: "нет - заменено хранилищами",
+        hidden: true, default: "D:\\видео\\downloads" },
       { key: "quality", type: "choice", section: "Загрузка", label: "Качество",
         choices: [["best", "Исходное"], ["high", "Высокое"],
                   ["mid", "Среднее"], ["low", "Низкое"]], default: "high" },
@@ -1330,6 +1627,7 @@
           })(),
           add_flow: { phase: "idle", mode: "partial", url: "", fetch: null,
                       plan: null, stages: [], result: null, error: null },
+          storages: JSON.parse(JSON.stringify(mockStorages)),
           settings: settings, settings_rev: 1
         });
       },
@@ -1364,7 +1662,62 @@
         settings[pair.key] = pair.value;
         return Promise.resolve({ settings: settings, settings_rev: 1 });
       },
-      pick_folder: function () { return Promise.resolve(null); },
+      pick_folder: function () {
+        // В превью «выбираем» новую папку: обновляем пути у превью-хранилищ.
+        return Promise.resolve("D:\\видео\\подборки");
+      },
+      storage_add: function (req) {
+        if ((req || {}).path === "D:\\видео\\библиотека") {
+          return Promise.resolve({ hint: "already" });
+        }
+        var created = { id: "st_" + Math.random().toString(16).slice(2, 10),
+                        path: req.path, label: "подборки", kind: "local",
+                        status: "active", enabled: 1, recursive: 1,
+                        available: 1, free_bytes: 12345678901,
+                        missing_since: null, detached_at: null };
+        mockStorages.push(created);
+        return Promise.resolve({ ok: true, storage: created,
+                                 default_storage_id: settings.default_storage_id });
+      },
+      storage_check: function () { return Promise.resolve({ ok: true }); },
+      storage_set_path: function (req) {
+        var s = mockStorages.filter(function (x) { return x.id === req.id; })[0];
+        if (s) s.path = req.path;
+        return Promise.resolve({ ok: true, files: 12, present: 12,
+                                 old_path: "старый", new_path: req.path });
+      },
+      storage_preview_detach: function (req) {
+        var s = mockStorages.filter(function (x) { return x.id === req.id; })[0] || {};
+        return Promise.resolve({ label: s.label || "?", path: s.path || "",
+                                 files: 1240, detached: 1180,
+                                 local_deleted: 60, kept_elsewhere: 0,
+                                 status: s.status });
+      },
+      storage_detach: function (req) {
+        var s = mockStorages.filter(function (x) { return x.id === req.id; })[0];
+        if (s) s.status = "detached";
+        return Promise.resolve({ ok: true, label: s ? s.label : "?",
+                                 files_removed: 1240,
+                                 kept_trace: !!req.keep_trace });
+      },
+      storage_restore: function (req) {
+        var s = mockStorages.filter(function (x) { return x.id === req.id; })[0];
+        if (s) s.status = "active";
+        return Promise.resolve({ ok: true, storage: s });
+      },
+      storage_forget: function (req) {
+        mockStorages = mockStorages.filter(function (x) { return x.id !== req.id; });
+        return Promise.resolve({ ok: true, label: "забыто" });
+      },
+      storage_enable: function (req) {
+        var s = mockStorages.filter(function (x) { return x.id === req.id; })[0];
+        if (s) s.enabled = req.enabled ? 1 : 0;
+        return Promise.resolve({ ok: true });
+      },
+      storage_set_default: function (req) {
+        settings.default_storage_id = req.id;
+        return Promise.resolve({ ok: true, default_storage_id: req.id });
+      },
       queue_start: function () {
         mockDl.running = true;
         mockDl.attempted += 1;

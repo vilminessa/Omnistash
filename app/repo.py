@@ -16,6 +16,7 @@ import json
 import sqlite3
 from collections import Counter
 
+from . import storages as storages_mod
 from .db import STATUSES, SYNC_MODES
 from .metadata import PLATFORM, local_key, video_key
 from .util import now_iso
@@ -215,21 +216,50 @@ def link_item(conn: sqlite3.Connection, playlist_id: int, video_id: int,
 
 def record_file(conn: sqlite3.Connection, video_id: int, path: str, kind: str,
                 size: int | None = None, mtime: float | None = None,
-                digest: str | None = None, format_json: str | None = None) -> None:
-    """Файл на диске -> строка files (сразу с флагом «существует»)."""
+                digest: str | None = None, format_json: str | None = None,
+                storages_list: list[dict] | None = None) -> None:
+    """Файл на диске -> строка files (сразу с флагом «существует»).
+
+    Здесь же проставляется каноническая привязка: storage_id + rel_path.
+    Скан передаёт свой кэш хранилищ (storages_list), чтобы на десятках тысяч
+    файлов не вычитывать таблицу заново; без кэша - один запрос на вызов.
+
+    status='detached' в списке восстанавливаемых - не случайно: вернувшаяся
+    из отвязанной папки копия снова делает видео «скачанным».
+    """
+    if storages_list is None:
+        storages_list = storages_mod.all_storages(conn)
+    storage, rel = storages_mod.split_path(storages_list, path)
     conn.execute(
-        """INSERT INTO files (video_id, kind, path, size, hash, mtime, missing)
-           VALUES (?,?,?,?,?,?,0)
+        """INSERT INTO files (video_id, kind, path, size, hash, mtime, missing,
+                              storage_id, rel_path)
+           VALUES (?,?,?,?,?,?,?,?,?)
            ON CONFLICT (path) DO UPDATE SET
                video_id=excluded.video_id, kind=excluded.kind,
                size=excluded.size, hash=coalesce(excluded.hash, files.hash),
-               mtime=excluded.mtime, missing=0""",
-        (video_id, kind, path, size, digest, mtime))
+               mtime=excluded.mtime, missing=0,
+               storage_id=excluded.storage_id,
+               rel_path=excluded.rel_path""",
+        (video_id, kind, path, size, digest, mtime, 0,
+         storage["id"] if storage else None, rel if storage else None))
     if kind == "video":
         conn.execute(
             """UPDATE videos SET status='downloaded', downloaded_at=coalesce(downloaded_at, ?)
-               WHERE id=? AND status IN ('known','queued','downloading','failed','missing')""",
+               WHERE id=? AND status IN ('known','queued','downloading',
+                                         'failed','missing','detached')""",
             (now_iso(), video_id))
+
+
+def set_last_error(conn: sqlite3.Connection, video_id: int,
+                   message: str | None) -> None:
+    """Причина падения - в самой строке, а не только в журнале.
+
+    Очередь показывает её списком: «нет хранилища: Внешний 4 ТБ не
+    подключён» читается понятнее, чем общий «ошибка загрузки».
+    """
+    text = (str(message).strip()[:500] if message else None) or None
+    conn.execute("UPDATE videos SET last_error=?, updated_at=? WHERE id=?",
+                 (text, now_iso(), video_id))
 
 
 def set_status(conn: sqlite3.Connection, video_ids, status: str) -> int:
@@ -247,17 +277,26 @@ def set_status(conn: sqlite3.Connection, video_ids, status: str) -> int:
     return changed
 
 
-def enqueue(conn: sqlite3.Connection, video_ids) -> int:
-    """Поставить в очередь: только то, что ещё не скачано и не качается."""
+def enqueue(conn: sqlite3.Connection, video_ids,
+            storage_id: str | None = None) -> int:
+    """Поставить в очередь: только то, что ещё не скачано и не качается.
+
+    storage_id - куда качать. Цель записывается в строку, потому что фоновый
+    воркер не может спрашивать пользователя: выбор делается в момент
+    постановки (панель выделения, настройка канала, глобальное хранилище).
+    None - цель остаётся прежней, а на старте загрузки её достроит
+    storages.resolve_target.
+    """
     changed = 0
     now = now_iso()
     for chunk in _chunks([int(v) for v in video_ids]):
         marks = ",".join("?" * len(chunk))
         cur = conn.execute(
-            f"""UPDATE videos SET status='queued', updated_at=?
+            f"""UPDATE videos SET status='queued', updated_at=?,
+                       target_storage_id=coalesce(?, target_storage_id)
                 WHERE id IN ({marks})
                   AND status NOT IN ('downloaded','downloading','unavailable')""",
-            [now, *chunk])
+            [now, storage_id, *chunk])
         changed += cur.rowcount
     return changed
 
@@ -699,7 +738,8 @@ def next_queued(conn: sqlite3.Connection) -> dict | None:
     за собой мегабайты raw_json в каждый воркер.
     """
     row = conn.execute(
-        """SELECT id, key, platform, remote_id, title, webpage_url, status
+        """SELECT id, key, platform, remote_id, title, webpage_url, status,
+                  target_storage_id, channel_id
              FROM videos WHERE status='queued'
             ORDER BY updated_at, id LIMIT 1""").fetchone()
     return dict(row) if row else None
@@ -734,14 +774,15 @@ def playlist_pending(conn: sqlite3.Connection, playlist_id: int,
     return int(total), rows
 
 
-def enqueue_playlist(conn: sqlite3.Connection, playlist_id: int) -> int:
+def enqueue_playlist(conn: sqlite3.Connection, playlist_id: int,
+                     storage_id: str | None = None) -> int:
     """Поставить в очередь всё ожидающее в плейлисте (режим «Полная»)."""
     rows = conn.execute(
         """SELECT v.id FROM playlist_items pi JOIN videos v ON v.id=pi.video_id
             WHERE pi.playlist_id=? AND pi.removed_at IS NULL
               AND v.status IN ('known','failed')""",
         (playlist_id,)).fetchall()
-    return enqueue(conn, [row["id"] for row in rows])
+    return enqueue(conn, [row["id"] for row in rows], storage_id=storage_id)
 
 
 def status_breakdown(conn: sqlite3.Connection) -> list[tuple[str, int]]:
@@ -759,7 +800,8 @@ def video_id_by_key(conn: sqlite3.Connection, key: str) -> int | None:
 
 def insert_local_video(conn: sqlite3.Connection, *, title: str, path: str,
                        size: int | None, mtime: float | None,
-                       digest: str | None) -> int:
+                       digest: str | None,
+                       storages_list: list[dict] | None = None) -> int:
     """Файл, у которого не нашлось площадочного ID: строка platform='local'.
 
     Такие записи - честный «импорт из проводника»: они участвуют в
@@ -781,5 +823,6 @@ def insert_local_video(conn: sqlite3.Connection, *, title: str, path: str,
             (key, "local", key.split(":", 1)[1], title, None,
              "path", "downloaded", now, now))
         vid = int(cur.lastrowid)
-    record_file(conn, vid, path, "video", size=size, mtime=mtime, digest=digest)
+    record_file(conn, vid, path, "video", size=size, mtime=mtime, digest=digest,
+                storages_list=storages_list)
     return vid

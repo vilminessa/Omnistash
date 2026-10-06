@@ -58,6 +58,20 @@ def load() -> dict:
     return settings
 
 
+def read_raw() -> dict:
+    """Файл настроек БЕЗ фильтра схемы.
+
+    Нужен один раз при старте: ключи, перенесённые в базу (library_roots,
+    dest_dir), уходят из схемы и при обычном load() уже не видны - а
+    переносить их надо ровно до первого сохранения.
+    """
+    try:
+        data = json.loads(settings_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def save(settings: dict) -> None:
     """Записать настройки, оставив в файле только ключи, известные схеме."""
     clean = {}
@@ -70,6 +84,20 @@ def save(settings: dict) -> None:
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def purge_transferred() -> dict:
+    """Переписать файл без ключей, перенесённых в базу (library_roots и пр.).
+
+    save() пишет только ключи, известные схеме, поэтому достаточно
+    перечитать и сохранить - старые ключи уйдут из файла.
+    """
+    raw = read_raw()
+    transferred = [key for key in ("library_roots", "dest_dir") if key in raw]
+    if not transferred:
+        return {"purged": []}
+    save(load())
+    return {"purged": transferred}
 
 
 def set_value(key: str, value) -> dict:

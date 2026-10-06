@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import threading
 
-from . import downloader, repo
+from . import downloader, repo, storages
 from .util import human_size
 
 
@@ -106,13 +106,51 @@ class DownloadWorker:
                 self._state["current"] = None
             self._log("Очередь остановлена")
 
+    def _resolve_target(self, conn, row: dict, settings: dict):
+        """Куда качать эту строку: цель из очереди -> резолвер -> ошибка.
+
+        Фон не может спрашивать пользователя, поэтому отсутствие выбора -
+        это тоже результат, который видно в списке очереди.
+        """
+        target_id = row.get("target_storage_id")
+        if target_id:
+            storage = storages.get(conn, target_id)
+            if not storage or storage["status"] != "active":
+                return None, (f"хранилище отвязано или удалено "
+                              f"({(storage or {}).get('label', target_id)})")
+            if not storage.get("enabled", 1):
+                return None, f"хранилище отключено: {storage['label']}"
+            if not os.path.isdir(storage["path"]):
+                return None, f"нет хранилища: {storage['label']} не подключён"
+            return storage, None
+
+        storage = storages.resolve_target(
+            conn, settings, video_id=row.get("id"),
+            channel_id=row.get("channel_id"))
+        if storage and os.path.isdir(storage["path"]):
+            return storage, None
+        if storage:
+            return None, f"нет хранилища: {storage['label']} не подключён"
+        return None, "не выбрано хранилище - укажите его при постановке в очередь"
+
     def _download_one(self, conn, row: dict, settings: dict) -> None:
+        target, error = self._resolve_target(conn, row, settings)
+        if error:
+            repo.set_status(conn, [row["id"]], "failed")
+            repo.set_last_error(conn, row["id"], error)
+            with self._lock:
+                self._state["failed"] += 1
+            self._log(f"Ошибка: {row['title'] or row['key']} - {error}")
+            return
+
         repo.set_status(conn, [row["id"]], "downloading")
+        repo.set_last_error(conn, row["id"], None)
         with self._lock:
             self._state["attempted"] += 1
             self._state["current"] = {
                 "id": row["id"], "title": row["title"] or row["key"],
                 "percent": 0, "stage": "подготовка", "speed": None, "eta": None,
+                "storage": target.get("label"),
             }
 
         def progress(delta: dict) -> None:
@@ -127,7 +165,8 @@ class DownloadWorker:
                     eta=delta.get("eta"))
 
         result = downloader.download(row, settings, stop=self._stop,
-                                     on_progress=progress)
+                                     on_progress=progress,
+                                     dest=target["path"])
 
         if result.get("cancelled"):
             # Стоп - не ошибка: файл остаётся к докачке (.part), статус
@@ -138,6 +177,7 @@ class DownloadWorker:
 
         if result.get("error"):
             repo.set_status(conn, [row["id"]], "failed")
+            repo.set_last_error(conn, row["id"], result["error"])
             with self._lock:
                 self._state["failed"] += 1
             self._log(f"Ошибка: {row['title'] or row['key']} - {result['error']}")

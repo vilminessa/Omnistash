@@ -8,8 +8,6 @@
 
 from __future__ import annotations
 
-from .paths import base_dir
-
 # Типы полей, которые понимает карточка:
 #   str    - текстовое поле
 #   bool   - флажок
@@ -20,14 +18,25 @@ from .paths import base_dir
 FIELDS: tuple[dict, ...] = (
     # ---- библиотека ----
     {
-        "key": "library_roots",
-        "type": "roots",
+        "key": "_storages",
+        "type": "storages",
         "section": "Библиотека",
-        "label": "Папки библиотеки",
-        "hint": "Что сканировать при переиндексации. Корней может быть "
-                "несколько (локальный диск, NAS, внешний), каждый "
-                "включается и выключается отдельно.",
+        "label": "Хранилища",
+        "hint": "Папки, которые индексируются и в которые можно качать. "
+                "Каждое можно отключить, отвязать (забыть) или указать "
+                "путь заново, если диск переименовали.",
+        # transient: поле-виджет, а не настройка - в settings.json не пишется.
+        "transient": True,
         "default": [],
+    },
+    {
+        "key": "default_storage_id",
+        "type": "str",
+        "section": "",
+        "label": "",
+        "hint": "Хранилище, предвыбранное при загрузке (задаётся в списке хранилищ).",
+        "hidden": True,
+        "default": "",
     },
     {
         "key": "default_sync_mode",
@@ -70,15 +79,8 @@ FIELDS: tuple[dict, ...] = (
         "default": True,
     },
     # ---- загрузка ----
-    {
-        "key": "dest_dir",
-        "type": "path",
-        "section": "Загрузка",
-        "label": "Куда скачивать",
-        "hint": "Корень, в который складываются новые загрузки "
-                "(шаблон ниже задаёт вложенные папки внутри него).",
-        "default": str(base_dir() / "downloads"),
-    },
+    # Куда качать - не настройка: путь берётся из выбранного хранилища
+    # (панель выделения / настройка канала / глобальный выбор).
     {
         "key": "output_template",
         "type": "str",
@@ -165,8 +167,9 @@ def field(key: str) -> dict | None:
 
 
 def defaults() -> dict:
-    """Все значения по умолчанию из схемы."""
-    return {f["key"]: _copy(f["default"]) for f in FIELDS}
+    """Все значения по умолчанию из схемы (без transient-полей-виджетов)."""
+    return {f["key"]: _copy(f["default"]) for f in FIELDS
+            if not f.get("transient")}
 
 
 def schema() -> list[dict]:

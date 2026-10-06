@@ -30,6 +30,7 @@ STATUSES = (
     "failed",        # попытка загрузки провалилась
     "missing",       # файл был, но пропал (корень доступен, файла нет)
     "unavailable",   # на площадке удалено/приватно, локальная копия остаётся
+    "detached",      # папку с файлом отвязали от библиотеки
 )
 
 # Режимы синхронизации источника.
@@ -208,8 +209,196 @@ def _migrate_v1(conn: sqlite3.Connection) -> None:
     )
 
 
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,)).fetchone() is not None
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _add_column(conn: sqlite3.Connection, table: str, declaration: str) -> None:
+    """ALTER TABLE ADD COLUMN, безопасный при повторном прогоне.
+
+    Миграция может оборваться на середине (питание, место на диске):
+    повтор должен начаться с того места, а не упасть на «duplicate column».
+    """
+    name = declaration.split()[0]
+    if name not in _columns(conn, table):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {declaration}")
+
+
+# Новая схема videos: + 'detached' в CHECK и три локальных поля.
+# SQLite не умеет менять CHECK через ALTER - только перестройка таблицы.
+_VIDEOS_V2 = """
+CREATE TABLE IF NOT EXISTS videos_v2 (
+    id            INTEGER PRIMARY KEY,
+    key           TEXT NOT NULL UNIQUE,
+    platform      TEXT NOT NULL,
+    remote_id     TEXT NOT NULL,
+    channel_id    INTEGER REFERENCES channels(id) ON DELETE SET NULL,
+    title         TEXT,
+    description   TEXT,
+    uploaded_at   TEXT,
+    duration_s    INTEGER,
+    view_count    INTEGER,
+    category      TEXT,
+    webpage_url   TEXT,
+    thumb_url     TEXT,
+    thumb_path    TEXT,
+    raw_json      TEXT,
+    origin        TEXT NOT NULL DEFAULT 'yt-dlp',
+    status        TEXT NOT NULL DEFAULT 'known'
+                  CHECK (status IN ('known','queued','downloading',
+                                    'downloaded','failed','missing',
+                                    'unavailable','detached')),
+    first_seen_at TEXT NOT NULL,
+    downloaded_at TEXT,
+    updated_at    TEXT NOT NULL,
+    user_rating   INTEGER,
+    user_tags     TEXT,
+    watched_at    TEXT,
+    notes         TEXT,
+    -- отвязка: «файл был в <папка>, папку отвязали»
+    detached_from TEXT,
+    -- куда качать (задаёт панель выделения, а не настройки)
+    target_storage_id TEXT REFERENCES storages(id),
+    -- почему упал в очереди (видно в списке, а не только в журнале)
+    last_error    TEXT
+);
+"""
+
+# Индексы и триггеры FTS переживают только явное воссоздание: они падают
+# вместе с таблицей videos.
+_VIDEOS_V2_RESTORE = """
+CREATE INDEX IF NOT EXISTS videos_channel_idx ON videos(channel_id);
+CREATE INDEX IF NOT EXISTS videos_status_idx  ON videos(status);
+CREATE INDEX IF NOT EXISTS videos_title_idx   ON videos(title);
+CREATE INDEX IF NOT EXISTS videos_date_idx    ON videos(uploaded_at);
+
+CREATE TRIGGER IF NOT EXISTS videos_fts_ai AFTER INSERT ON videos BEGIN
+    INSERT INTO videos_fts(rowid, title, description, user_tags)
+    VALUES (new.id, coalesce(new.title,''),
+            coalesce(new.description,''), coalesce(new.user_tags,''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS videos_fts_ad AFTER DELETE ON videos BEGIN
+    INSERT INTO videos_fts(videos_fts, rowid, title, description, user_tags)
+    VALUES ('delete', old.id, coalesce(old.title,''),
+            coalesce(old.description,''), coalesce(old.user_tags,''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS videos_fts_au AFTER UPDATE ON videos BEGIN
+    INSERT INTO videos_fts(videos_fts, rowid, title, description, user_tags)
+    VALUES ('delete', old.id, coalesce(old.title,''),
+            coalesce(old.description,''), coalesce(old.user_tags,''));
+    INSERT INTO videos_fts(rowid, title, description, user_tags)
+    VALUES (new.id, coalesce(new.title,''),
+            coalesce(new.description,''), coalesce(new.user_tags,''));
+END;
+"""
+
+# Колонки v1: их и переносим, новые (detached_from и пр.) берём из _VIDEOS_V2.
+_VIDEOS_V1_COLUMNS = (
+    "id", "key", "platform", "remote_id", "channel_id", "title", "description",
+    "uploaded_at", "duration_s", "view_count", "category", "webpage_url",
+    "thumb_url", "thumb_path", "raw_json", "origin", "status", "first_seen_at",
+    "downloaded_at", "updated_at", "user_rating", "user_tags", "watched_at",
+    "notes",
+)
+
+
+def _rebuild_videos(conn: sqlite3.Connection) -> None:
+    """Перестроить videos: расширить CHECK статусов и добавить колонки.
+
+    Внимание на FOREIGN KEYS: DROP TABLE родителя при включённых ключах
+    делает неявный DELETE FROM - files и playlist_items ушли бы по CASCADE
+    в мусор. Поэтому: сначала выходим из любой неявной транзакции (иначе
+    PRAGMA молча не применяется!), потом выключаем ключи на всю операцию.
+    """
+    # Обрыв на середине: videos уже упала, копия осталась - просто доделать.
+    if not _table_exists(conn, "videos") and _table_exists(conn, "videos_v2"):
+        conn.execute("ALTER TABLE videos_v2 RENAME TO videos")
+        conn.executescript(_VIDEOS_V2_RESTORE)
+        return
+
+    # commit() безопасен в autocommit (no-op) и вытаскивает из legacy-режима,
+    # где драйвер сам открывает транзакцию перед INSERT/DDL.
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("DROP TABLE IF EXISTS videos_v2")
+        conn.executescript(_VIDEOS_V2)
+        marks = ", ".join(_VIDEOS_V1_COLUMNS)
+        conn.execute(f"INSERT INTO videos_v2 ({marks}) SELECT {marks} FROM videos")
+        conn.execute("DROP TABLE videos")
+        conn.execute("ALTER TABLE videos_v2 RENAME TO videos")
+        conn.executescript(_VIDEOS_V2_RESTORE)
+        conn.commit()
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
+def _migrate_v2(conn: sqlite3.Connection) -> None:
+    """Хранилища, привязка файлов к ним, статус «откреплено».
+
+    Файлы получают storage_id + rel_path (канон пути): переезд корня
+    превращается в один UPDATE по storages, а не в переписывание тысяч
+    абсолютных путей.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS storages (
+            id             TEXT PRIMARY KEY,
+            path           TEXT NOT NULL,
+            label          TEXT NOT NULL,
+            kind           TEXT NOT NULL DEFAULT 'local',
+            status         TEXT NOT NULL DEFAULT 'active'
+                           CHECK (status IN ('active','detached')),
+            enabled        INTEGER NOT NULL DEFAULT 1,
+            read_only      INTEGER NOT NULL DEFAULT 0,
+            recursive      INTEGER NOT NULL DEFAULT 1,
+            min_free_bytes INTEGER NOT NULL DEFAULT 2147483648,
+            root_key       TEXT,
+            available      INTEGER NOT NULL DEFAULT 0,
+            missing_since  TEXT,
+            last_seen_at   TEXT,
+            free_bytes     INTEGER,
+            total_bytes    INTEGER,
+            detached_at    TEXT,
+            created_at     TEXT NOT NULL,
+            updated_at     TEXT NOT NULL
+        );
+        """
+    )
+
+    _add_column(conn, "files", "storage_id TEXT REFERENCES storages(id)")
+    _add_column(conn, "files", "rel_path TEXT")
+    _add_column(conn, "channels", "storage_id TEXT")
+    _add_column(conn, "playlists", "storage_id TEXT")
+
+    # CHECK(status) допускает 'detached'? Если нет - перестройка.
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='videos'"
+    ).fetchone()
+    if not (row and row["sql"] and "'detached'" in row["sql"]):
+        _rebuild_videos(conn)
+    else:
+        for declaration in ("detached_from TEXT",
+                            "target_storage_id TEXT REFERENCES storages(id)",
+                            "last_error TEXT"):
+            _add_column(conn, "videos", declaration)
+
+    # Путь -> хранилище задаётся в bootstrap (там, где известны настройки),
+    # здесь создаём только индекс для будущих сверок.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS files_storage_idx ON files(storage_id)")
+
+
 # Порядок важен: номер версии = индекс + 1.
-MIGRATIONS = (_migrate_v1,)
+MIGRATIONS = (_migrate_v1, _migrate_v2)
 
 
 class Database:

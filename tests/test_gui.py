@@ -33,6 +33,16 @@ class GuiCase(unittest.TestCase):
         self.addCleanup(api.close)
         return api
 
+    def add_storage(self, api: Api, path, *, recursive: bool = True,
+                    enabled: bool = True, label: str | None = None) -> dict:
+        """Зарегистрировать папку-хранилище (вместо старого library_roots)."""
+        from app import storages
+        result = storages.add(api.db.conn, str(path), label=label,
+                              enabled=enabled, recursive=recursive)
+        self.assertIsInstance(result, dict, result)
+        self.assertTrue(result.get("id"), result)
+        return result
+
     def wait_phase(self, api, phase, timeout=15.0):
         """Дождаться фазы добавления; неожиданная ошибка - провал с текстом."""
         deadline = time.time() + timeout
@@ -63,12 +73,16 @@ class TestApi(GuiCase):
         initial = api.get_initial()
         self.assertIn("version", initial)
         self.assertIn("schema", initial)
-        self.assertTrue(any(f["key"] == "library_roots" for f in initial["schema"]))
+        # Корни убраны из настроек - вместо них поле-виджет хранилищ.
+        self.assertTrue(any(f["key"] == "_storages" for f in initial["schema"]))
+        self.assertFalse(any(f["key"] == "library_roots" for f in initial["schema"]))
 
         snap = api.poll(0)
         for key in ("log_cursor", "logs", "status", "busy", "scan", "settings",
-                    "settings_rev", "stats", "tree", "sources", "runs", "queue"):
+                    "settings_rev", "stats", "tree", "sources", "runs", "queue",
+                    "storages", "add_flow", "dl", "sync"):
             self.assertIn(key, snap)
+        self.assertEqual(snap["storages"], [])
         # Журнал отдаётся дельтой: повторный опрос с тем же курсором пуст.
         cursor = snap["log_cursor"]
         self.assertEqual(api.poll(cursor)["logs"], [])
@@ -86,17 +100,15 @@ class TestApi(GuiCase):
     def test_scan_without_roots_reports_error(self):
         api = self.make_api()
         self.assertEqual(api.start_scan()["error"],
-                         "Сначала добавьте папки библиотеки в настройках")
+                         "Сначала добавьте папку-хранилище в настройках")
 
     def test_scan_end_to_end(self):
         api = self.make_api()
         root = self.dir / "library"
         root.mkdir()
         (root / "видео без личности.mp4").write_bytes(b"payload")
+        self.add_storage(api, root)
 
-        api.save_setting({"key": "library_roots",
-                          "value": [{"path": str(root), "recursive": True,
-                                     "enabled": True}]})
         started = api.start_scan()
         self.assertTrue(started.get("ok"), started)
 
@@ -120,10 +132,7 @@ class TestApi(GuiCase):
         root.mkdir()
         for i in range(50):
             (root / f"file-{i:03d}.mp4").write_bytes(b"x")
-
-        api.save_setting({"key": "library_roots",
-                          "value": [{"path": str(root), "recursive": True,
-                                     "enabled": True}]})
+        self.add_storage(api, root)
         # Держим воркер на входе, чтобы «Отмена» гарантированно успела
         # дойти: скан на 50 файлах иначе кончается быстрее клика.
         from app import indexer as indexer_mod
@@ -165,9 +174,7 @@ class TestApi(GuiCase):
         root = self.dir / "slow"
         root.mkdir()
         (root / "f.mp4").write_bytes(b"x")
-        api.save_setting({"key": "library_roots",
-                          "value": [{"path": str(root), "recursive": True,
-                                     "enabled": True}]})
+        self.add_storage(api, root)
         gate = threading.Event()
         from app import indexer as indexer_mod
         real_scan = indexer_mod.scan

@@ -49,7 +49,19 @@
         <div class="scan-text" id="scan-text"></div>
       </div>
 
+      <div class="sel-bar" id="sel-bar" hidden>
+        <span id="sel-count">Выбрано: 0</span>
+        <span class="muted">Хранилище:</span>
+        <select id="sel-storage" data-storage-select
+                title="Куда качать выбранные"></select>
+        <span class="spacer"></span>
+        <button class="btn ghost" id="sel-clear">Снять выбор</button>
+        <button class="btn primary" id="sel-download">Скачать</button>
+      </div>
+
       <div class="grid-head">
+        <span class="c-check"><input type="checkbox" id="sel-all"
+            title="Выбрать всё на странице" aria-label="Выбрать всё"></span>
         <span class="c-status">Статус</span>
         <span class="c-title">Название</span>
         <span class="c-channel">Канал</span>
@@ -101,6 +113,8 @@
       <div class="toolbar sync-results-head">
         <h2>Итог синхронизации</h2>
         <span class="spacer"></span>
+        <select id="sync-storage" data-storage-select aria-label="Хранилище"
+                title="Куда ставить новые"></select>
         <button class="btn primary" id="sync-queue-btn" hidden>Поставить новые в очередь</button>
       </div>
       <table class="table">
@@ -186,6 +200,26 @@
       <button class="icon-btn" id="add-close" aria-label="Закрыть">✕</button>
     </div>
     <div class="card-body" id="add-body"></div>
+  </div>
+</div>
+
+<!-- Стартовый выбор хранилища: показывается, пока их нет ни одного -->
+<div class="overlay" id="storage-overlay" hidden>
+  <div class="card" role="dialog" aria-modal="true">
+    <div class="card-head">
+      <div class="card-title">Где хранить видео?</div>
+    </div>
+    <div class="card-body">
+      <p>Omnistash индексирует и скачивает в <b>папки-хранилища</b>. Укажите
+        первую: позже можно добавить ещё (внешний диск, сетевой шар) и
+        выбрать, куда качать, при каждой загрузке.</p>
+      <p class="muted">Папку можно сменить в любой момент в настройках;
+        смена пути не перекачивает файлы.</p>
+      <div class="card-actions">
+        <button class="btn ghost" id="wizard-later">Настроить позже</button>
+        <button class="btn primary" id="wizard-pick">Выбрать папку…</button>
+      </div>
+    </div>
   </div>
 </div>
 
