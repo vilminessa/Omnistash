@@ -20,6 +20,29 @@ from tests.test_gui import GuiCase
 PLAYLIST_URL = "https://youtube.com/playlist?list=PLfixtur0000000000000000000001"
 
 
+class _FakeWorker:
+    """Заглушка качалки: считает запуски, но ничего не качает."""
+
+    def __init__(self, *args, **kwargs):
+        self.started = 0
+        self.state = {"running": False, "done": 0, "failed": 0,
+                      "attempted": 0, "current": None, "error": None}
+
+    def start(self):
+        self.started += 1
+        return {"ok": True}
+
+    def stop(self):
+        self.state["running"] = False
+        return {"ok": True}
+
+    def wait(self, timeout=None):
+        return True
+
+    def retry_failed(self):
+        return {"ok": True, "retried": 0}
+
+
 def fixture_snapshot(playlist_id="PLfixtur0000000000000000000001", count=3,
                      channel_id="UCfixtur000000000000000000000001"):
     """Снапшот той же формы, что отдаёт sources.fetch_snapshot."""
@@ -115,14 +138,21 @@ class TestPhases(AddFlowCase):
         self.assertEqual(videos["total"], 6)
 
     def test_full_mode_enqueues(self):
-        api = self.api()
-        self.patch_fetch(fixture_snapshot())
-        api.add_start({"url": PLAYLIST_URL, "mode": "full"})
-        self.wait_phase(api, "confirm")
-        api.add_confirm()
-        flow = self.wait_phase(api, "done")
+        # Качалку подменяем: здесь важен факт «полный режим поставил в
+        # очередь и попросил воркер стартовать», а не сама загрузка.
+        fake = _FakeWorker()
+        with mock.patch("app.gui.DownloadWorker",
+                        side_effect=lambda *a, **k: fake):
+            api = self.api()
+            self.patch_fetch(fixture_snapshot())
+            api.add_start({"url": PLAYLIST_URL, "mode": "full"})
+            self.wait_phase(api, "confirm")
+            api.add_confirm()
+            flow = self.wait_phase(api, "done")
         self.assertEqual(flow["result"]["queued"], 3)
         self.assertEqual(api.poll(0)["stats"]["queued"], 3)
+        self.assertGreaterEqual(fake.started, 1,
+                                "режим «Полная» не запустил качалку")
 
     def test_manual_mode_has_no_picker(self):
         api = self.api()

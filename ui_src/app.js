@@ -160,6 +160,7 @@
     if (changed("sources", snap.sources)) renderSources(snap.sources);
     if (changed("runs", snap.runs)) renderRuns(snap.runs);
     if (changed("queue", snap.queue)) renderQueue(snap.queue);
+    if (changed("dl", snap.dl)) renderDl(snap.dl);
     if (changed("add", snap.add_flow)) renderAddFlow(snap.add_flow);
     appendLogs(snap.logs);
 
@@ -488,6 +489,40 @@
         esc(row.status_label) + "</span></td><td>" + esc(row.title || "—") +
         "</td><td class=\"muted\">" + esc(row.key) + "</td></tr>";
     }).join("");
+  }
+
+  function humanSpeed(bytes) {
+    return humanSize(bytes) + "/с";
+  }
+
+  function renderDl(dl) {
+    if (!dl) return;
+    // Кнопки отражают состояние воркера: пока идёт - можно только стоп.
+    $("queue-start-btn").hidden = !!dl.running;
+    $("queue-stop-btn").hidden = !dl.running;
+    var failed = dl.failed || 0;
+    var retry = $("queue-retry-btn");
+    retry.hidden = !failed;
+    retry.textContent = "Повторить упавшие (" + failed + ")";
+
+    var bar = $("dl-bar");
+    if (!dl.running && !dl.current) {
+      bar.hidden = true;
+      return;
+    }
+    bar.hidden = false;
+    var current = dl.current;
+    $("dl-title").textContent = current ? current.title : "…";
+    $("dl-stage").textContent = current ? (current.stage || "") : "";
+    var percent = current ? Number(current.percent || 0) : 0;
+    $("dl-fill").style.width = percent + "%";
+    $("dl-speed").textContent = current
+      ? percent + "%" + (current.speed ? " · " + humanSpeed(current.speed) : "") +
+        (current.eta ? " · осталось " + humanDuration(current.eta) : "")
+      : "";
+    $("dl-counters").textContent =
+      "скачано " + (dl.done || 0) + " · ошибок " + failed +
+      (dl.attempted ? " · в этой сессии " + dl.attempted : "");
   }
 
   function renderSettings() {
@@ -966,6 +1001,14 @@
     $("rescan-btn").addEventListener("click", startScan);
     $("stop-scan-btn").addEventListener("click", function () { call("stop_scan"); });
 
+    $("queue-start-btn").addEventListener("click", function () {
+      call("queue_start").then(function (res) {
+        if (res && res.error) toast(res.error, true);
+      });
+    });
+    $("queue-stop-btn").addEventListener("click", function () { call("queue_stop"); });
+    $("queue-retry-btn").addEventListener("click", function () { call("queue_retry"); });
+
     $("add-btn").addEventListener("click", function () {
       addOpen = true;
       renderAddFlow(lastAddFlow);
@@ -1052,6 +1095,10 @@
       delay_ms: 500, retries: 3, theme: "dark", app_version: ""
     };
     var counter = 0;
+    // Симуляция качалки: в превью нет сети, но поведение панели очереди
+    // (кнопки, полоса, счётчики) должно быть проверяемо.
+    var mockDl = { running: false, done: 3, failed: 1, attempted: 4,
+                   current: null, error: null };
     // Схема нужна, чтобы в превью рисовалась карточка настроек.
     var schema = [
       { key: "library_roots", type: "roots", section: "Библиотека",
@@ -1099,6 +1146,18 @@
                           last_synced_at: "2026-10-05T21:00:00" }]
           },
           scan: null, sources: [], runs: [], queue: [],
+          dl: (function () {
+            if (mockDl.running && mockDl.current) {
+              mockDl.current.percent += 9;
+              if (mockDl.current.percent >= 100) {
+                mockDl.done += 1;
+                mockDl.current.percent = 0;
+              }
+            }
+            return { running: mockDl.running, done: mockDl.done,
+                     failed: mockDl.failed, attempted: mockDl.attempted,
+                     current: mockDl.current, error: null };
+          })(),
           add_flow: { phase: "idle", mode: "partial", url: "", fetch: null,
                       plan: null, stages: [], result: null, error: null },
           settings: settings, settings_rev: 1
@@ -1127,6 +1186,24 @@
         return Promise.resolve({ settings: settings, settings_rev: 1 });
       },
       pick_folder: function () { return Promise.resolve(null); },
+      queue_start: function () {
+        mockDl.running = true;
+        mockDl.attempted += 1;
+        mockDl.current = { id: 1, title: "Ночной дождик [dQw4w9WgXcQ].mp4",
+                           percent: 0, stage: "файл", speed: 1048576, eta: 7 };
+        return Promise.resolve({ ok: true, queued: 3 });
+      },
+      queue_stop: function () {
+        mockDl.running = false;
+        mockDl.current = null;
+        return Promise.resolve({ ok: true });
+      },
+      queue_retry: function () {
+        var retried = mockDl.failed;
+        mockDl.failed = 0;
+        return Promise.resolve({ ok: true, retried: retried });
+      },
+      add_start: function () { return Promise.resolve({ error: "в превью недоступно" }); },
       start_scan: function () { return Promise.resolve({ error: "в превью недоступно" }); },
       stop_scan: function () { return Promise.resolve({}); }
     };

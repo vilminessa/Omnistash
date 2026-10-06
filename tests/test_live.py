@@ -113,5 +113,87 @@ class TestLiveChannel(LiveCase):
         self.assertTrue(all(r["status"] == "known" for r in rows))
 
 
+class TestLiveDownload(LiveCase):
+    def test_download_then_reindex_recognises_file(self):
+        """Сквозная проверка: очередь -> файл -> sidecar -> сканер опознаёт."""
+        import pathlib
+
+        from app import indexer
+        from app.metadata import video_key
+
+        api = self.make_api()
+        dest = self.dir / "downloads"
+        dest.mkdir(parents=True, exist_ok=True)
+        api.save_setting({"key": "dest_dir", "value": str(dest)})
+        api.save_setting({"key": "subtitles", "value": "none"})
+
+        # 1. заносим канал в индекс
+        self.assertTrue(api.add_start({"url": CHANNEL_URL, "mode": "manual"})["ok"])
+        self.wait(api, "confirm")
+        api.add_confirm()
+        self.wait(api, "done")
+
+        # 2. берём самое короткое видео канала
+        row = api.db.conn.execute(
+            """SELECT id, key, duration_s FROM videos
+                WHERE duration_s IS NOT NULL ORDER BY duration_s LIMIT 1"""
+        ).fetchone()
+        self.assertIsNotNone(row, "в канале нет видео с известной длительностью")
+        self.assertEqual(api.enqueue({"ids": [row["id"]]})["queued"], 1)
+
+        # 3. качаем (реальная сеть, поэтому щедрый таймаут)
+        self.assertTrue(api.dl.wait(timeout=240), "воркер не завершился")
+        state = api.dl.state
+        self.assertEqual(state["failed"], 0, state)
+
+        status = api.db.conn.execute(
+            "SELECT status FROM videos WHERE id=?", (row["id"],)).fetchone()["status"]
+        self.assertEqual(status, "downloaded")
+
+        # 4. файл, сайдкар и хеш на месте, имя - по шаблону с ID
+        files = [dict(r) for r in api.db.conn.execute(
+            "SELECT kind, path, size, hash FROM files WHERE video_id=?",
+            (row["id"],))]
+        kinds = {f["kind"] for f in files}
+        self.assertIn("video", kinds)
+        self.assertIn("sidecar", kinds, "sidecar post.json не записан")
+        video_file = next(f for f in files if f["kind"] == "video")
+        path = pathlib.Path(video_file["path"])
+        self.assertTrue(path.is_file(), path)
+        self.assertTrue(video_file["hash"], "хеш файла не записан")
+        remote_id = row["key"].split(":", 1)[1]
+        self.assertIn(f"[{remote_id}]", path.name,
+                      f"имя не по шаблону: {path.name}")
+        self.assertEqual(api.poll(0)["stats"]["downloaded"], 1)
+
+        # 5. переезд библиотеки: СВЕЖАЯ база (путь она не знает) обязана
+        #    опознать файл по сайдкару, а не завести «неизвестный».
+        from app.db import Database as FreshDatabase
+
+        fresh = FreshDatabase(self.dir / "library_move.db")
+        try:
+            report = indexer.scan([{"path": str(dest), "recursive": True,
+                                    "enabled": True}], fresh, compute_hash=True)
+            self.assertGreaterEqual(report["bound_sidecar"] + report["bound_id"],
+                                    1, report)
+            self.assertEqual(report["added"], 0,
+                             "файл опознан не был и стал «неизвестным»")
+            self.assertEqual(report["missing"], 0, report)
+
+            moved = fresh.conn.execute(
+                "SELECT key, status, title FROM videos").fetchall()
+            self.assertEqual(len(moved), 1, [dict(r) for r in moved])
+            self.assertEqual(moved[0]["key"], row["key"])
+            self.assertEqual(moved[0]["status"], "downloaded")
+        finally:
+            fresh.close()
+
+        # А повторный скан в той же базе ничего не меняет (fast-path).
+        again = indexer.scan([{"path": str(dest), "recursive": True,
+                               "enabled": True}], api.db, compute_hash=True)
+        self.assertEqual(again["added"] + again["rebound"], 0, again)
+        self.assertEqual(again["missing"], 0, again)
+
+
 if __name__ == "__main__":
     unittest.main()

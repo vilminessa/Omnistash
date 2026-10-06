@@ -51,6 +51,15 @@ FIELDS: tuple[dict, ...] = (
         "default": True,
     },
     {
+        "key": "save_thumb",
+        "type": "bool",
+        "section": "Библиотека",
+        "label": "Сохранять обложку рядом с файлом",
+        "hint": "URL обложек площадок протухают со временем - локальная "
+                "копия остаётся вместе с библиотекой.",
+        "default": True,
+    },
+    {
         "key": "compute_hash",
         "type": "bool",
         "section": "Библиотека",

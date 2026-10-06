@@ -258,6 +258,18 @@ input[type="search"] { flex: 0 1 340px; }
 input:focus, select:focus { outline: none; border-color: var(--accent); }
 
 .scan-bar { display: flex; flex-direction: column; gap: 4px; }
+
+.dl-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+.dl-meta { display: flex; gap: 12px; align-items: center; font-size: 12.5px; min-width: 0; }
+.dl-meta b { max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .scan-track { height: 6px; background: var(--widget); border-radius: 999px; overflow: hidden; }
 .scan-fill { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .2s; }
 .scan-text { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

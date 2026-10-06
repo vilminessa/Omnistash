@@ -100,8 +100,22 @@
     <div class="toolbar">
       <h2>Очередь загрузки</h2>
       <span class="spacer"></span>
-      <button class="btn" id="queue-start-btn" disabled title="Появится при подключении загрузчика">Запустить</button>
+      <button class="btn primary" id="queue-start-btn">Запустить</button>
+      <button class="btn ghost" id="queue-stop-btn" hidden>Остановить</button>
+      <button class="btn" id="queue-retry-btn" hidden>Повторить упавшие</button>
     </div>
+
+    <div class="dl-bar" id="dl-bar" hidden>
+      <div class="dl-meta">
+        <b id="dl-title">—</b>
+        <span class="muted" id="dl-stage"></span>
+        <span class="muted" id="dl-speed"></span>
+        <span class="spacer"></span>
+        <span class="muted" id="dl-counters"></span>
+      </div>
+      <div class="scan-track"><div class="scan-fill" id="dl-fill"></div></div>
+    </div>
+
     <div class="table-wrap">
       <table class="table">
         <thead><tr><th>Статус</th><th>Название</th><th>Ключ</th></tr></thead>

@@ -19,6 +19,7 @@ import traceback
 
 from . import __version__, indexer, repo, settings, settings_schema, sources
 from .db import SYNC_MODES, Database
+from .queue import DownloadWorker
 
 MAX_LOG = 2000
 HEAVY_TTL = 1.0  # секунд между пересчётом агрегатов
@@ -56,6 +57,8 @@ class Api:
         self._add_stop = threading.Event()   # отмена фазы A (сеть)
         self._add_cancel = threading.Event()  # отмена фазы C (транзакция)
         self._add_thread: threading.Thread | None = None
+        # Качалка: очередь живёт в таблице videos, воркер - фоновый поток.
+        self.dl = DownloadWorker(self.db, self._current_settings, log=self._log)
         settings.reload_if_changed(self._settings_cache)
         self._log("Индекс открыт: " + str(self.db.path))
 
@@ -127,6 +130,7 @@ class Api:
             rev = self._settings_rev
             add_flow = dict(self._add)
             add_flow["stages"] = [dict(s) for s in self._add.get("stages", [])]
+            dl_state = self.dl.state
         config = settings.as_public(self._current_settings())
         heavy = self._heavy_snapshot()
         return {
@@ -136,6 +140,7 @@ class Api:
             "busy": busy,
             "scan": scan,
             "add_flow": add_flow,
+            "dl": dl_state,
             "settings": config,
             "settings_rev": rev,
             **heavy,
@@ -422,6 +427,9 @@ class Api:
         with self._lock:
             self._heavy_at = 0.0
         self._log(f"В очередь поставлено: {queued}")
+        if queued:
+            # Пользователь явно попросил качать - стартуем сразу.
+            self.dl.start()
         return {"queued": queued}
 
     def _add_fetch_worker(self, url: str, config: dict) -> None:
@@ -548,6 +556,9 @@ class Api:
             picker_total, picker = repo.playlist_pending(conn, playlist_id,
                                                          limit=self.PICKER_LIMIT)
         repo.finish_run(conn, run_id, {"mode": mode, "queued": queued, **stats})
+        if queued:
+            # Режим «Полная»: очередь начинает качать сама.
+            self.dl.start()
 
         with self._lock:
             for stage in self._add.get("stages", []):
@@ -566,14 +577,42 @@ class Api:
             1, stats["new_videos"], stats["links_to_create"],
             f", в очередь {queued}" if queued else ""))
 
+    # ------------------------------------------------------------------ #
+    #  Очередь загрузки
+    # ------------------------------------------------------------------ #
+
+    def queue_start(self) -> dict:
+        """Запустить качалку: берёт queued по порядку, ставит downloaded."""
+        with self._lock:
+            self._heavy_at = 0.0
+        return self.dl.start()
+
+    def queue_stop(self) -> dict:
+        """Остановить: текущая закачка вернётся в очередь, файл останется."""
+        result = self.dl.stop()
+        with self._lock:
+            self._heavy_at = 0.0
+        return result
+
+    def queue_retry(self) -> dict:
+        """Упавшие снова в очередь (и сразу запускаем, если стояли)."""
+        result = self.dl.retry_failed()
+        with self._lock:
+            self._heavy_at = 0.0
+        if result.get("retried"):
+            self.dl.start()
+        return result
+
     def close(self) -> None:
         """Остановить фон и закрыть соединения (включая воркеров)."""
         self._stop_scan.set()
         self._add_stop.set()
         self._add_cancel.set()
+        self.dl.stop()
         for thread in (self._scan_thread, self._add_thread):
             if thread is not None and thread.is_alive():
                 thread.join(timeout=10)
+        self.dl.wait(timeout=15)
         self.db.close()
 
 

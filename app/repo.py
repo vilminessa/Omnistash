@@ -692,6 +692,27 @@ def sources(conn: sqlite3.Connection) -> list[dict]:
     return out
 
 
+def next_queued(conn: sqlite3.Connection) -> dict | None:
+    """Следующее к скачиванию - в порядке постановки в очередь.
+
+    Возвращает только то, что нужно загрузчику, чтобы строка не тащила
+    за собой мегабайты raw_json в каждый воркер.
+    """
+    row = conn.execute(
+        """SELECT id, key, platform, remote_id, title, webpage_url, status
+             FROM videos WHERE status='queued'
+            ORDER BY updated_at, id LIMIT 1""").fetchone()
+    return dict(row) if row else None
+
+
+def retry_failed(conn: sqlite3.Connection) -> int:
+    """Упавшие -> в очередь (strayed-статусы не трогаем)."""
+    cur = conn.execute(
+        "UPDATE videos SET status='queued', updated_at=? WHERE status='failed'",
+        (now_iso(),))
+    return int(cur.rowcount)
+
+
 def playlist_pending(conn: sqlite3.Connection, playlist_id: int,
                      limit: int = 300) -> tuple[int, list[dict]]:
     """Плейлист -> (сколько ждёт загрузки, первые N строк для пикера).
