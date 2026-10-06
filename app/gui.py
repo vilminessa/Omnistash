@@ -12,15 +12,18 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
 import traceback
 
-from . import __version__, indexer, repo, settings, settings_schema, sources
+from . import __version__, indexer, migrate as migrate_mod, repo, settings
+from . import settings_schema, sources
 from . import storages as storages_mod
 from .db import SYNC_MODES, Database
 from .queue import DownloadWorker
+from .util import human_size
 
 MAX_LOG = 2000
 HEAVY_TTL = 1.0  # секунд между пересчётом агрегатов
@@ -74,6 +77,12 @@ class Api:
                             "queued": 0, "error": None}
         self._sync_stop = threading.Event()
         self._sync_thread: threading.Thread | None = None
+        # Перенос между хранилищами: свой воркер, отмена между файлами.
+        self._migrate: dict = {"running": False, "done": 0, "total": 0,
+                               "bytes_done": 0, "bytes_total": 0, "current": "",
+                               "summary": None, "errors": []}
+        self._migrate_stop = threading.Event()
+        self._migrate_thread: threading.Thread | None = None
         # Качалка: очередь живёт в таблице videos, воркер - фоновый поток.
         self.dl = DownloadWorker(self.db, self._current_settings, log=self._log)
         settings.reload_if_changed(self._settings_cache)
@@ -183,6 +192,7 @@ class Api:
             sync_state = dict(self._sync)
             sync_state["results"] = [dict(r) for r in self._sync.get("results", [])]
             sync_state["new_ids"] = list(self._sync.get("new_ids") or [])[:200]
+            migrate_state = dict(self._migrate)
         config = settings.as_public(self._current_settings())
         heavy = self._heavy_snapshot()
         return {
@@ -194,6 +204,7 @@ class Api:
             "add_flow": add_flow,
             "dl": dl_state,
             "sync": sync_state,
+            "migrate": migrate_state,
             "settings": config,
             "settings_rev": rev,
             **heavy,
@@ -892,6 +903,141 @@ class Api:
             self._heavy_at = 0.0
 
     # ------------------------------------------------------------------ #
+    #  Перенос между хранилищами (M8)
+    # ------------------------------------------------------------------ #
+
+    def _video_ids(self, request) -> tuple[list[int] | None, str | None]:
+        """(id-шники, ошибка). Отдельно, а не «dict = ошибка»: успешный
+        результат здесь тоже dict, и путать их нельзя."""
+        try:
+            ids = [int(v) for v in (request or {}).get("video_ids") or []]
+        except (TypeError, ValueError):
+            return None, "Не выбраны видео для переноса"
+        if not ids:
+            return None, "Не выбраны видео для переноса"
+        return ids, None
+
+    def _storage_or_error(self, storage_id) -> tuple[dict | None, str | None]:
+        storage = storages_mod.get(self.db.conn, str(storage_id or ""))
+        if not storage:
+            return None, "Хранилище-получатель не найдено"
+        if storage["status"] != "active":
+            return None, "Хранилище-получатель отвязано"
+        if not os.path.isdir(storage["path"]):
+            return None, f"Носитель не подключён: {storage['label']}"
+        return storage, None
+
+    def migrate_preview(self, request=None) -> dict:
+        """Превью: сколько пойдёт, что конфликтует, чего уже нет."""
+        ids, error = self._video_ids(request)
+        if error:
+            return {"error": error}
+        target, error = self._storage_or_error(
+            (request or {}).get("target_storage_id"))
+        if error:
+            return {"error": error}
+        plan = migrate_mod.plan_move(self.db.conn, ids, target)
+        if plan.get("error"):
+            return plan
+        return {"ok": True, "count": plan["count"], "bytes": plan["bytes"],
+                "conflicts": plan["conflicts"][:50],
+                "conflict_total": len(plan["conflicts"]),
+                "already": len(plan["already"]),
+                "missing": plan["missing"][:50],
+                "missing_total": len(plan["missing"]),
+                "same_storage": plan["same_storage"],
+                "target": plan["target"]}
+
+    def migrate_start(self, request=None) -> dict:
+        """Начать перенос: план пересчитывается на месте старта."""
+        request = request or {}
+        ids, error = self._video_ids(request)
+        if error:
+            return {"error": error}
+        target, error = self._storage_or_error(request.get("target_storage_id"))
+        if error:
+            return {"error": error}
+        with self._lock:
+            if self._migrate.get("running"):
+                return {"error": "Перенос уже идёт"}
+        plan = migrate_mod.plan_move(self.db.conn, ids, target)
+        if plan.get("error"):
+            return plan
+        if not plan["files"]:
+            hint = "всё уже лежит в целевом хранилище"
+            if plan["conflicts"]:
+                hint = f"конфликтов имён: {len(plan['conflicts'])}"
+            elif plan["missing"]:
+                hint = f"файлов не найдено: {len(plan['missing'])}"
+            return {"error": "Нечего переносить: " + hint}
+
+        self._migrate_stop.clear()
+        with self._lock:
+            self._migrate = {"running": True, "done": 0,
+                             "total": plan["count"], "bytes_done": 0,
+                             "bytes_total": plan["bytes"], "current": "",
+                             "summary": None, "errors": []}
+            self._busy = True
+            self._status = f"Перенос {plan['count']} файл(ов)"
+        self._log(f"Перенос в «{target['label']}»: {plan['count']} файл(ов), "
+                  f"{human_size(plan['bytes'])}, конфликтов {len(plan['conflicts'])}")
+        thread = threading.Thread(target=self._migrate_worker,
+                                  args=(plan, target), daemon=True,
+                                  name="omnistash-migrate")
+        self._migrate_thread = thread
+        thread.start()
+        return {"ok": True, "count": plan["count"], "bytes": plan["bytes"],
+                "conflict_total": len(plan["conflicts"])}
+
+    def migrate_stop(self) -> dict:
+        """Прервать перенос: скопированное остаётся, источник цел."""
+        with self._lock:
+            running = self._migrate.get("running")
+        if not running:
+            return {"ok": False}
+        self._migrate_stop.set()
+        self._log("Перенос прерван пользователем")
+        return {"ok": True}
+
+    def _migrate_worker(self, plan: dict, target: dict) -> None:
+        def progress(bytes_done, total_bytes, files_done, total_files, path):
+            with self._lock:
+                self._migrate.update(
+                    bytes_done=bytes_done, bytes_total=total_bytes,
+                    done=files_done, total=total_files, current=path)
+                self._status = (f"Перенос {files_done}/{total_files}")
+
+        try:
+            result = migrate_mod.move_files(self.db.conn, plan, target,
+                                            stop=self._migrate_stop,
+                                            progress=progress)
+            summary = (f"Перенесено {result['done']} из {result['total']} "
+                       f"({human_size(result['bytes'])})")
+            if result["errors"]:
+                summary += f", замечаний: {len(result['errors'])}"
+            if result["skipped_conflicts"]:
+                summary += f", конфликтов пропущено: {result['skipped_conflicts']}"
+            self._log(summary)
+            for error in result["errors"][:5]:
+                self._log("Перенос: " + error)
+        except migrate_mod.MigrateCancelled:
+            summary = "Перенос остановлен - уже перенесённое осталось в цели"
+            self._log(summary)
+            result = None
+        except Exception as exc:  # noqa: BLE001 - фон не должен молча умереть
+            summary = f"Ошибка переноса: {exc}"
+            self._log(summary)
+            result = None
+        finally:
+            with self._lock:
+                self._migrate["running"] = False
+                self._migrate["summary"] = summary
+                self._migrate["current"] = ""
+                self._busy = False
+                self._status = "Готово"
+                self._heavy_at = 0.0
+
+    # ------------------------------------------------------------------ #
     #  Очередь загрузки
     # ------------------------------------------------------------------ #
 
@@ -1079,8 +1225,10 @@ class Api:
         self._add_stop.set()
         self._add_cancel.set()
         self._sync_stop.set()
+        self._migrate_stop.set()
         self.dl.stop()
         for thread in (self._scan_thread, self._add_thread, self._sync_thread,
+                       self._migrate_thread,
                        getattr(self, "_avail_thread", None),
                        getattr(self, "_check_thread", None)):
             if thread is not None and thread.is_alive():

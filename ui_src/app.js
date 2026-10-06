@@ -170,6 +170,10 @@
     if (changed("dl", snap.dl)) renderDl(snap.dl);
     if (changed("sync", snap.sync)) renderSync(snap.sync);
     if (changed("add", snap.add_flow)) renderAddFlow(snap.add_flow);
+    if (changed("migrate", snap.migrate)) {
+      state.migrate = snap.migrate;
+      if (!$("migrate-overlay").hidden) renderMigrateBody();
+    }
     appendLogs(snap.logs);
 
     if (snap.settings_rev !== state.rev) {
@@ -273,6 +277,149 @@
     $("dedupe-note-text").textContent =
       "Сверка нашла: " + parts.join(" · ") +
       ". Разберите - в индексе должно остаться по одной копии.";
+  }
+
+  /* ------------------------------------------------------------------ *
+   *  Перенос между хранилищами
+   * ------------------------------------------------------------------ */
+
+  function openMigrate() {
+    if (!state.selected.size) {
+      toast("Сначала выберите строки", true);
+      return;
+    }
+    state.migratePreview = null;
+    state.migrateTarget = state.migrateTarget || defaultStorageId();
+    $("migrate-overlay").hidden = false;
+    renderMigrateBody();
+    refreshMigratePreview();
+  }
+
+  function refreshMigratePreview() {
+    if (!state.migrateTarget) { renderMigrateBody(); return; }
+    call("migrate_preview", { video_ids: Array.from(state.selected),
+                              target_storage_id: state.migrateTarget })
+      .then(function (res) {
+        state.migratePreview = res;
+        renderMigrateBody();
+      });
+  }
+
+  function migrateList(items, key, showTarget) {
+    if (!items || !items.length) return "";
+    return '<div class="migrate-list">' + items.map(function (item) {
+      var text = showTarget
+        ? item.path + "  →  " + (item.target || "")
+        : (item[key] || item.path || "");
+      return '<div class="migrate-item' + (showTarget ? " warn" : "") +
+        '" title="' + esc(text) + '">' + esc(text) + "</div>";
+    }).join("") + "</div>";
+  }
+
+  function renderMigrateBody() {
+    var mig = state.migrate;
+    var body = $("migrate-body");
+    if (!body) return;
+    var html = "";
+
+    if (mig && mig.running) {
+      var pct = mig.bytes_total
+        ? Math.round(mig.bytes_done * 100 / mig.bytes_total) : 0;
+      html = '<div class="migrate-progress">' +
+        '<div class="scan-track"><div class="scan-fill" style="width:' + pct +
+        '%"></div></div>' +
+        '<div class="scan-text">' + mig.done + " / " + mig.total +
+        " файл(ов) · " + humanSize(mig.bytes_done) + " из " +
+        humanSize(mig.bytes_total) + "</div>" +
+        '<div class="migrate-item">' + esc(mig.current || "") + "</div>" +
+        "</div>" +
+        '<div class="card-actions"><button class="btn" data-migrate="stop">' +
+        "Остановить</button></div>";
+      body.innerHTML = html;
+      bindMigrate();
+      return;
+    }
+
+    if (mig && mig.summary) {
+      html = '<div class="notice">' + esc(mig.summary) + "</div>" +
+        '<div class="card-actions"><button class="btn primary" ' +
+        'data-migrate="close">Закрыть</button></div>';
+      body.innerHTML = html;
+      bindMigrate();
+      return;
+    }
+
+    var preview = state.migratePreview;
+    html = '<div class="migrate-target"><span class="muted">Перенести в:</span>' +
+      '<select id="migrate-storage">' +
+      storageOptionsHtml(state.migrateTarget) + "</select></div>";
+    if (!preview) {
+      html += '<div class="muted">Считаю, что и сколько переедет…</div>';
+    } else if (preview.error) {
+      html += '<div class="notice err">' + esc(preview.error) + "</div>" +
+        '<div class="card-actions"><button class="btn" data-migrate="close">' +
+        "Закрыть</button></div>";
+    } else {
+      html += '<dl class="migrate-facts">' +
+        "<dt>Файлов</dt><dd>" + preview.count + "</dd>" +
+        "<dt>Объём</dt><dd>" + humanSize(preview.bytes) + "</dd>" +
+        "<dt>Конфликтов имён</dt><dd>" + preview.conflict_total + "</dd>" +
+        "<dt>Уже на месте</dt><dd>" + preview.already + "</dd>" +
+        "<dt>Не найдено на диске</dt><dd>" + preview.missing_total + "</dd>" +
+        "</dl>";
+      if (preview.conflict_total) {
+        html += '<div class="notice warn">Конфликты пропускаются: в цели ' +
+          "уже лежит файл с тем же именем, но другим содержимым.</div>" +
+          migrateList(preview.conflicts, "target", true);
+      }
+      if (preview.missing_total) {
+        html += '<div class="notice err">Этих файлов больше нет: их ' +
+          "перенести некуда, следующий скан отметит их как пропавшие.</div>" +
+          migrateList(preview.missing, "path", false);
+      }
+      html += '<div class="muted">Копия проверяется контрольной суммой, ' +
+        "оригинал удаляется последним - только после успешной проверки. " +
+        "Остановку можно нажать в любой момент.</div>" +
+        '<div class="card-actions">' +
+        '<button class="btn" data-migrate="close">Отмена</button>' +
+        '<button class="btn primary" data-migrate="start"' +
+        (preview.count ? "" : " disabled") + ">Начать перенос (" +
+        preview.count + ")</button></div>";
+    }
+    body.innerHTML = html;
+    bindMigrate();
+  }
+
+  function bindMigrate() {
+    var body = $("migrate-body");
+    var select = document.getElementById("migrate-storage");
+    if (select) {
+      select.addEventListener("change", function () {
+        state.migrateTarget = select.value;
+        state.migratePreview = null;
+        renderMigrateBody();
+        refreshMigratePreview();
+      });
+    }
+    Array.prototype.forEach.call(
+      body.querySelectorAll("[data-migrate]"), function (btn) {
+        btn.addEventListener("click", function () {
+          var action = btn.dataset.migrate;
+          if (action === "close") { $("migrate-overlay").hidden = true; return; }
+          if (action === "stop") { call("migrate_stop"); return; }
+          if (action === "start") {
+            call("migrate_start", { video_ids: Array.from(state.selected),
+                                    target_storage_id: state.migrateTarget })
+              .then(function (res) {
+                if (!res) return;
+                if (res.error) { toast(res.error, true); return; }
+                toast("Перенос начат: " + res.count + " файл(ов)");
+                clearSelection();
+                renderMigrateBody();
+              });
+          }
+        });
+      });
   }
 
   /* ------------------------------------------------------------------ *
@@ -1548,6 +1695,15 @@
     // Мультивыбор в таблице библиотеки.
     $("sel-clear").addEventListener("click", clearSelection);
     $("sel-download").addEventListener("click", enqueueSelection);
+    $("sel-move").addEventListener("click", openMigrate);
+    $("migrate-close").addEventListener("click", function () {
+      // Идёт перенос - закрыть окно нельзя: процесс должен быть виден.
+      if (state.migrate && state.migrate.running) {
+        toast("Перенос идёт - остановите его или дождитесь конца", true);
+        return;
+      }
+      $("migrate-overlay").hidden = true;
+    });
     $("sel-storage").addEventListener("change", function () {
       state.selStorage = $("sel-storage").value;
     });
@@ -1717,6 +1873,10 @@
     var mockScan = { running: false, done: 0, total: 0, summary: null,
                      duplicates: [], possible_moves: [],
                      dup_count: 0, move_count: 0 };
+    // Симуляция переноса: превью фиксированное, старт «переезжает» файлы.
+    var mockMigrate = { running: false, done: 0, total: 0, bytes_done: 0,
+                        bytes_total: 0, current: "", summary: null, errors: [] };
+    var mockMigrateTimer = null;
     var mockDupes = [
       { video_id: 7, key: "youtube:dup00000001", title: "Два раза",
         copies: 2, bytes: 400000,
@@ -1819,6 +1979,7 @@
             }
             return JSON.parse(JSON.stringify(mockSync));
           })(),
+          migrate: JSON.parse(JSON.stringify(mockMigrate)),
           add_flow: { phase: "idle", mode: "partial", url: "", fetch: null,
                       plan: null, stages: [], result: null, error: null },
           storages: JSON.parse(JSON.stringify(mockStorages)),
@@ -1893,6 +2054,46 @@
         return Promise.resolve({ ok: true, removed: ["путь/к/файлу"],
                                  errors: [], kept: "путь/к/оставленному",
                                  title: "Два раза" });
+      },
+      migrate_preview: function (req) {
+        var target = mockStorages.filter(function (s) {
+          return s.id === (req || {}).target_storage_id && s.status === "active";
+        })[0];
+        return Promise.resolve({
+          ok: true, count: 2, bytes: 1234567,
+          conflicts: [{ path: "D:\\видео\\библиотека\\а.mp4",
+                        target: (target ? target.path : "E:\\") + "\\а.mp4" }],
+          conflict_total: 1, already: 1, missing: [], missing_total: 0,
+          same_storage: 0,
+          target: { id: target ? target.id : "", path: target ? target.path : "",
+                    label: target ? target.label : "" }
+        });
+      },
+      migrate_start: function () {
+        mockMigrate = { running: true, done: 0, total: 2, bytes_done: 0,
+                        bytes_total: 1234567, current: "первый.mp4",
+                        summary: null, errors: [] };
+        var step = 0;
+        mockMigrateTimer = setInterval(function () {
+          step += 1;
+          mockMigrate.done = Math.min(step, 2);
+          mockMigrate.bytes_done = Math.min(step * 620000, 1234567);
+          mockMigrate.current = "файл-" + step + ".mp4";
+          if (step >= 2) {
+            clearInterval(mockMigrateTimer);
+            mockMigrate.running = false;
+            mockMigrate.summary = "Перенесено 2 из 2 (1.2 МиБ)";
+          }
+        }, 700);
+        return Promise.resolve({ ok: true, count: 2, bytes: 1234567,
+                                 conflict_total: 1 });
+      },
+      migrate_stop: function () {
+        if (mockMigrateTimer) clearInterval(mockMigrateTimer);
+        mockMigrate.running = false;
+        mockMigrate.summary =
+          "Перенос остановлен - уже перенесённое осталось в цели";
+        return Promise.resolve({ ok: true });
       },
       storage_add: function (req) {
         if ((req || {}).path === "D:\\видео\\библиотека") {

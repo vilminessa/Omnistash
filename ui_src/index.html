@@ -64,6 +64,8 @@
                 title="Куда качать выбранные"></select>
         <span class="spacer"></span>
         <button class="btn ghost" id="sel-clear">Снять выбор</button>
+        <button class="btn ghost" id="sel-move"
+                title="Перенести выбранные файлы в другое хранилище">Перенести…</button>
         <button class="btn primary" id="sel-download">Скачать</button>
       </div>
 
@@ -208,6 +210,17 @@
       <button class="icon-btn" id="add-close" aria-label="Закрыть">✕</button>
     </div>
     <div class="card-body" id="add-body"></div>
+  </div>
+</div>
+
+<!-- Перенос между хранилищами: превью -> копия с проверкой -> итог -->
+<div class="overlay" id="migrate-overlay" hidden>
+  <div class="card" role="dialog" aria-modal="true">
+    <div class="card-head">
+      <div class="card-title">Перенос в другое хранилище</div>
+      <button class="icon-btn" id="migrate-close" aria-label="Закрыть">✕</button>
+    </div>
+    <div class="card-body" id="migrate-body"></div>
   </div>
 </div>
 

@@ -590,6 +590,22 @@ body[data-theme="light"] .row { border-bottom-color: rgba(0, 0, 0, .05); }
 .storage-default input { accent-color: var(--accent); }
 .storage-toolbar { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
 
+/* ---------------------------- перенос -------------------------------- */
+
+.migrate-target { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.migrate-target select { max-width: 320px; }
+.migrate-facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px;
+  font-size: 12.5px; }
+.migrate-facts dt { color: var(--muted); }
+.migrate-facts dd { margin: 0; font-variant-numeric: tabular-nums; }
+.migrate-list { max-height: 180px; overflow: auto; display: flex;
+  flex-direction: column; gap: 4px; }
+.migrate-item { font-size: 11.5px; color: var(--muted); background: var(--surface-2);
+  border: 1px solid var(--line); border-radius: 4px; padding: 4px 8px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.migrate-item.warn { border-color: var(--warn); }
+.migrate-progress { display: flex; flex-direction: column; gap: 6px; }
+
 /* ---------------------------- сверка/дубликаты ----------------------- */
 
 .dedupe-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
