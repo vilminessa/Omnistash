@@ -29,7 +29,7 @@ with open(_version_file, "w", encoding="utf-8") as _fh:
           '040904B0',
           [
             StringStruct('CompanyName', 'Vilminessa'),
-            StringStruct('FileDescription', 'Omnistash - загрузка, синхронизация и организация архивного контента'),
+            StringStruct('FileDescription', 'Omnistash - загрузка, синхронизация и организация YouTube-архивов'),
             StringStruct('FileVersion', '{__version__}'),
             StringStruct('InternalName', 'Omnistash'),
             StringStruct('OriginalFilename', 'Omnistash.exe'),
