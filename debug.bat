@@ -39,6 +39,7 @@ echo    [5] Тесты: все, включая живые на YouTube
 echo    [6] Проверка синтаксиса: python и node
 echo    [7] Собрать превью интерфейса и открыть
 echo    [8] Превью первого запуска (диалог выбора папки)
+echo    [E] Синхронизация без окна (--sync)
 echo  ---------------------------------------------------------------
 echo    [9] git: статус и последние коммиты
 echo    [A] git: добавить всё, закоммитить, запушить
@@ -62,6 +63,8 @@ if "%sel%"=="5" goto op_tests_all
 if "%sel%"=="6" goto op_syntax
 if "%sel%"=="7" goto op_preview
 if "%sel%"=="8" goto op_preview_first
+if "%sel%"=="E" goto op_sync
+if "%sel%"=="e" goto op_sync
 if "%sel%"=="9" goto op_git_status
 if "%sel%"=="A" goto op_git_push
 if "%sel%"=="a" goto op_git_push
@@ -138,6 +141,12 @@ goto after
 :op_preview_first
 echo Сборка превью в режиме первого запуска...
 python tools\build_preview.py --first --open
+set "rc=%errorlevel%"
+goto after
+
+:op_sync
+echo Синхронизация без окна (синк + очередь)...
+python omnistash.py --sync
 set "rc=%errorlevel%"
 goto after
 

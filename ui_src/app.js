@@ -178,6 +178,7 @@
       state.repack = snap.repack;
       if (!$("repack-overlay").hidden) renderRepackBody();
     }
+    if (changed("schedule", snap.schedule)) renderSchedule(snap.schedule);
     appendLogs(snap.logs);
 
     if (snap.settings_rev !== state.rev) {
@@ -318,6 +319,30 @@
       return '<div class="migrate-item' + (showTarget ? " warn" : "") +
         '" title="' + esc(text) + '">' + esc(text) + "</div>";
     }).join("") + "</div>";
+  }
+
+  function renderSchedule(sched) {
+    // Таймер живёт, пока открыто окно; для работы без окна есть
+    // omnistash.py --sync под планировщик Windows.
+    var line = $("schedule-line");
+    if (!line) return;
+    if (!sched) { line.textContent = ""; return; }
+    var part = function (key, name) {
+      var entry = sched[key] || {};
+      if (!entry.interval) return name + ": <b>выключен</b>";
+      var text = name + ": каждые <b>" + entry.interval + " мин</b>";
+      if (entry.next_in !== null && entry.next_in !== undefined) {
+        // «12:00» читается как время - показываем в минутах.
+        var minutes = Math.max(1, Math.round(entry.next_in / 60));
+        text += " · следующий через " + minutes + " мин";
+      }
+      if (entry.last) text += " · последний " + shortTime(entry.last);
+      return text;
+    };
+    line.innerHTML = part("scan", "Автоскан") + " &nbsp;·&nbsp; " +
+      part("sync", "Автосинк") +
+      " <span class=\"muted\">(работает, пока открыто окно; без окна — " +
+      "omnistash.py --sync)</span>";
   }
 
   function renderMigrateBody() {
@@ -2055,7 +2080,9 @@
       dest_dir: "D:\\видео\\downloads",
       output_template: "%(channel)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s",
       quality: "high", subtitles: "none", transcode: "none",
-      delay_ms: 500, retries: 3, theme: "dark", app_version: ""
+      delay_ms: 500, retries: 3, resume_queue: true,
+      scan_interval_min: 0, sync_interval_min: 30,
+      theme: "dark", app_version: ""
     };
     var counter = 0;
     // Симуляция качалки: в превью нет сети, но поведение панели очереди
@@ -2132,6 +2159,14 @@
         label: "Пауза между запросами, мс",
         hint: "Меньше - быстрее, но площадка может начать резать поток.",
         min: 0, max: 60000, default: 500 },
+      { key: "scan_interval_min", type: "int", section: "Расписание",
+        label: "Автоскан каждые, мин",
+        hint: "0 - выключено. Работает, пока открыто окно.",
+        min: 0, max: 1440, default: 0 },
+      { key: "sync_interval_min", type: "int", section: "Расписание",
+        label: "Автосинк каждые, мин",
+        hint: "0 - выключено. Новые видео в очередь - только в «Полной».",
+        min: 0, max: 1440, default: 30 },
       { key: "theme", type: "choice", section: "Внешний вид", label: "Тема",
         choices: [["dark", "Тёмная"], ["light", "Светлая"]], default: "dark" }
     ];
@@ -2204,6 +2239,9 @@
             }
             return JSON.parse(JSON.stringify(mockSync));
           })(),
+          schedule: { scan: { interval: 0, next_in: null, last: null },
+                      sync: { interval: 30, next_in: 720,
+                              last: "2026-10-07T15:04:00" } },
           repack: JSON.parse(JSON.stringify(mockRepack)),
           migrate: JSON.parse(JSON.stringify(mockMigrate)),
           add_flow: { phase: "idle", mode: "partial", url: "", fetch: null,

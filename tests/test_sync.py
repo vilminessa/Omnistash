@@ -145,6 +145,10 @@ class TestSyncModes(SyncCase):
                          "полный режим не поставил в очередь всё ожидающее")
         self.assertEqual(result["queued"], 4)
         self.assertEqual(self.api.poll(0)["stats"]["queued"], 4)
+        # «Полная» обязана сама запустить качалку - иначе она ничего
+        # не делает ни в окне, ни в --sync под планировщик.
+        self.assertGreaterEqual(self.worker.started, 1,
+                                "после синка качалка не запущена")
 
     def test_partial_mode_only_reports(self):
         self.add_source(fixture_snapshot(count=2))
@@ -153,6 +157,8 @@ class TestSyncModes(SyncCase):
         self.assertEqual(row["new"], 2)
         self.assertEqual(row["queued"], 0, "частичный режим не должен качать сам")
         self.assertEqual(result["new_total"], 2)
+        # Сам синк ничего не запускает - только кнопка «поставить в очередь».
+        self.assertEqual(self.worker.started, 0)
 
         # Но кнопка после синка есть: «поставить новые в очередь».
         queued = self.api.sync_queue_new()

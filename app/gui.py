@@ -20,6 +20,7 @@ import traceback
 
 from . import __version__, indexer, migrate as migrate_mod, repo, settings
 from . import repack as repack_mod
+from . import schedule as schedule_mod
 from . import settings_schema, sources
 from . import storages as storages_mod
 from .db import SYNC_MODES, Database
@@ -124,6 +125,17 @@ class Api:
         if config.get("resume_queue", True) and pending:
             self._log(f"Очередь возобновлена: ждут {pending}")
             self.dl.start()
+
+        # Расписание: таймер живёт вместе с окном; для работы без окна
+        # есть omnistash.py --sync под планировщик Windows (см. README).
+        self.sched = schedule_mod.Scheduler(self._scheduled_scan,
+                                            self._scheduled_sync,
+                                            log=self._log)
+        self.sched.apply_settings(config)
+        self.sched.start()
+        self._log(schedule_mod.describe(
+            self.sched.state()["scan"], "Автоскан") + " | " +
+            schedule_mod.describe(self.sched.state()["sync"], "Автосинк"))
         # Доступность хранилищ - в фоне: сетевой путь может висеть.
         # Поток обязан быть дожидаем в close(): иначе он может открыть
         # соединение уже после закрытия - файл базы останется занятым.
@@ -271,6 +283,7 @@ class Api:
             sync_state["new_ids"] = list(self._sync.get("new_ids") or [])[:200]
             migrate_state = dict(self._migrate)
             repack_state = dict(self._repack)
+            schedule_state = self.sched.state()
         config = settings.as_public(self._current_settings())
         heavy = self._heavy_snapshot()
         return {
@@ -284,6 +297,7 @@ class Api:
             "sync": sync_state,
             "migrate": migrate_state,
             "repack": repack_state,
+            "schedule": schedule_state,
             "settings": config,
             "settings_rev": rev,
             **heavy,
@@ -332,6 +346,14 @@ class Api:
         else:
             self._log(f"Настройка {key} = {pair.get('value')!r}")
         self._heavy_at = 0.0  # дерево/счётчики могли измениться
+        if key in ("scan_interval_min", "sync_interval_min"):
+            # Смена интервала переносит срок сразу: не ждём старого.
+            self.sched.apply_settings(
+                settings.as_public(self._current_settings()))
+            self._log("Расписание: " + " | ".join(
+                schedule_mod.describe(self.sched.state()[name], label)
+                for name, label in (("scan", "автоскан"),
+                                    ("sync", "автосинк"))))
         return {"settings": settings.as_public(self._current_settings()),
                 "settings_rev": self._settings_rev}
 
@@ -1258,6 +1280,22 @@ class Api:
             self._heavy_at = 0.0
 
     # ------------------------------------------------------------------ #
+    #  Расписание
+    # ------------------------------------------------------------------ #
+
+    def _scheduled_scan(self) -> bool:
+        """Задача таймера: переиндексация. False = «занято, повтор позже»."""
+        if self._busy:
+            return False
+        return not (self.start_scan() or {}).get("error")
+
+    def _scheduled_sync(self) -> bool:
+        """Задача таймера: синхронизация источников."""
+        if self._busy:
+            return False
+        return not (self.sync_start() or {}).get("error")
+
+    # ------------------------------------------------------------------ #
     #  Очередь загрузки
     # ------------------------------------------------------------------ #
 
@@ -1434,6 +1472,11 @@ class Api:
                 self._heavy_at = 0.0
             self._log(("Остановлено" if stopped else "Готово") +
                       f": источников {done}/{len(sources_list)}")
+            if queued_total and not stopped:
+                # «Полная» обязана доехать до качалки сама - и в окне, и в
+                # --sync под планировщик, иначе режим ничего не качает.
+                self._log(f"Очередь после синка: {queued_total}, запускаю")
+                self.dl.start()
 
     def _sync_fetch(self, got: int, total: int) -> None:
         with self._lock:
@@ -1448,6 +1491,7 @@ class Api:
         self._migrate_stop.set()
         self._repack_stop.set()
         self.dl.stop()
+        self.sched.stop()
         for thread in (self._scan_thread, self._add_thread, self._sync_thread,
                        self._migrate_thread, self._repack_thread,
                        getattr(self, "_avail_thread", None),
@@ -1456,6 +1500,54 @@ class Api:
                 thread.join(timeout=15)
         self.dl.wait(timeout=15)
         self.db.close()
+
+
+def headless_sync() -> int:
+    """`python omnistash.py --sync`: синхронизация и очередь, без окна.
+
+    Заточен под планировщик Windows: отработал, вышел, код возврата что-то
+    говорит о результате. Журнал при этом пишется в omnistash.log, поэтому
+    после запуска видно, что произошло.
+
+      0 - синк отработал (в том числе «нечего качать»);
+      1 - запуск не удался: нет источников или ошибка старта;
+      2 - синк отработал, но у части источников были ошибки.
+    """
+    api = Api()
+    try:
+        started = api.sync_start()
+        if started.get("error"):
+            print(started["error"])
+            return 1
+        thread = api._sync_thread
+        while thread is not None and thread.is_alive():
+            time.sleep(0.5)
+
+        results = list(api._sync.get("results") or [])
+        errors = [row for row in results if row.get("error")]
+        new_total = sum(int(row.get("new") or 0) for row in results)
+        queued = int(api._sync.get("queued") or 0)
+
+        downloaded = 0
+        pending = repo.stats(api.db.conn)["queued"]
+        if pending:
+            # Режим «Полная» сам поставил строки в очередь - доедем их,
+            # иначе задача планировщика ограничилась бы метаданными.
+            api._log(f"--sync: качаю {pending} строк")
+            api.dl.start()
+            deadline = time.time() + 3600
+            while api.dl.state.get("running") and time.time() < deadline:
+                time.sleep(1.0)
+            downloaded = int(api.dl.state.get("done") or 0)
+
+        print(f"источников: {len(results)}, новых видео: {new_total}, "
+              f"в очередь: {queued}, ошибок источников: {len(errors)}, "
+              f"скачано: {downloaded}")
+        for row in errors:
+            print(f"  ! {row.get('title')}: {row.get('error')}")
+        return 2 if errors else 0
+    finally:
+        api.close()
 
 
 def run() -> int:
