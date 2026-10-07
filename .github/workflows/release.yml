@@ -9,6 +9,12 @@ on:
     tags: ["v*"]
   workflow_dispatch: {}
 
+# Раннер Windows отдаёт cp1252, а сообщения проекта русские: без UTF-8
+# падает даже print() в линте.
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
 permissions:
   contents: read
 
@@ -102,8 +108,9 @@ jobs:
     name: SLSA-провенанс
     needs: [build, python-publish]
     # на теге ждём успеха публикации, на dispatch публикация пропущена -
-    # генерация провенанса всё равно должна пройти (проба конвейера)
-    if: always() && (needs.python-publish.result == 'success' || needs.python-publish.result == 'skipped')
+    # генерация провенанса всё равно должна пройти (проба конвейера);
+    # если сама сборка упала - провенансу обсуждать нечего
+    if: always() && needs.build.result == 'success' && (needs.python-publish.result == 'success' || needs.python-publish.result == 'skipped')
     permissions:
       id-token: write
       contents: write

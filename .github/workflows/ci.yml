@@ -11,6 +11,12 @@ on:
     branches: ["main"]
   workflow_dispatch: {}
 
+# Раннер Windows отдаёт cp1252, а сообщения проекта русские: без UTF-8
+# падает даже print() в линте.
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
 permissions:
   contents: read
 

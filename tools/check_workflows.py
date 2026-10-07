@@ -19,6 +19,14 @@ import re
 import sys
 from pathlib import Path
 
+# Раннер Windows отдаёт cp1252, а сообщения проекта русские: без этой
+# строчки сам линт упадёт на собственном print() - как впервые и вышло.
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        pass
+
 INVISIBLE = "\ufeff\u200b\u00a0\u2007\u202f\u3000"
 SHA = re.compile(r"^[0-9a-f]{40}$")
 USES = re.compile(r"^\s*uses:\s*(\S+)\s*$", re.MULTILINE)
