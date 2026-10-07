@@ -27,6 +27,9 @@ env/
 build/
 dist/
 *.spec.bak
+# --distpath . кладёт exe в корень репозитория (как в CI)
+Omnistash.exe
+Omnistash-win64.zip
 
 # Редакторы и система
 .vscode/

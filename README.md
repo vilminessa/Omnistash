@@ -12,6 +12,8 @@
 ![GUI](https://img.shields.io/badge/UI-web%20%28pywebview%29-8A2BE2)
 ![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-important)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)
+[![ci](https://github.com/vilminessa/Omnistash/actions/workflows/ci.yml/badge.svg)](https://github.com/vilminessa/Omnistash/actions/workflows/ci.yml)
+[![release](https://github.com/vilminessa/Omnistash/actions/workflows/release.yml/badge.svg)](https://github.com/vilminessa/Omnistash/actions/workflows/release.yml)
 
 </div>
 
@@ -146,6 +148,28 @@ pip install -r requirements.txt
 python omnistash.py             # окно
 python omnistash.py --scan      # переиндексация без окна (для watchdog)
 ```
+
+### Сборка exe и CI
+
+```powershell
+python -m PyInstaller Omnistash.spec --distpath . --workpath build --noconfirm
+# получится один Omnistash.exe (~28 МБ): ui_src вшит внутрь, профиль
+# (настройки и индекс) остаётся в %LOCALAPPDATA%\Omnistash, версию exe
+# берёт из version.py
+```
+
+Конвейер — на GitHub Actions, как в Synfronia:
+
+- **ci** — на каждый push/PR: офлайн-тесты, синтаксис Python/JS, линт
+  workflow-файлов (`tools/check_workflows.py`: пины SHA и permissions),
+  сборка превью;
+- **release** — по тегу `v*` или вручную (*workflow_dispatch*): проверки →
+  `Omnistash.exe` → ассет релиза → SLSA-провенанс и `gh attestation
+  verify`. Версия в `version.py` должна совпасть с тегом, иначе сборка
+  падает на шаге сверки.
+
+Живые тесты в CI не гоняются — там реальная загрузка с YouTube, а CI
+должен быть детерминированным.
 
 ### Разработка: debug.bat
 
@@ -314,7 +338,9 @@ Register-ScheduledTask -TaskName "Omnistash Sync" `
 
 - Windows 10/11 с WebView2 Runtime (по умолчанию входит в состав Edge).
 - Python 3.12+ (для запуска из исходников).
-- ffmpeg — ищется в PATH и в папке Synfronia; без него качаются только
+- ffmpeg — ищется по цепочке: PATH → `bin\` рядом с программой →
+  `%LOCALAPPDATA%\Omnistash\bin` → `%LOCALAPPDATA%\Synfronia\bin` (готовый
+  от соседнего проекта, второй раз не тащим); без него качаются только
   готовые (несклейные) потоки.
 - FTP/FTPS-сервер — понадобится с этапом M14 (выгрузка).
 
@@ -362,9 +388,9 @@ Register-ScheduledTask -TaskName "Omnistash Sync" `
 - **Загрузчик и очередь** — очередь живёт в таблице и переживает рестарт
   окна; прогресс с процентом, скоростью и ETA; «Остановить» возвращает
   строку в очередь (`.part` остаётся для докачки), «Повторить упавшие» —
-  одним нажатием; режим «Полная» стартует качалку сам. ffmpeg ищется в
-  PATH и в папке Synfronia, при загрузке пишется sidecar `post.json` с
-  хешем файла.
+  одним нажатием; режим «Полная» стартует качалку сам. ffmpeg ищется по
+  цепочке PATH → папка программы → профиль → папка Synfronia, при
+  загрузке пишется sidecar `post.json` с хешем файла.
 - **Эксплуатация** — причина падения видна прямо в строке очереди (плюс
   «повторить эту» у строки), очередь возобновляется при старте окна
   (настройка «Продолжать очередь при запуске»), а журнал пишется в
@@ -430,7 +456,8 @@ Register-ScheduledTask -TaskName "Omnistash Sync" `
 | **M15** | свои темы, шрифт интерфейса, вторые языки | дальше |
 | **M16** | адаптеры площадок (pawarchive и подобные), вход по cookie/токен, одиночное видео | дальше |
 | **M17** | коллекции-папки (подборки) и массовые операции над ними | дальше |
-| — | сборка exe (PyInstaller) | в самом конце |
+| **R1** | CI на GitHub Actions: тесты, синтаксис и линт workflow-файлов на каждый push; релизный конвейер (проверки → PyInstaller → ассет по тегу `v*` → SLSA-провенанс) | **сделано** |
+| — | полировка exe: иконка, обход YouTube, финальная подпись и сборка | в самом конце |
 
 Тесты:
 

@@ -1,0 +1,39 @@
+# Проверки на каждый push/PR: офлайн-тесты, синтаксис, сборка превью.
+# Живые тесты (OMNISTASH_LIVE=1) в CI не гоняются: там реальная загрузка
+# с YouTube, а CI обязан быть детерминированным.
+
+name: ci
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: офлайн-проверки
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Зависимости
+        run: python -m pip install -r requirements.txt
+      - name: Линт workflows (пины SHA, permissions)
+        run: python tools/check_workflows.py
+      - name: Синтаксис Python
+        run: python -m compileall -q app omnistash.py version.py tests tools
+      - name: Синтаксис JS
+        shell: bash
+        run: node --check ui_src/app.js
+      - name: Превью интерфейса собирается
+        run: python tools/build_preview.py
+      - name: Офлайн-тесты
+        run: python -m unittest discover -t . -s tests

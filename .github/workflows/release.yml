@@ -1,0 +1,143 @@
+# Релизы по тегам: проверки -> сборка exe -> публикация в релиз -> SLSA-провенанс.
+# Пробный запуск: workflow_dispatch (ветка вручную) - пройдут verify и build,
+# публикация и провенанс выполняются только на тегах v*.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: проверки перед сборкой
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Зависимости
+        run: python -m pip install -r requirements.txt
+      - name: Линт workflows (пины SHA, permissions)
+        run: python tools/check_workflows.py
+      - name: Офлайн-тесты
+        run: python -m unittest discover -t . -s tests
+      - name: Версия совпадает с тегом
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          ver=$(python -c "import version; print(version.__version__)")
+          echo "version.py=$ver tag=$GITHUB_REF_NAME"
+          test "$ver" = "${GITHUB_REF_NAME#v}"
+      - name: Синтаксис JS
+        shell: bash
+        run: node --check ui_src/app.js
+      - name: Превью интерфейса собирается
+        run: python tools/build_preview.py
+
+  build:
+    name: сборка Omnistash.exe
+    needs: verify
+    runs-on: windows-latest
+    outputs:
+      digests: ${{ steps.hash.outputs.digests }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Зависимости
+        run: python -m pip install -r requirements.txt
+      - name: Сборка exe (onefile, версия из version.py в ресурсах)
+        run: python -m PyInstaller Omnistash.spec --distpath . --workpath build --noconfirm
+      - name: Проверка артефакта
+        shell: bash
+        # нижняя граница - защита от пустой/обрезанной сборки: локально
+        # Omnistash.exe весит ~27.8 МБ
+        run: python -c "import os; s = os.path.getsize('Omnistash.exe'); print('Omnistash.exe', s, 'bytes'); assert s > 20_000_000, s"
+      - name: Хеш артефакта (формат sha256sum, base64 - для SLSA)
+        id: hash
+        shell: bash
+        run: |
+          python -c "import hashlib, base64; h = hashlib.sha256(); f = open('Omnistash.exe', 'rb'); [h.update(c) for c in iter(lambda: f.read(1048576), b'')]; open('digests.b64', 'w').write(base64.b64encode((h.hexdigest() + '  Omnistash.exe\n').encode()).decode())"
+          echo "digests=$(cat digests.b64)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Omnistash-exe
+          path: Omnistash.exe
+          if-no-files-found: error
+          retention-days: 5
+
+  python-publish:
+    name: публикация exe в релиз
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: Omnistash-exe
+      - name: Создать/обновить релиз тега
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" Omnistash.exe --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" Omnistash.exe --repo "$GITHUB_REPOSITORY" \
+              --title "$GITHUB_REF_NAME" \
+              --notes "Автоматическая сборка (CI). Провенанс SLSA прикладывается отдельным джобом."
+          fi
+
+  generator-generic-ossf-slsa3-publish:
+    name: SLSA-провенанс
+    needs: [build, python-publish]
+    # на теге ждём успеха публикации, на dispatch публикация пропущена -
+    # генерация провенанса всё равно должна пройти (проба конвейера)
+    if: always() && (needs.python-publish.result == 'success' || needs.python-publish.result == 'skipped')
+    permissions:
+      id-token: write
+      contents: write
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: "${{ needs.build.outputs.digests }}"
+      # на теге - в релиз, на dispatch - просто артефакт рана (проба конвейера)
+      upload-assets: ${{ startsWith(github.ref, 'refs/tags/') }}
+
+  verify-attestation:
+    name: проверка подписи
+    needs: generator-generic-ossf-slsa3-publish
+    # интота-бандл подписывается в ассеты релиза (upload-assets) - на теге
+    # сверяем его с exe; на dispatch ассетов релиза нет - пропускаем
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Скачать exe и провенанс из релиза
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            -p Omnistash.exe -p Omnistash.exe.intoto.jsonl --clobber
+      - name: gh attestation verify (bundle из релиза)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # бандл - sigstore + provenance v0.2, подписант - reusable workflow
+        # генератора: без этих флагов gh ищет v1 в реестре и даёт 404
+        run: |
+          gh attestation verify Omnistash.exe \
+            --bundle Omnistash.exe.intoto.jsonl \
+            --repo "$GITHUB_REPOSITORY" \
+            --predicate-type https://slsa.dev/provenance/v0.2 \
+            --signer-repo slsa-framework/slsa-github-generator

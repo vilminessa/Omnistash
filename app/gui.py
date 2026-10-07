@@ -110,6 +110,13 @@ class Api:
         self.dl = DownloadWorker(self.db, self._current_settings, log=self._log)
         settings.reload_if_changed(self._settings_cache)
         self._log("Индекс открыт: " + str(self.db.path))
+        # Версия сборки (version.py): в журнале видно, что именно запущено -
+        # для exe это единственный способ узнать, какая сборка работает.
+        try:
+            from version import __version__
+            self._log(f"Omnistash {__version__}")
+        except Exception:  # noqa: BLE001 - версия не критична для работы
+            pass
         # Версия pywebview в журнале: API между мажорными версиями
         # меняется (диалог папки уже переезжал) - пусть видно, с чем работаем.
         try:

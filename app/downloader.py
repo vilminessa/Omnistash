@@ -1,8 +1,9 @@
 """Загрузка видео: обёртка над yt-dlp для очереди.
 
 Что здесь решается за кадром:
-  * ffmpeg ищется в PATH и в `%LOCALAPPDATA%\\Synfronia\\bin` - тот же
-    инструмент уже скачан на машину соседним проектом, второй раз не тащим;
+  * ffmpeg ищется по цепочке: PATH -> `bin/` рядом с программой ->
+    `%LOCALAPPDATA%\\Omnistash\\bin` -> `%LOCALAPPDATA%\\Synfronia\\bin`
+    (тот же инструмент уже скачан соседним проектом, второй раз не тащим);
     без ffmpeg берём готовый (несклейный) поток и говорим об этом честно;
   * качество из настроек - это ограничение по высоте, а не «лучшее из
     доступного»: «Высокое» не должно тянуть 4К ради 1080p экрана;
@@ -22,6 +23,7 @@ from pathlib import Path
 import yt_dlp
 
 from .indexer import SIDECAR_SUFFIX, build_sidecar, file_hash
+from .paths import base_dir
 
 # Ограничение по высоте: качество -> максимальная высота (None = без предела).
 HEIGHT_LIMIT = {"best": None, "high": 1080, "mid": 720, "low": 480}
@@ -33,13 +35,17 @@ class DownloadCancelled(Exception):
 
 
 def find_ffmpeg() -> str | None:
-    """Путь к ffmpeg: PATH, потом папка Synfronia, потом `bin/` рядом с exe."""
+    """Путь к ffmpeg: PATH, потом папка программы, потом профиль, потом сосед."""
     found = shutil.which("ffmpeg")
     if found:
         return found
+    # base_dir() в заморозке - папка самой exe: по __file__ здесь был бы
+    # временный _MEIPASS, который живёт ровно один запуск.
+    profile = Path(os.environ.get("LOCALAPPDATA", ""))
     candidates = [
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Synfronia" / "bin" / "ffmpeg.exe",
-        Path(__file__).resolve().parent.parent / "bin" / "ffmpeg.exe",
+        base_dir() / "bin" / "ffmpeg.exe",
+        profile / "Omnistash" / "bin" / "ffmpeg.exe",
+        profile / "Synfronia" / "bin" / "ffmpeg.exe",
     ]
     for path in candidates:
         if path.is_file():
