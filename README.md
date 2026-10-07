@@ -142,7 +142,7 @@
 ## Установка
 
 ```powershell
-git clone http://vilmpc:3000/Vilminessa/Omnistash.git
+git clone https://github.com/vilminessa/Omnistash.git
 cd Omnistash
 pip install -r requirements.txt
 python omnistash.py             # окно
@@ -495,16 +495,15 @@ pull request ценят больше всего.
 
 ## Похожие проекты
 
-- [PawchiveDownloader](http://vilmpc:3000/Vilminessa/PawchiveDownloader) —
-  загрузчик с pawchive.pw (Patreon / Fanbox), прототип подхода к
-  адаптерам и `index.jsonl`.
-- [KemonoDownloader](http://vilmpc:3000/Vilminessa/KemonoDownloader) —
-  клоны с kemono.cr: избранные / авторы / URL.
-- [PixivDownloader](http://vilmpc:3000/Vilminessa/PixivDownloader),
-  [MangaSaver](http://vilmpc:3000/Vilminessa/MangaSaver) — загрузка
-  Pixiv и манги на MediaHub.
-- [Synfronia](http://vilmpc:3000/Vilminessa/Synfronia) — тот же подход
+- PawchiveDownloader — загрузчик с pawchive.pw (Patreon / Fanbox),
+  прототип подхода к адаптерам и `index.jsonl`.
+- KemonoDownloader — клоны с kemono.cr: избранные / авторы / URL.
+- PixivDownloader, MangaSaver — загрузка Pixiv и манги на MediaHub.
+- [Synfronia](https://github.com/vilminessa/Synfronia) — тот же подход
   к интерфейсу: одно окно, всё локально.
+
+Первые четыре — локальные прототипы, они не опубликованы; открытыми
+остаются Synfronia и этот репозиторий.
 
 ---
 
