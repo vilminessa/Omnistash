@@ -88,6 +88,29 @@ def read_sidecar(path: str | Path) -> dict | None:
             "hash": data.get("hash"), "downloaded_at": data.get("downloaded_at")}
 
 
+def rewrite_sidecar(video_path: str | Path, sidecar_path: str | Path) -> None:
+    """Поправить путь до видео внутри post.json.
+
+    Сайдкар хранит, к какому файлу он относится: переименование без этой
+    правки оставило бы запись, указывающую на несуществующий путь.
+    """
+    target = str(video_path or "")
+    if not target:
+        return
+    path = Path(sidecar_path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return
+    if not isinstance(data, dict) or data.get("path") == target:
+        return
+    data["path"] = target
+    try:
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass  # не смог переписать - не беда, скан восстановит сайдкар
+
+
 def build_sidecar(info: dict, path: str | Path, digest: str | None = None) -> str:
     """post.json для свежескачанного файла (пишет загрузчик)."""
     payload = {

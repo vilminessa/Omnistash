@@ -607,6 +607,11 @@ body[data-theme="light"] .row { border-bottom-color: rgba(0, 0, 0, .05); }
 .migrate-target select { max-width: 320px; }
 .migrate-facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px;
   font-size: 12.5px; }
+/* Переименования «было -> станет»: длинные пути, поэтому блоком. */
+.migrate-item.renamed { white-space: normal; word-break: break-all;
+  line-height: 1.5; }
+.migrate-item .arrow { color: var(--muted); padding: 0 6px; }
+.migrate-item b { color: var(--text); font-weight: 600; }
 .migrate-facts dt { color: var(--muted); }
 .migrate-facts dd { margin: 0; font-variant-numeric: tabular-nums; }
 .migrate-list { max-height: 180px; overflow: auto; display: flex;

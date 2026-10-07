@@ -41,6 +41,8 @@
         <input type="search" id="search" placeholder="Поиск по названию, описанию, тегам…" autocomplete="off">
         <select id="status-filter" title="Фильтр по статусу"><option value="">все статусы</option></select>
         <span class="spacer"></span>
+        <button class="btn ghost" id="repack-btn"
+                title="Переименовать выбранные (или текущую область) по шаблону из настроек">Переупаковать…</button>
         <button class="btn ghost" id="dedupe-btn"
                 title="Найти копии файлов и разобрать их">Дубликаты</button>
         <span class="muted" id="list-total"></span>
@@ -212,6 +214,17 @@
       <button class="icon-btn" id="add-close" aria-label="Закрыть">✕</button>
     </div>
     <div class="card-body" id="add-body"></div>
+  </div>
+</div>
+
+<!-- Переупаковка: превью -> переименование с отменой -> итог -->
+<div class="overlay" id="repack-overlay" hidden>
+  <div class="card" role="dialog" aria-modal="true">
+    <div class="card-head">
+      <div class="card-title">Переупаковка по шаблону</div>
+      <button class="icon-btn" id="repack-close" aria-label="Закрыть">✕</button>
+    </div>
+    <div class="card-body" id="repack-body"></div>
   </div>
 </div>
 

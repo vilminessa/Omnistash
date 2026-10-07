@@ -174,6 +174,10 @@
       state.migrate = snap.migrate;
       if (!$("migrate-overlay").hidden) renderMigrateBody();
     }
+    if (changed("repack", snap.repack)) {
+      state.repack = snap.repack;
+      if (!$("repack-overlay").hidden) renderRepackBody();
+    }
     appendLogs(snap.logs);
 
     if (snap.settings_rev !== state.rev) {
@@ -423,6 +427,161 @@
   }
 
   /* ------------------------------------------------------------------ *
+   *  Переупаковка по шаблону
+   * ------------------------------------------------------------------ */
+
+  function openRepack() {
+    state.repackPreview = null;
+    $("repack-overlay").hidden = false;
+    renderRepackBody();
+    refreshRepackPreview();
+  }
+
+  function refreshRepackPreview() {
+    call("repack_preview", repackRequest()).then(function (res) {
+      state.repackPreview = res;
+      renderRepackBody();
+    });
+  }
+
+  function repackRequest() {
+    // Выделение сильнее области: отметили строки - переупаковываем их.
+    if (state.selected.size) return { ids: Array.from(state.selected) };
+    return { scope: state.scope };
+  }
+
+  function repackTargetLabel() {
+    if (state.selected.size) return "выделенные строки: " + state.selected.size;
+    var scope = state.scope || { type: "pool" };
+    if (scope.type === "channel") {
+      var ch = ((state.tree && state.tree.channels) || [])
+        .filter(function (c) { return c.id === scope.id; })[0];
+      return "канал «" + ((ch && ch.title) || scope.id) + "»";
+    }
+    if (scope.type === "playlist") {
+      var pl = ((state.tree && state.tree.playlists) || [])
+        .filter(function (p) { return p.id === scope.id; })[0];
+      return "плейлист «" + ((pl && pl.title) || scope.id) + "»";
+    }
+    return "весь Пул";
+  }
+
+  function renderRepackBody() {
+    var state_ = state.repack;
+    var body = $("repack-body");
+    if (!body) return;
+    var html = "";
+
+    if (state_ && state_.running) {
+      var pct = state_.total ? Math.round(state_.done * 100 / state_.total) : 0;
+      html = '<div class="migrate-progress">' +
+        '<div class="scan-track"><div class="scan-fill" style="width:' + pct +
+        '%"></div></div>' +
+        '<div class="scan-text">' + state_.done + " / " + state_.total +
+        " файл(ов)</div>" +
+        '<div class="migrate-item">' + esc(state_.current || "") + "</div>" +
+        "</div>" +
+        '<div class="card-actions"><button class="btn" data-repack="stop">' +
+        "Остановить</button></div>";
+      body.innerHTML = html;
+      bindRepack();
+      return;
+    }
+
+    if (state_ && state_.summary) {
+      html = '<div class="notice">' + esc(state_.summary) + "</div>";
+      if (state_.errors && state_.errors.length) {
+        html += '<div class="notice err">' +
+          state_.errors.slice(0, 5).map(esc).join("<br>") + "</div>";
+      }
+      html += '<div class="card-actions"><button class="btn primary" ' +
+        'data-repack="close">Закрыть</button></div>';
+      body.innerHTML = html;
+      bindRepack();
+      return;
+    }
+
+    var preview = state.repackPreview;
+    html = '<div class="muted">Область: ' + esc(repackTargetLabel()) + "</div>" +
+      '<div class="migrate-item" title="Шаблон из настроек">шаблон: ' +
+      esc(preview && preview.template ? preview.template : "") + "</div>";
+    if (!preview) {
+      html += '<div class="muted">Считаю, что и как переименуется…</div>';
+    } else if (preview.error) {
+      html += '<div class="notice err">' + esc(preview.error) + "</div>" +
+        '<div class="card-actions"><button class="btn" data-repack="close">' +
+        "Закрыть</button></div>";
+    } else {
+      html += '<dl class="migrate-facts">' +
+        "<dt>Будет переименовано</dt><dd>" + preview.count + "</dd>" +
+        "<dt>Уже по шаблону</dt><dd>" + preview.unchanged + "</dd>" +
+        "<dt>Конфликтов имён</dt><dd>" + preview.conflict_total + "</dd>" +
+        "<dt>Без метаданных</dt><dd>" + preview.no_meta_total + "</dd>" +
+        "<dt>Объём</dt><dd>" + humanSize(preview.bytes) + "</dd>" +
+        "</dl>";
+
+      if (preview.rename.length) {
+        html += '<div class="migrate-list">' + preview.rename.map(function (row) {
+          return '<div class="migrate-item renamed"><b>' + esc(row.title || "") +
+            '</b><span class="arrow">→</span><span>' + esc(row.to) + "</span>" +
+            '<div class="muted">' + esc(row.from) + "</div></div>";
+        }).join("") + "</div>";
+        if (preview.rename_total > preview.rename.length) {
+          html += '<div class="muted">… и ещё ' +
+            (preview.rename_total - preview.rename.length) + "</div>";
+        }
+      }
+      if (preview.conflict_total) {
+        html += '<div class="notice warn">Конфликты пропускаются: в целевой ' +
+          "папке уже лежит чужой файл с таким именем.</div>" +
+          '<div class="migrate-list">' + preview.conflicts.map(function (row) {
+            return '<div class="migrate-item warn" title="' + esc(row.target) +
+              '">' + esc(row.title || row.path) + "</div>";
+          }).join("") + "</div>";
+      }
+      if (preview.no_meta_total) {
+        html += '<div class="notice">Без метаданных: этих файлов касается ' +
+          "шаблон, но построить путь не из чего - они остаются как есть.</div>" +
+          '<div class="migrate-list">' + preview.no_meta.map(function (row) {
+            return '<div class="migrate-item warn">' + esc(row.title || "?") +
+              " — " + esc(row.reason) + "</div>";
+          }).join("") + "</div>";
+      }
+
+      html += '<div class="muted">Переименование идёт внутри того же ' +
+        "хранилища: сайдкар, субтитры и обложка меняют имя вместе с видео, " +
+        "папки создаются сами, пустые убираются. Отмена безопасна. Чтобы " +
+        "уехать на другой диск - «Перенести…».</div>" +
+        '<div class="card-actions">' +
+        '<button class="btn" data-repack="close">Отмена</button>' +
+        '<button class="btn primary" data-repack="start"' +
+        (preview.count ? "" : " disabled") + ">Начать (" + preview.count +
+        ")</button></div>";
+    }
+    body.innerHTML = html;
+    bindRepack();
+  }
+
+  function bindRepack() {
+    Array.prototype.forEach.call(
+      document.querySelectorAll("#repack-body [data-repack]"), function (btn) {
+        btn.addEventListener("click", function () {
+          var action = btn.dataset.repack;
+          if (action === "close") { $("repack-overlay").hidden = true; return; }
+          if (action === "stop") { call("repack_stop"); return; }
+          if (action === "start") {
+            call("repack_start", repackRequest()).then(function (res) {
+              if (!res) return;
+              if (res.error) { toast(res.error, true); return; }
+              toast("Переименованию: " + res.count);
+              renderRepackBody();
+            });
+          }
+        });
+      });
+  }
+
+  /* ------------------------------------------------------------------ *
    *  Сверка: возможные переезды и дубликаты
    * ------------------------------------------------------------------ */
 
@@ -549,6 +708,7 @@
 
   function renderTree(tree) {
     if (!tree) return;
+    state.tree = tree;   // названия каналов/плейлистов для диалогов
     var current = JSON.stringify(state.scope);
     var html = [];
     var pool = tree.pool || {};
@@ -1767,6 +1927,16 @@
       $("dedupe-overlay").hidden = true;
     });
 
+    // Переупаковка по шаблону (область = выделение или текущий фильтр).
+    $("repack-btn").addEventListener("click", openRepack);
+    $("repack-close").addEventListener("click", function () {
+      if (state.repack && state.repack.running) {
+        toast("Переупаковка идёт - остановите её или дождитесь конца", true);
+        return;
+      }
+      $("repack-overlay").hidden = true;
+    });
+
     // Журнал: в памяти окна и файлом на диске.
     $("log-open").addEventListener("click", function () {
       call("open_log").then(function (res) {
@@ -1920,6 +2090,10 @@
     var mockMigrate = { running: false, done: 0, total: 0, bytes_done: 0,
                         bytes_total: 0, current: "", summary: null, errors: [] };
     var mockMigrateTimer = null;
+    // Переупаковка: превью с готовыми «переименованиями», старт - имитация.
+    var mockRepack = { running: false, done: 0, total: 0, current: "",
+                       summary: null, error: null, errors: [] };
+    var mockRepackTimer = null;
     var mockDupes = [
       { video_id: 7, key: "youtube:dup00000001", title: "Два раза",
         copies: 2, bytes: 400000,
@@ -2030,6 +2204,7 @@
             }
             return JSON.parse(JSON.stringify(mockSync));
           })(),
+          repack: JSON.parse(JSON.stringify(mockRepack)),
           migrate: JSON.parse(JSON.stringify(mockMigrate)),
           add_flow: { phase: "idle", mode: "partial", url: "", fetch: null,
                       plan: null, stages: [], result: null, error: null },
@@ -2147,6 +2322,48 @@
         mockMigrate.running = false;
         mockMigrate.summary =
           "Перенос остановлен - уже перенесённое осталось в цели";
+        return Promise.resolve({ ok: true });
+      },
+      repack_preview: function () {
+        return Promise.resolve({
+          ok: true,
+          template: "%(channel)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s",
+          selected: 4, count: 2, rename_total: 2, unchanged: 1, bytes: 734003200,
+          rename: [
+            { video_id: 1, title: "Первый ролик",
+              from: "D:\\видео\\библиотека\\Первый ролик [aaa111bbb22].mp4",
+              to: "D:\\видео\\библиотека\\Автор\\20250101 - Первый ролик [aaa111bbb22].mp4" },
+            { video_id: 2, title: "Второй ролик",
+              from: "D:\\видео\\библиотека\\Второй ролик [ccc333ddd44].mp4",
+              to: "D:\\видео\\библиотека\\Автор\\20250202 - Второй ролик [ccc333ddd44].mp4" }
+          ],
+          conflicts: [{ path: "x", target: "y", title: "Чужой файл" }],
+          conflict_total: 1,
+          no_meta: [{ title: "Без имени", reason: "нет метаданных площадки (локальный файл)" }],
+          no_meta_total: 1
+        });
+      },
+      repack_start: function () {
+        mockRepack = { running: true, done: 0, total: 3, current: "первый.mp4",
+                       summary: null, error: null, errors: [] };
+        var step = 0;
+        mockRepackTimer = setInterval(function () {
+          step += 1;
+          mockRepack.done = Math.min(step * 2, 3);
+          mockRepack.current = "файл-" + step;
+          if (step >= 2) {
+            clearInterval(mockRepackTimer);
+            mockRepack.running = false;
+            mockRepack.summary = "Переименовано 2 из 2, удалено пустых папок 1";
+          }
+        }, 700);
+        return Promise.resolve({ ok: true, count: 2, conflict_total: 1,
+                                 no_meta_total: 1 });
+      },
+      repack_stop: function () {
+        if (mockRepackTimer) clearInterval(mockRepackTimer);
+        mockRepack.running = false;
+        mockRepack.summary = "Переупаковка остановлена - уже переименованное осталось";
         return Promise.resolve({ ok: true });
       },
       storage_add: function (req) {

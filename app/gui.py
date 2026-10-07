@@ -19,6 +19,7 @@ import time
 import traceback
 
 from . import __version__, indexer, migrate as migrate_mod, repo, settings
+from . import repack as repack_mod
 from . import settings_schema, sources
 from . import storages as storages_mod
 from .db import SYNC_MODES, Database
@@ -89,6 +90,12 @@ class Api:
                                "summary": None, "errors": []}
         self._migrate_stop = threading.Event()
         self._migrate_thread: threading.Thread | None = None
+        # Переупаковка (переименование по шаблону внутри хранилища).
+        self._repack: dict = {"running": False, "done": 0, "total": 0,
+                              "current": "", "summary": None, "error": None,
+                              "errors": []}
+        self._repack_stop = threading.Event()
+        self._repack_thread: threading.Thread | None = None
         # Качалка: очередь живёт в таблице videos, воркер - фоновый поток.
         self.dl = DownloadWorker(self.db, self._current_settings, log=self._log)
         settings.reload_if_changed(self._settings_cache)
@@ -263,6 +270,7 @@ class Api:
             sync_state["results"] = [dict(r) for r in self._sync.get("results", [])]
             sync_state["new_ids"] = list(self._sync.get("new_ids") or [])[:200]
             migrate_state = dict(self._migrate)
+            repack_state = dict(self._repack)
         config = settings.as_public(self._current_settings())
         heavy = self._heavy_snapshot()
         return {
@@ -275,6 +283,7 @@ class Api:
             "dl": dl_state,
             "sync": sync_state,
             "migrate": migrate_state,
+            "repack": repack_state,
             "settings": config,
             "settings_rev": rev,
             **heavy,
@@ -1134,6 +1143,121 @@ class Api:
                 self._heavy_at = 0.0
 
     # ------------------------------------------------------------------ #
+    #  Переупаковка по шаблону (M9)
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _repack_selection(request) -> dict:
+        """Что переупаковываем: явные строки, иначе текущую область."""
+        request = request or {}
+        try:
+            ids = [int(v) for v in request.get("ids") or []]
+        except (TypeError, ValueError):
+            ids = []
+        if ids:
+            return {"ids": ids}
+        scope = request.get("scope")
+        if isinstance(scope, dict) and scope.get("type"):
+            return {"scope": scope}
+        return {"scope": {"type": "pool"}}
+
+    def repack_preview(self, request=None) -> dict:
+        """Превью: сколько переименуется, что конфликтует, что нельзя."""
+        template = self._current_settings().get("output_template") or ""
+        plan = repack_mod.plan_repack(self.db.conn,
+                                      self._repack_selection(request), template)
+        if plan.get("error"):
+            return plan
+        limit = repack_mod.DISPLAY_LIMIT
+        return {"ok": True, "template": plan["template"],
+                "selected": plan["selected"], "count": plan["count"],
+                "rename": plan["rename"][:limit],
+                "rename_total": plan["rename_total"],
+                "unchanged": plan["unchanged"],
+                "conflicts": plan["conflicts"][:limit],
+                "conflict_total": len(plan["conflicts"]),
+                "no_meta": plan["no_meta"][:limit],
+                "no_meta_total": len(plan["no_meta"]),
+                "bytes": plan["bytes"]}
+
+    def repack_start(self, request=None) -> dict:
+        """Начать переупаковку: план пересчитывается на старте."""
+        with self._lock:
+            if self._repack.get("running"):
+                return {"error": "Переупаковка уже идёт"}
+        template = self._current_settings().get("output_template") or ""
+        plan = repack_mod.plan_repack(self.db.conn,
+                                      self._repack_selection(request), template)
+        if plan.get("error"):
+            return plan
+        if not plan["count"]:
+            return {"error": "Нечего переупаковывать: всё уже по шаблону "
+                             f"(без изменений: {plan['unchanged']})"}
+
+        self._repack_stop.clear()
+        with self._lock:
+            self._repack = {"running": True, "done": 0,
+                            "total": sum(1 + len(i["aux"])
+                                         for i in plan["items"]),
+                            "current": "", "summary": None, "error": None}
+            self._busy = True
+            self._status = f"Переупаковка {plan['count']} файл(ов)"
+        self._log(f"Переупаковка: {plan['count']} к переименованию, "
+                  f"конфликтов {len(plan['conflicts'])}, "
+                  f"без метаданных {len(plan['no_meta'])}")
+        thread = threading.Thread(target=self._repack_worker, args=(plan,),
+                                  daemon=True, name="omnistash-repack")
+        self._repack_thread = thread
+        thread.start()
+        return {"ok": True, "count": plan["count"],
+                "conflict_total": len(plan["conflicts"]),
+                "no_meta_total": len(plan["no_meta"])}
+
+    def repack_stop(self) -> dict:
+        """Прервать: уже переименованное остаётся, строки везде валидны."""
+        with self._lock:
+            running = self._repack.get("running")
+        if not running:
+            return {"ok": False}
+        self._repack_stop.set()
+        self._log("Переупаковка остановлена пользователем")
+        return {"ok": True}
+
+    def _repack_worker(self, plan: dict) -> None:
+        def progress(done, total, current):
+            with self._lock:
+                self._repack.update(done=done, total=total, current=current)
+                self._status = f"Переупаковка {done}/{total}"
+
+        try:
+            result = repack_mod.apply_repack(self.db.conn, plan,
+                                             stop=self._repack_stop,
+                                             progress=progress)
+            summary = f"Переименовано {result['renamed']} из {result['total']}"
+            if result["dirs_removed"]:
+                summary += f", удалено пустых папок {result['dirs_removed']}"
+            if result["errors"]:
+                summary += f", не получилось {len(result['errors'])}"
+            self._log(summary)
+            for error in result["errors"][:5]:
+                self._log("Переупаковка: " + error)
+            self._finish_repack(summary, result.get("errors") or [])
+        except repack_mod.RepackCancelled:
+            self._finish_repack("Переупаковка остановлена - уже "
+                                "переименованное осталось", [])
+        except Exception as exc:  # noqa: BLE001 - фон не должен молча умереть
+            self._log(f"Переупаковка упала: {exc}")
+            self._finish_repack(f"Ошибка: {exc}", [str(exc)])
+
+    def _finish_repack(self, summary: str, errors: list[str]) -> None:
+        with self._lock:
+            self._repack.update(running=False, summary=summary,
+                                current="", errors=errors)
+            self._busy = False
+            self._status = "Готово"
+            self._heavy_at = 0.0
+
+    # ------------------------------------------------------------------ #
     #  Очередь загрузки
     # ------------------------------------------------------------------ #
 
@@ -1322,9 +1446,10 @@ class Api:
         self._add_cancel.set()
         self._sync_stop.set()
         self._migrate_stop.set()
+        self._repack_stop.set()
         self.dl.stop()
         for thread in (self._scan_thread, self._add_thread, self._sync_thread,
-                       self._migrate_thread,
+                       self._migrate_thread, self._repack_thread,
                        getattr(self, "_avail_thread", None),
                        getattr(self, "_check_thread", None)):
             if thread is not None and thread.is_alive():

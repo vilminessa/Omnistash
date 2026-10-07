@@ -15,11 +15,9 @@
 
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
 
-from .indexer import file_hash
+from .indexer import file_hash, rewrite_sidecar
 
 CHUNK = 1024 * 1024          # копирование кусками: так виден прогресс
 MOVE_LIMIT = 5000            # защита от «перенеси мне всю библиотеку разом»
@@ -152,24 +150,6 @@ def _copy_with_progress(src: str, dst: str, stop, progress) -> str:
     return "sha256:" + source_digest.hexdigest()
 
 
-def _rewrite_sidecar(video_path: str, sidecar_path: str) -> None:
-    """Внутри post.json лежит путь к видео - поправляем после переноса."""
-    if not video_path:
-        return
-    try:
-        data = json.loads(Path(sidecar_path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return
-    if not isinstance(data, dict) or data.get("path") == video_path:
-        return
-    data["path"] = video_path
-    try:
-        Path(sidecar_path).write_text(json.dumps(data, ensure_ascii=False),
-                                      encoding="utf-8")
-    except OSError:
-        pass  # не смог переписать - не беда: скан пересоберёт сайдкар
-
-
 def move_files(conn, plan: dict, target: dict, *, stop=None, progress=None) -> dict:
     """Выполнить перенос по плану. Возвращает итог (см. docstring модуля)."""
     items = plan.get("files") or []
@@ -232,7 +212,7 @@ def move_files(conn, plan: dict, target: dict, *, stop=None, progress=None) -> d
         if item["kind"] == "sidecar":
             moved_video = new_video_path.get(item["video_id"])
             if moved_video:
-                _rewrite_sidecar(moved_video, item["dst"])
+                rewrite_sidecar(moved_video, item["dst"])
 
         try:
             os.remove(item["src"])
@@ -260,9 +240,3 @@ def _silent_remove(path: str) -> None:
         os.remove(path)
     except OSError:
         pass
-
-
-def new_video_paths_for_sidecars(plan: dict) -> dict[int, str]:
-    """video_id -> новый путь видео (для правки сайдкаров)."""
-    return {item["video_id"]: item["dst"] for item in plan.get("files") or []
-            if item["kind"] == "video"}
