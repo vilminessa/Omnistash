@@ -972,10 +972,34 @@
     if (!list) return;
     $("queue-empty").hidden = list.length > 0;
     body.innerHTML = list.map(function (row) {
+      // Причина падения живёт в строке: «ошибка» без объяснения вынуждает
+      // лезть в журнал, а там её уже нет (конец очереди, другой запуск).
+      var reason = row.last_error
+        ? '<div class="row-reason" title="' + esc(row.last_error) + '">' +
+          esc(row.last_error) + "</div>"
+        : "";
+      var retry = row.status === "failed"
+        ? '<div class="row-retry"><button class="link-btn" data-retry="' +
+          row.id + '">повторить эту</button></div>'
+        : "";
       return "<tr><td><span class=\"status\" data-s=\"" + esc(row.status) + "\">" +
-        esc(row.status_label) + "</span></td><td>" + esc(row.title || "—") +
-        "</td><td class=\"muted\">" + esc(row.key) + "</td></tr>";
+        esc(row.status_label) + "</span></td>" +
+        "<td>" + esc(row.title || "—") + reason + "</td>" +
+        '<td class="muted">' + esc(row.key) + retry + "</td></tr>";
     }).join("");
+    Array.prototype.forEach.call(
+      body.querySelectorAll("[data-retry]"), function (btn) {
+        btn.addEventListener("click", function () {
+          // Без storage_id: цель остаётся прежней (coalesce в enqueue).
+          call("enqueue", { ids: [Number(btn.dataset.retry)] })
+            .then(function (res) {
+              if (!res) return;
+              if (res.error) { toast(res.error, true); return; }
+              toast(res.queued ? "В очередь снова: " + res.queued
+                               : "Не удалось поставить в очередь");
+            });
+        });
+      });
   }
 
   function humanSpeed(bytes) {
@@ -1743,6 +1767,15 @@
       $("dedupe-overlay").hidden = true;
     });
 
+    // Журнал: в памяти окна и файлом на диске.
+    $("log-open").addEventListener("click", function () {
+      call("open_log").then(function (res) {
+        if (!res) return;
+        if (res.error) { toast(res.error, true); return; }
+        toast("Журнал: " + res.path);
+      });
+    });
+
     $("queue-start-btn").addEventListener("click", function () {
       call("queue_start").then(function (res) {
         if (res && res.error) toast(res.error, true);
@@ -1954,7 +1987,15 @@
           runs: [{ id: 1, kind: "add", started_at: "2026-10-06T16:38:45",
                    finished_at: "2026-10-06T16:38:46",
                    stats: { new_videos: 3, links_to_create: 3 } }],
-          queue: [],
+          queue: [
+            { id: 51, key: "youtube:aaa111bbb22", title: "Проблемное видео",
+              status: "failed", status_label: "ошибка",
+              updated_at: "2026-10-07T02:10:00",
+              last_error: "нет хранилища: Внешний 4ТБ не подключён" },
+            { id: 52, key: "youtube:ccc333ddd44", title: "Ждёт очереди",
+              status: "queued", status_label: "в очереди",
+              updated_at: "2026-10-07T02:11:00", last_error: null }
+          ],
           dl: (function () {
             if (mockDl.running && mockDl.current) {
               mockDl.current.percent += 9;
@@ -2030,6 +2071,9 @@
       pick_folder: function () {
         // В превью «выбираем» новую папку - тот же контракт, что у окна.
         return Promise.resolve({ path: "D:\\видео\\подборки" });
+      },
+      open_log: function () {
+        return Promise.resolve({ ok: true, path: "(превью) omnistash.log" });
       },
       start_scan: function () {
         mockScan = { running: true, done: 0, total: 120,

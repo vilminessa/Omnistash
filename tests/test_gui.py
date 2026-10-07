@@ -6,10 +6,21 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from app import repo
 from app import settings as settings_mod
 from app import ui
 from app.db import Database
-from app.gui import Api
+from app.gui import MAX_LOG_BYTES, Api
+
+
+def wait_until(predicate, timeout=10.0, message="условие не наступило"):
+    """Ждать условие с малым интервалом (для фоновых воркеров)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    raise AssertionError(message)
 
 
 class GuiCase(unittest.TestCase):
@@ -24,6 +35,12 @@ class GuiCase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         patcher = mock.patch("app.db.db_path", return_value=self.dir / "library.db")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # Журнал тоже в профиль теста: без патча _log писал бы в настоящий
+        # %LOCALAPPDATA%\Omnistash\omnistash.log.
+        patcher = mock.patch("app.gui.log_path",
+                             return_value=self.dir / "omnistash.log")
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(self._tmp.cleanup)
@@ -245,6 +262,100 @@ class TestPickFolder(GuiCase):
         api = self.make_api()
         result = api.pick_folder()
         self.assertIn("error", result, "без окна тихий null недопустим")
+
+
+class TestLogFile(GuiCase):
+    """Журнал на диске: строка с датой, ротация, открытие."""
+
+    def test_log_line_reaches_file_with_date(self):
+        api = self.make_api()
+        api._log("строка в файл")
+        text = (self.dir / "omnistash.log").read_text(encoding="utf-8")
+        self.assertIn("строка в файл", text)
+        # В файле нужна дата: без неё журнал прошлых дней неотличим.
+        self.assertRegex(text, r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]")
+
+    def test_log_rotates_on_start(self):
+        # Путь уже перенесён в профиль теста (GuiCase), просто раздуваем файл.
+        log = self.dir / "omnistash.log"
+        log.write_bytes(b"x" * (MAX_LOG_BYTES + 50))
+        api = self.make_api()           # ротация - в __init__, до первой строки
+        size = log.stat().st_size
+        self.assertLess(size, MAX_LOG_BYTES, "ротация не сработала")
+        self.assertIn(b"rotated", log.read_bytes()[:64])
+        # После ротации журнал продолжает писаться.
+        api._log("после ротации")
+        self.assertIn("после ротации", log.read_text(encoding="utf-8"))
+
+    def test_open_log_creates_and_opens(self):
+        api = self.make_api()
+        with mock.patch("os.startfile") as startfile:
+            result = api.open_log()
+        self.assertTrue(result["ok"], result)
+        startfile.assert_called_once()
+        self.assertTrue((self.dir / "omnistash.log").exists())
+
+
+class TestQueueResume(GuiCase):
+    """Очередь переживает рестарт окна (настройка resume_queue)."""
+
+    def _enqueue_one(self, api):
+        vid, _ = repo.upsert_video(api.db.conn, {
+            "platform": "youtube", "remote_id": "vid000000001",
+            "key": "youtube:vid000000001", "title": "Очередное",
+            "webpage_url": "https://youtu.be/x", "raw_json": "{}",
+            "origin": "yt-dlp"})
+        repo.enqueue(api.db.conn, [vid])
+        return vid
+
+    def _fake_download(self):
+        def download(video, settings, *, stop, on_progress=None, dest=None):
+            target = Path(dest or ".")
+            target.mkdir(parents=True, exist_ok=True)
+            path = target / "готово.mp4"
+            path.write_bytes(b"payload")
+            return {"cancelled": False,
+                    "files": [(str(path), "video")], "info": {},
+                    "error": None, "hash": "sha256:aa"}
+        patcher = mock.patch("app.downloader.download", side_effect=download)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_resume_starts_worker_and_finishes(self):
+        api1 = self.make_api()
+        api1.save_setting({"key": "resume_queue", "value": True})
+        (self.dir / "out").mkdir()
+        storage = self.add_storage(api1, self.dir / "out")
+        api1.save_setting({"key": "default_storage_id", "value": storage["id"]})
+        vid = self._enqueue_one(api1)
+        api1.close()                     # имитируем закрытие окна
+
+        self._fake_download()
+        api2 = self.make_api()           # новый запуск
+        self.assertTrue(
+            wait_until(lambda: api2.db.conn.execute(
+                "SELECT status FROM videos WHERE id=?", (vid,)).fetchone()
+                ["status"] == "downloaded", timeout=10),
+            "очередь не возобновилась при старте")
+        self.assertEqual(api2.dl.state["done"], 1)
+
+    def test_resume_disabled_keeps_queue_paused(self):
+        api1 = self.make_api()
+        api1.save_setting({"key": "resume_queue", "value": False})
+        (self.dir / "out").mkdir()
+        storage = self.add_storage(api1, self.dir / "out")
+        api1.save_setting({"key": "default_storage_id", "value": storage["id"]})
+        vid = self._enqueue_one(api1)
+        api1.close()
+
+        self._fake_download()
+        api2 = self.make_api()
+        time.sleep(0.5)
+        self.assertFalse(api2.dl.state["running"],
+                         "выключенная настройка должна остановить автозапуск")
+        status = api2.db.conn.execute(
+            "SELECT status FROM videos WHERE id=?", (vid,)).fetchone()["status"]
+        self.assertEqual(status, "queued")
 
 
 class TestPage(GuiCase):

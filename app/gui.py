@@ -22,10 +22,13 @@ from . import __version__, indexer, migrate as migrate_mod, repo, settings
 from . import settings_schema, sources
 from . import storages as storages_mod
 from .db import SYNC_MODES, Database
+from .paths import log_path
 from .queue import DownloadWorker
 from .util import human_size
 
-MAX_LOG = 2000
+MAX_LOG = 2000          # строк в кольцевом буфере памяти
+MAX_LOG_BYTES = 1_000_000   # ротация файла журнала: больше - обрезаем
+KEEP_LOG_BYTES = 512_000    # сколько хвоста храним после ротации
 HEAVY_TTL = 1.0  # секунд между пересчётом агрегатов
 
 
@@ -37,6 +40,9 @@ class Api:
     """Методы, которые вызывает JavaScript (js_api)."""
 
     def __init__(self) -> None:
+        # Ротация журнала - до первой записи: строки запуска должны попасть
+        # в файл, а не в брошенный старый хвост.
+        self.rotate_log_file()
         self.db = Database()
         # Перенос старых корней (library_roots/dest_dir) в таблицу хранилищ:
         # строго до первого save(), иначе эти ключи уйдут из файла вместе с
@@ -103,6 +109,14 @@ class Api:
         if self._boot_purged.get("purged"):
             self._log("Ключи настроек перенесены в базу: "
                       + ", ".join(self._boot_purged["purged"]))
+
+        # Возобновление очереди: строки, поставленные прошлым запуском,
+        # должны поехать сами - иначе «очередь переживает рестарт» врала бы.
+        config = self._current_settings()
+        pending = repo.stats(self.db.conn)["queued"]
+        if config.get("resume_queue", True) and pending:
+            self._log(f"Очередь возобновлена: ждут {pending}")
+            self.dl.start()
         # Доступность хранилищ - в фоне: сетевой путь может висеть.
         # Поток обязан быть дожидаем в close(): иначе он может открыть
         # соединение уже после закрытия - файл базы останется занятым.
@@ -121,10 +135,59 @@ class Api:
         self._window = window
 
     def _log(self, text: str) -> None:
+        """Строка в памяти (окно) и в файл (переживает закрытие окна)."""
         with self._lock:
             self._logs.append(_log_line(text))
             if len(self._logs) > MAX_LOG:
                 del self._logs[: len(self._logs) - MAX_LOG]
+            self._write_log_file(text)
+
+    def _write_log_file(self, text: str) -> None:
+        """Добавить строку в omnistash.log.
+
+        Пишем с датой (в памяти дата не нужна), ошибки записи не поднимаем:
+        журнал не должен ронять окно. Ротация - при старте, один раз.
+        """
+        try:
+            with open(log_path(), "a", encoding="utf-8") as handle:
+                handle.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {text}\n")
+        except OSError:
+            pass
+
+    @staticmethod
+    def rotate_log_file() -> None:
+        """Обрезать журнал до хвоста, если он разросся.
+
+        Файл растёт при каждом запуске (мы пишем в него всегда), поэтому
+        без ротации он превратится в неподъёмный текст уже через месяц.
+        """
+        path = log_path()
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return
+        if size <= MAX_LOG_BYTES:
+            return
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(-KEEP_LOG_BYTES, os.SEEK_END)
+                tail = handle.read()
+            path.write_bytes(
+                b"--- rotated (log too big) ---\n" + tail)
+        except OSError:
+            pass
+
+    def open_log(self) -> dict:
+        """Открыть файл журнала в ассоциированной программе."""
+        path = log_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                path.write_text("", encoding="utf-8")
+        except OSError as exc:
+            return {"error": f"Не удалось создать журнал: {exc}"}
+        self.open_path(str(path))
+        return {"ok": True, "path": str(path)}
 
     def _set_status(self, text: str) -> None:
         with self._lock:

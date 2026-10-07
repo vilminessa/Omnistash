@@ -682,9 +682,13 @@ def video_detail(conn: sqlite3.Connection, video_id: int) -> dict | None:
 
 
 def queue_rows(conn: sqlite3.Connection) -> list[dict]:
-    """Очередь загрузки: ожидающие, качающиеся и упавшие - в порядке постановки."""
+    """Очередь загрузки: ожидающие, качающиеся и упавшие - в порядке постановки.
+
+    Возвращает и last_error: причина падения должна быть видна в списке,
+    а не только в журнале - иначе «ошибка» ничего не объясняет.
+    """
     rows = [dict(row) for row in conn.execute(
-        """SELECT id, key, title, status, updated_at
+        """SELECT id, key, title, status, updated_at, last_error
              FROM videos
             WHERE status IN ('queued','downloading','failed')
             ORDER BY CASE status WHEN 'downloading' THEN 0 WHEN 'queued' THEN 1

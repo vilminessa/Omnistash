@@ -178,3 +178,50 @@ class TestWorkerState(QueueCase):
         snap = worker.state
         snap["done"] = 99
         self.assertEqual(worker.state["done"], 0, "state отдаёт копию, не внутренность")
+
+
+class TestQueueErrors(QueueCase):
+    """Причина падения видна в списке очереди, а не только в журнале."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake_download()   # воркер не должен лезть в сеть
+
+    def test_failed_row_carries_reason(self):
+        vid = make_video(self.api, "vid000000007", "Плохое видео")
+        repo.set_status(self.api.db.conn, [vid], "failed")
+        repo.set_last_error(self.api.db.conn, vid,
+                            "нет хранилища: Внешний 4ТБ не подключён")
+
+        rows = repo.queue_rows(self.api.db.conn)
+        self.assertEqual(rows[0]["last_error"],
+                         "нет хранилища: Внешний 4ТБ не подключён")
+        # И то же самое видит окно через опрос.
+        snap = self.api.poll(0)
+        self.assertEqual(snap["queue"][0]["last_error"],
+                         "нет хранилища: Внешний 4ТБ не подключён")
+        self.assertEqual(snap["queue"][0]["status"], "failed")
+
+    def test_success_clears_previous_reason(self):
+        vid = make_video(self.api, "vid000000008", "Было плохим")
+        repo.set_last_error(self.api.db.conn, vid, "старая причина")
+        repo.set_last_error(self.api.db.conn, vid, None)
+        row = self.api.db.conn.execute(
+            "SELECT last_error FROM videos WHERE id=?", (vid,)).fetchone()
+        self.assertIsNone(row["last_error"])
+
+    def test_retry_single_failed_row(self):
+        vid = make_video(self.api, "vid000000009", "Повторить")
+        repo.set_status(self.api.db.conn, [vid], "failed")
+        repo.set_last_error(self.api.db.conn, vid, "временный сбой")
+
+        # Повтор одной строки (кнопка в самой строке очереди) - без
+        # storage_id: цель остаётся прежней (coalesce в enqueue).
+        result = self.api.enqueue({"ids": [vid]})
+        self.assertEqual(result["queued"], 1)
+        self.assertTrue(self.api.dl.wait(timeout=15), "воркер не отработал")
+        status = self.api.db.conn.execute(
+            "SELECT status, last_error FROM videos WHERE id=?",
+            (vid,)).fetchone()
+        self.assertEqual(status["status"], "downloaded")
+        self.assertIsNone(status["last_error"], "причина должна очиститься")

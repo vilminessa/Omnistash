@@ -370,6 +370,17 @@ body[data-theme="light"] .row { border-bottom-color: rgba(0, 0, 0, .05); }
 .table tbody tr:hover { background: var(--surface-2); }
 .table .num { text-align: right; font-variant-numeric: tabular-nums; }
 
+/* Причина падения строки очереди: видна сразу, без журнала. */
+.row-reason {
+  color: var(--err);
+  font-size: 11.5px;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row-retry { margin-top: 3px; }
+
 /* ---------------------------- настройки ---------------------------- */
 
 .settings { overflow: auto; display: flex; flex-direction: column; gap: 18px; padding-right: 4px; }
