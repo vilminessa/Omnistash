@@ -309,7 +309,8 @@ class TestQueueResume(GuiCase):
         return vid
 
     def _fake_download(self):
-        def download(video, settings, *, stop, on_progress=None, dest=None):
+        def download(video, settings, *, stop, on_progress=None, dest=None,
+                     **kwargs):
             target = Path(dest or ".")
             target.mkdir(parents=True, exist_ok=True)
             path = target / "готово.mp4"

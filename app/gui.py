@@ -23,6 +23,7 @@ from . import repack as repack_mod
 from . import schedule as schedule_mod
 from . import settings_schema, sources
 from . import storages as storages_mod
+from . import verify as verify_mod
 from .db import SYNC_MODES, Database
 from .paths import log_path
 from .queue import DownloadWorker
@@ -97,6 +98,14 @@ class Api:
                               "errors": []}
         self._repack_stop = threading.Event()
         self._repack_thread: threading.Thread | None = None
+        # Проверка целостности: сверка файлов с хешем в индексе.
+        self._verify: dict = {"running": False, "done": 0, "total": 0,
+                              "current": "", "checked": 0, "filled": 0,
+                              "broken": [], "broken_total": 0,
+                              "missing": [], "missing_total": 0,
+                              "summary": None, "error": None}
+        self._verify_stop = threading.Event()
+        self._verify_thread: threading.Thread | None = None
         # Качалка: очередь живёт в таблице videos, воркер - фоновый поток.
         self.dl = DownloadWorker(self.db, self._current_settings, log=self._log)
         settings.reload_if_changed(self._settings_cache)
@@ -284,6 +293,9 @@ class Api:
             migrate_state = dict(self._migrate)
             repack_state = dict(self._repack)
             schedule_state = self.sched.state()
+            verify_state = dict(self._verify)
+            verify_state["broken"] = list(self._verify.get("broken") or [])[:100]
+            verify_state["missing"] = list(self._verify.get("missing") or [])[:100]
         config = settings.as_public(self._current_settings())
         heavy = self._heavy_snapshot()
         return {
@@ -298,6 +310,7 @@ class Api:
             "migrate": migrate_state,
             "repack": repack_state,
             "schedule": schedule_state,
+            "verify": verify_state,
             "settings": config,
             "settings_rev": rev,
             **heavy,
@@ -313,6 +326,7 @@ class Api:
                 scope=scope,
                 status=request.get("status") or None,
                 query=request.get("query") or "",
+                rating_min=request.get("rating_min") or None,
                 offset=int(request.get("offset") or 0),
                 limit=min(int(request.get("limit") or 200), 500),
             )
@@ -1280,6 +1294,168 @@ class Api:
             self._heavy_at = 0.0
 
     # ------------------------------------------------------------------ #
+    #  Локальные пометки: теги, рейтинг, заметки, «просмотрено»
+    # ------------------------------------------------------------------ #
+
+    def save_fields(self, request=None) -> dict:
+        """Записать пользовательские поля у одной строки или группы.
+
+        Только whitelist (repo.save_fields): статус, хранилище и
+        метаданные площадки отсюда изменить нельзя.
+        """
+        request = request or {}
+        try:
+            ids = [int(v) for v in request.get("ids") or []]
+        except (TypeError, ValueError):
+            return {"error": "Не выбрано видео"}
+        if not ids:
+            return {"error": "Не выбрано видео"}
+        fields = request.get("fields") or {}
+        try:
+            updated = repo.save_fields(self.db.conn, ids, fields)
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Пометка не записалась: {exc}")
+            return {"error": f"Не удалось записать: {exc}"}
+        self._heavy_at = 0.0
+        if len(ids) == 1:
+            self._log("Пометка: " + ", ".join(f"{k}={v!r}"
+                                              for k, v in fields.items()))
+        else:
+            self._log(f"Пометка для {len(ids)} строк: обновлено {updated}")
+        return {"ok": True, "updated": updated}
+
+    def get_thumb(self, request=None) -> dict:
+        """Обложка из локального файла как data-URI.
+
+        Так, а не по URL: картинка с площадки - это лишний сетевой запрос
+        (и след), а файл у нас уже лежит рядом с видео.
+        """
+        try:
+            video_id = int((request or {}).get("id") or 0)
+        except (TypeError, ValueError):
+            return {"ok": False, "reason": "нет видео"}
+        row = self.db.conn.execute(
+            """SELECT path FROM files
+                WHERE video_id=? AND kind='thumbnail' AND missing=0
+                ORDER BY id LIMIT 1""", (video_id,)).fetchone()
+        if not row:
+            return {"ok": False, "reason": "обложка не скачана"}
+        try:
+            with open(row["path"], "rb") as handle:
+                payload = handle.read(4 * 1024 * 1024)
+        except OSError as exc:
+            return {"ok": False, "reason": f"не прочиталась: {exc}"}
+        import base64
+        ext = os.path.splitext(row["path"])[1].lower()
+        mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".png": "image/png", ".webp": "image/webp",
+                ".avif": "image/avif"}.get(ext, "application/octet-stream")
+        return {"ok": True, "data": f"data:{mime};base64,"
+                + base64.b64encode(payload).decode("ascii")}
+
+    # ------------------------------------------------------------------ #
+    #  Проверка целостности (сверка файлов с хешем в индексе)
+    # ------------------------------------------------------------------ #
+
+    def verify_start(self, request=None) -> dict:
+        """Сверить выбранные (или текущую область) файлы с их хешами."""
+        with self._lock:
+            if self._verify.get("running"):
+                return {"error": "Проверка уже идёт"}
+        self._verify_stop.clear()
+        with self._lock:
+            self._verify = {"running": True, "done": 0, "total": 0,
+                            "current": "", "checked": 0, "filled": 0,
+                            "broken": [], "broken_total": 0,
+                            "missing": [], "missing_total": 0,
+                            "summary": None, "error": None}
+            self._busy = True
+            self._status = "Проверка целостности…"
+        selection = self._repack_selection(request)
+        thread = threading.Thread(target=self._verify_worker,
+                                  args=(selection,), daemon=True,
+                                  name="omnistash-verify")
+        self._verify_thread = thread
+        thread.start()
+        return {"ok": True}
+
+    def verify_stop(self) -> dict:
+        with self._lock:
+            running = self._verify.get("running")
+        if not running:
+            return {"ok": False}
+        self._verify_stop.set()
+        self._log("Проверка целостности остановлена")
+        return {"ok": True}
+
+    def repair_broken(self) -> dict:
+        """Поставить битые в очередь: файлы будут скачаны заново.
+
+        Ключевой момент: yt-dlp счёл бы их уже скачанными, поэтому строке
+        заранее пишется причина с префиксом CHECKSUM_PREFIX - по ней
+        очередь включает перезапись.
+        """
+        with self._lock:
+            broken = [row["video_id"] for row in self._verify.get("broken") or []]
+        if not broken:
+            return {"error": "Ремонтировать нечего"}
+        conn = self.db.conn
+        message = (repo.CHECKSUM_PREFIX +
+                   " не совпала при проверке целостности")
+        for video_id in broken:
+            repo.set_status(conn, [video_id], "failed")
+            repo.set_last_error(conn, video_id, message)
+        queued = repo.enqueue(conn, broken)
+        with self._lock:
+            self._heavy_at = 0.0
+        self._log(f"Ремонт: {queued} битых поставлено в очередь "
+                  "(файлы будут перезаписаны)")
+        if queued:
+            self.dl.start()
+        return {"queued": queued}
+
+    def _verify_worker(self, selection: dict) -> None:
+        def progress(done, total, current):
+            with self._lock:
+                self._verify.update(done=done, total=total, current=current)
+                self._status = f"Проверка {done}/{total}"
+
+        try:
+            result = verify_mod.verify(self.db.conn, selection,
+                                       progress=progress,
+                                       stop=self._verify_stop)
+        except Exception as exc:  # noqa: BLE001 - фон не должен молча умереть
+            self._log(f"Проверка упала: {exc}")
+            with self._lock:
+                self._verify.update(running=False, error=str(exc),
+                                    summary=f"Ошибка: {exc}")
+                self._busy = False
+            return
+
+        if result.get("error"):
+            summary = result["error"]
+        else:
+            summary = (f"Проверено {result['checked']} из {result['total']}"
+                       f" · битых {result['broken_total']}"
+                       f" · без хеша {result['filled']}"
+                       f" · нет файла {result['missing_total']}")
+            if result.get("stopped"):
+                summary = "Остановлено: " + summary
+        with self._lock:
+            self._verify.update(
+                running=False, checked=result.get("checked", 0),
+                filled=result.get("filled", 0),
+                broken=result.get("broken") or [],
+                broken_total=result.get("broken_total", 0),
+                missing=result.get("missing") or [],
+                missing_total=result.get("missing_total", 0),
+                summary=summary, error=result.get("error"), current="")
+            self._busy = False
+            self._status = "Готово"
+            self._heavy_at = 0.0
+        self._log(summary)
+
+    # ------------------------------------------------------------------ #
     #  Расписание
     # ------------------------------------------------------------------ #
 
@@ -1490,10 +1666,12 @@ class Api:
         self._sync_stop.set()
         self._migrate_stop.set()
         self._repack_stop.set()
+        self._verify_stop.set()
         self.dl.stop()
         self.sched.stop()
         for thread in (self._scan_thread, self._add_thread, self._sync_thread,
                        self._migrate_thread, self._repack_thread,
+                       self._verify_thread,
                        getattr(self, "_avail_thread", None),
                        getattr(self, "_check_thread", None)):
             if thread is not None and thread.is_alive():

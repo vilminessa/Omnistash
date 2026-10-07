@@ -63,8 +63,13 @@ def format_selector(settings: dict) -> str:
 
 
 def build_opts(settings: dict, dest_dir: str | Path, *, stop: threading.Event,
-               on_progress=None) -> dict:
-    """Опции yt-dlp под текущие настройки."""
+               on_progress=None, overwrite: bool = False) -> dict:
+    """Опции yt-dlp под текущие настройки.
+
+    overwrite=True - принудительная перезапись: так качается файл, который
+    проверка целостности признала битым (иначе yt-dlp счёл бы его уже
+    скачанным и пропустил).
+    """
     settings = settings or {}
     template = str(settings.get("output_template")
                    or "%(title)s [%(id)s].%(ext)s")
@@ -116,6 +121,8 @@ def build_opts(settings: dict, dest_dir: str | Path, *, stop: threading.Event,
     if ffmpeg:
         opts["ffmpeg_location"] = ffmpeg
         opts["merge_output_format"] = "mp4"
+    if overwrite:
+        opts["force_overwrites"] = True
 
     langs = SUB_LANGS.get(str(settings.get("subtitles") or "none"), [])
     if langs:
@@ -174,13 +181,17 @@ def _paths_after_download(info: dict) -> list[tuple[str, str]]:
 
 
 def download(video: dict, settings: dict, *, stop: threading.Event,
-             on_progress=None, dest: str | None = None) -> dict:
+             on_progress=None, dest: str | None = None,
+             overwrite: bool = False) -> dict:
     """Скачать одно видео и подготовить всё для записи в индекс.
 
     video - строка videos (нужны key/title/webpage_url/remote_id);
     dest - хранилище, которое выбрал человек (null здесь быть не должно:
     очередь обязана разрешить цель ДО вызова); на случай прямых вызовов
-    остаётся fallback в settings.dest_dir.
+    остаётся fallback в settings.dest_dir;
+    overwrite=True - перезаписать существующий файл: так качается файл,
+    который проверка целостности признала битым (иначе yt-dlp счёл бы его
+    уже скачанным и пропустил).
     возвращает {"cancelled": bool, "files": [(путь, kind)], "info": {...},
     "error": str|None}. Ничего в БД не пишет - это делает очередь.
     """
@@ -189,7 +200,8 @@ def download(video: dict, settings: dict, *, stop: threading.Event,
     url = video.get("webpage_url") or (
         "https://www.youtube.com/watch?v=" + str(video.get("remote_id") or ""))
 
-    opts = build_opts(settings, dest_dir, stop=stop, on_progress=on_progress)
+    opts = build_opts(settings, dest_dir, stop=stop, on_progress=on_progress,
+                      overwrite=overwrite)
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)

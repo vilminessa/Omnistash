@@ -252,6 +252,9 @@ body {
 }
 .schedule-line b { color: var(--text); font-weight: 600; }
 
+.verify-list { margin-top: 6px; flex-basis: 100%; }
+#verify-note { flex-wrap: wrap; align-items: center; }
+
 .toolbar h2 { font-size: 13px; margin: 0; font-weight: 600; }
 
 input[type="search"], input[type="text"], select {
@@ -655,6 +658,63 @@ body[data-theme="light"] .row { border-bottom-color: rgba(0, 0, 0, .05); }
 .dedupe-actions label { display: inline-flex; gap: 5px; align-items: center;
   font-size: 11.5px; color: var(--muted); cursor: pointer; }
 .dedupe-actions input { accent-color: var(--accent); }
+
+/* ---------------------------- пометки и целостность ----------------- */
+
+.star-badge {
+  color: var(--warn);
+  font-size: 11px;
+  margin-left: 6px;
+}
+
+.stars { display: flex; gap: 2px; align-items: center; }
+.star {
+  appearance: none;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.star.on { color: var(--warn); }
+.star:hover { transform: scale(1.15); }
+
+.detail-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+.detail-edit label { display: flex; flex-direction: column; gap: 4px;
+  font-size: 12px; color: var(--muted); }
+.detail-edit input[type="text"], .detail-edit textarea {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+}
+.detail-edit textarea { min-height: 54px; resize: vertical; }
+.detail-thumb {
+  align-self: flex-start;
+  max-width: 240px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+.detail-thumb img { display: block; width: 100%; height: auto; }
+.detail-thumb .muted { padding: 8px; font-size: 11.5px; }
+.detail-tools { display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+  font-size: 12px; color: var(--muted); }
+
+.mark-grid { display: flex; flex-direction: column; gap: 12px; }
+.mark-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.mark-row > .field-label { min-width: 78px; }
 
 /* ---------------------------- низ окна ---------------------------- */
 

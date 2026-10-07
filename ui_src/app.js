@@ -20,6 +20,7 @@
     tab: "library",
     scope: { type: "pool" },
     status: "",
+    ratingMin: "",
     query: "",
     pages: {},            // номер страницы -> строки
     total: 0,
@@ -179,6 +180,7 @@
       if (!$("repack-overlay").hidden) renderRepackBody();
     }
     if (changed("schedule", snap.schedule)) renderSchedule(snap.schedule);
+    if (changed("verify", snap.verify)) renderVerify(snap.verify);
     appendLogs(snap.logs);
 
     if (snap.settings_rev !== state.rev) {
@@ -282,6 +284,150 @@
     $("dedupe-note-text").textContent =
       "Сверка нашла: " + parts.join(" · ") +
       ". Разберите - в индексе должно остаться по одной копии.";
+  }
+
+  /* ------------------------------------------------------------------ *
+   *  Проверка целостности (сверка файлов с хешем)
+   * ------------------------------------------------------------------ */
+
+  function renderVerify(v) {
+    var bar = $("verify-bar");
+    var note = $("verify-note");
+    if (!v) { bar.hidden = true; note.hidden = true; return; }
+
+    var running = !!v.running;
+    $("verify-btn").textContent = running ? "Остановить проверку"
+                                          : "Целостность";
+    if (running) {
+      bar.hidden = false;
+      var pct = v.total ? Math.round(v.done * 100 / v.total) : 0;
+      $("verify-fill").style.width = pct + "%";
+      $("verify-text").textContent = "Проверка " + v.done + " / " + v.total +
+        (v.current ? " · " + v.current : "");
+      note.hidden = true;
+      return;
+    }
+    if (!v.summary) { bar.hidden = true; note.hidden = true; return; }
+    bar.hidden = true;
+    note.hidden = false;
+
+    var html = esc(v.summary);
+    if (v.broken && v.broken.length) {
+      html += '<div class="migrate-list verify-list">' +
+        v.broken.slice(0, 20).map(function (row) {
+          return '<div class="migrate-item warn" title="' + esc(row.path) +
+            '">' + esc(row.title || row.path) + " - хеш не совпал</div>";
+        }).join("") + "</div>";
+    }
+    $("verify-note-text").innerHTML = html;
+    var repair = $("verify-repair-btn");
+    repair.hidden = !(v.broken_total > 0);
+    repair.textContent = "Перекачать битые (" + v.broken_total + ")";
+  }
+
+  function runVerify() {
+    if (state.verify && state.verify.running) { call("verify_stop"); return; }
+    call("verify_start", repackRequest()).then(function (res) {
+      if (!res) return;
+      if (res.error) toast(res.error, true);
+    });
+  }
+
+  function repairBroken() {
+    call("repair_broken").then(function (res) {
+      if (!res) return;
+      if (res.error) { toast(res.error, true); return; }
+      toast("В очередь поставлено: " + res.queued);
+      switchTab("queue");
+    });
+  }
+
+  /* ------------------------------------------------------------------ *
+   *  Пометки группы (теги / рейтинг / просмотрено)
+   * ------------------------------------------------------------------ */
+
+  function openMark() {
+    if (!state.selected.size) {
+      toast("Сначала выберите строки", true);
+      return;
+    }
+    $("mark-title").textContent = "Пометить: " + state.selected.size +
+      (state.selected.size === 1 ? " строку" : " строк");
+    $("mark-body").innerHTML =
+      '<div class="mark-grid">' +
+      '<div class="mark-row"><span class="field-label">Рейтинг</span>' +
+      '<span class="stars" data-stars data-touched="" data-value="0">' +
+      starButtons(0) + "</span>" +
+      '<button class="link-btn" data-mark-clear="rating">сбросить</button></div>' +
+      '<div class="mark-row"><span class="field-label">Теги</span>' +
+      '<input type="text" id="mark-tags" placeholder="через запятую" ' +
+      'style="flex:1 1 240px"></div>' +
+      '<div class="mark-row"><span class="field-label">Заметка</span>' +
+      '<textarea id="mark-notes" rows="2" style="flex:1 1 320px"></textarea></div>' +
+      '<div class="mark-row"><label class="check">' +
+      '<input type="checkbox" id="mark-watched"><span>просмотрено</span></label>' +
+      '<button class="link-btn" data-mark-clear="watched">снять отметку</button></div>' +
+      '<div class="muted">Пустые поля не меняются: отмечается только то, ' +
+      "что вы заполнили. По тегу ищется поиском в строке поиска.</div>" +
+      "</div>" +
+      '<div class="card-actions">' +
+      '<button class="btn" data-mark="close">Отмена</button>' +
+      '<button class="btn primary" data-mark="apply">Применить</button></div>';
+    $("mark-overlay").hidden = false;
+    bindMark();
+  }
+
+  function bindMark() {
+    bindStars(document.querySelector("#mark-body [data-stars]"));
+    Array.prototype.forEach.call(
+      document.querySelectorAll("#mark-body [data-mark-clear]"),
+      function (btn) {
+        btn.addEventListener("click", function () {
+          var what = btn.dataset.markClear;
+          if (what === "rating") {
+            var stars = document.querySelector("#mark-body [data-stars]");
+            stars.dataset.value = "0";
+            stars.dataset.touched = "1";
+            Array.prototype.forEach.call(stars.querySelectorAll(".star"),
+              function (star) { star.classList.remove("on"); });
+          } else if (what === "watched") {
+            var watched = document.getElementById("mark-watched");
+            watched.checked = false;
+            watched.dataset.touched = "1";
+          }
+        });
+      });
+    Array.prototype.forEach.call(
+      document.querySelectorAll("#mark-body [data-mark]"), function (btn) {
+        btn.addEventListener("click", function () {
+          if (btn.dataset.mark === "close") {
+            $("mark-overlay").hidden = true;
+            return;
+          }
+          var fields = {};
+          var stars = document.querySelector("#mark-body [data-stars]");
+          if (stars && stars.dataset.touched) {
+            fields.user_rating = Number(stars.dataset.value || 0);
+          }
+          var watched = document.getElementById("mark-watched");
+          if (watched && watched.dataset.touched) fields.watched = watched.checked;
+          var tags = document.getElementById("mark-tags");
+          if (tags && tags.value.trim()) fields.user_tags = tags.value;
+          var notes = document.getElementById("mark-notes");
+          if (notes && notes.value.trim()) fields.notes = notes.value;
+          if (!Object.keys(fields).length) {
+            toast("Ничего не заполнено", true);
+            return;
+          }
+          call("save_fields", { ids: Array.from(state.selected), fields: fields })
+            .then(function (res) {
+              if (!res || res.error) { toast(res && res.error, true); return; }
+              toast("Помечено строк: " + (res.updated || 0));
+              $("mark-overlay").hidden = true;
+              renderGrid();
+            });
+        });
+      });
   }
 
   /* ------------------------------------------------------------------ *
@@ -912,6 +1058,7 @@
     Promise.all(missing.map(function (page) {
       return call("list_videos", {
         scope: state.scope, status: state.status, query: state.query,
+        rating_min: state.ratingMin || null,
         offset: page * PAGE, limit: PAGE
       }).then(function (res) {
         if (res) {
@@ -983,6 +1130,15 @@
 
   function rowHtml(row, index) {
     var picked = state.selected.has(row.id);
+    // Рейтинг - значок рядом с названием: видно, что размечено, не открывая
+    // карточку; полные пометки живут там же.
+    var stars = row.user_rating
+      ? '<span class="star-badge" title="рейтинг ' + row.user_rating +
+        '">★' + row.user_rating + "</span>"
+      : "";
+    var watched = row.watched_at
+      ? '<span class="star-badge" title="просмотрено" style="color:var(--ok)">✓</span>'
+      : "";
     return '<div class="row' + (picked ? " picked" : "") + '" data-id="' +
       row.id + '" data-i="' + index + '">' +
       '<span class="c-check"><input type="checkbox" class="row-check" data-id="' +
@@ -990,7 +1146,8 @@
         ' aria-label="Выбрать строку"></span>' +
       '<span class="cell status" data-s="' + esc(row.status) + '">' +
         esc(row.status_label || statusLabel(row.status)) + "</span>" +
-      '<span class="cell c-title" title="' + esc(row.title) + '">' + esc(row.title || "—") + "</span>" +
+      '<span class="cell c-title" title="' + esc(row.title) + '">' +
+        esc(row.title || "—") + stars + watched + "</span>" +
       '<span class="cell c-channel" title="' + esc(row.channel) + '">' + esc(row.channel || "—") + "</span>" +
       '<span class="cell c-dur">' + humanDuration(row.duration_s) + "</span>" +
       '<span class="cell c-date">' + shortDate(row.uploaded_at) + "</span>" +
@@ -1027,8 +1184,6 @@
       add("Первый раз замечено", shortTime(data.first_seen_at));
       add("Скачано", shortTime(data.downloaded_at));
       add("Обновлено", shortTime(data.updated_at));
-      if (data.notes) add("Заметки", data.notes);
-      if (data.user_tags) add("Теги", data.user_tags);
       add("Плейлисты", (data.playlists || []).map(function (p) {
         return p.title + (p.removed_at ? " (убран)" : " #" + p.position);
       }).join(", "));
@@ -1072,17 +1227,130 @@
           '<pre class="json">' + esc(JSON.stringify(data.raw, null, 1)) + "</pre>"
         : '<div class="muted">raw_json пока пуст: карточка заполнится после ' +
           "синхронизации или загрузки.</div>";
-      $("detail-body").innerHTML = html + raw;
+      $("detail-body").innerHTML = detailThumbHtml(data) + html +
+        detailMarksHtml(data) + raw;
       $("detail-overlay").hidden = false;
       bindDetail(data);
     });
   }
 
+  function detailThumbHtml(data) {
+    return '<div class="detail-thumb" id="detail-thumb">' +
+      '<div class="muted">обложка…</div></div>';
+  }
+
+  function starButtons(value) {
+    var html = "";
+    for (var i = 1; i <= 5; i++) {
+      html += '<button type="button" class="star' + (i <= value ? " on" : "") +
+        '" data-star="' + i + '" title="' + i + '">★</button>';
+    }
+    return html;
+  }
+
+  function detailMarksHtml(data) {
+    var rating = Number(data.user_rating || 0);
+    return '<div class="detail-edit">' +
+      '<div class="detail-tools"><span>Рейтинг</span>' +
+      '<span class="stars" data-stars data-touched="" data-value="' + rating +
+        '">' + starButtons(rating) + "</span>" +
+      '<span class="muted">повторный клик по звезде снимает оценку</span></div>' +
+      '<div class="detail-tools">' +
+      '<label class="check"><input type="checkbox" id="detail-watched"' +
+        (data.watched_at ? " checked" : "") +
+        "><span>просмотрено</span></label></div>" +
+      '<label>Теги (через запятую)<input type="text" id="detail-tags" ' +
+        'value="' + esc(data.user_tags || "") +
+        '" placeholder="живое, избранное"></label>' +
+      '<label>Заметка<textarea id="detail-notes" rows="2">' +
+        esc(data.notes || "") + "</textarea></label>" +
+      '<div class="card-actions"><button class="btn primary" ' +
+        'data-detail="save-marks">Сохранить пометки</button></div>' +
+      "</div>";
+  }
+
+  function bindStars(root, onPick) {
+    if (!root) return;
+    Array.prototype.forEach.call(root.querySelectorAll(".star"),
+      function (btn) {
+        btn.addEventListener("click", function () {
+          var value = Number(root.dataset.value || 0);
+          var picked = Number(btn.dataset.star);
+          // Повторный клик по той же звезде снимает оценку.
+          value = (value === picked) ? 0 : picked;
+          root.dataset.value = value;
+          root.dataset.touched = "1";
+          Array.prototype.forEach.call(root.querySelectorAll(".star"),
+            function (star) {
+              star.classList.toggle("on", Number(star.dataset.star) <= value);
+            });
+          if (onPick) onPick(value);
+        });
+      });
+  }
+
+  function loadThumb() {
+    // Обложка отдаётся data-URI из локального файла: так не летит ни один
+    // сетевой запрос на площадку ради картинки.
+    var box = document.getElementById("detail-thumb");
+    if (!box) return;
+    var id = box.dataset.vid;
+    call("get_thumb", { id: Number(id) }).then(function (res) {
+      if (res && res.ok) {
+        box.innerHTML = '<img src="' + res.data + '" alt="обложка">';
+      } else {
+        box.innerHTML = '<div class="muted">' +
+          esc((res && res.reason) || "обложки нет") + "</div>";
+      }
+    });
+  }
+
+  function detailFields() {
+    var fields = {};
+    var stars = document.querySelector("#detail-body [data-stars]");
+    if (stars && stars.dataset.touched) {
+      fields.user_rating = Number(stars.dataset.value || 0);
+    }
+    var watched = document.getElementById("detail-watched");
+    if (watched && watched.dataset.touched) fields.watched = watched.checked;
+    var tags = document.getElementById("detail-tags");
+    if (tags && tags.value.trim()) fields.user_tags = tags.value;
+    var notes = document.getElementById("detail-notes");
+    if (notes && notes.value.trim()) fields.notes = notes.value;
+    return fields;
+  }
+
   function bindDetail(data) {
+    var thumb = document.getElementById("detail-thumb");
+    if (thumb) thumb.dataset.vid = data.id;
+    bindStars(document.querySelector("#detail-body [data-stars]"));
+    var watched = document.getElementById("detail-watched");
+    if (watched) {
+      watched.addEventListener("change", function () {
+        watched.dataset.touched = "1";
+      });
+    }
+    loadThumb();
+
     Array.prototype.forEach.call(
       document.querySelectorAll("#detail-body [data-detail]"), function (btn) {
         btn.addEventListener("click", function () {
           var action = btn.dataset.detail;
+          if (action === "save-marks") {
+            var fields = detailFields();
+            if (!Object.keys(fields).length) {
+              toast("Ничего не изменено", true);
+              return;
+            }
+            call("save_fields", { ids: [data.id], fields: fields })
+              .then(function (res) {
+                if (!res || res.error) { toast(res && res.error, true); return; }
+                toast("Пометки сохранены");
+                openDetail(data.id);      // перечитать: строки в списке обновятся
+                renderGrid();
+              });
+            return;
+          }
           if (action === "download") {
             var pick = document.querySelector(
               "#detail-body [data-storage-select]");
@@ -1899,6 +2167,11 @@
       renderGrid(true);
     });
 
+    $("rating-filter").addEventListener("change", function () {
+      state.ratingMin = $("rating-filter").value;
+      renderGrid(true);
+    });
+
     $("grid-body").addEventListener("scroll", function () {
       if (!paintGrid._raf) {
         paintGrid._raf = requestAnimationFrame(function () {
@@ -1914,6 +2187,10 @@
     // Мультивыбор в таблице библиотеки.
     $("sel-clear").addEventListener("click", clearSelection);
     $("sel-download").addEventListener("click", enqueueSelection);
+    $("sel-mark").addEventListener("click", openMark);
+    $("mark-close").addEventListener("click", function () {
+      $("mark-overlay").hidden = true;
+    });
     $("sel-move").addEventListener("click", openMigrate);
     $("migrate-close").addEventListener("click", function () {
       // Идёт перенос - закрыть окно нельзя: процесс должен быть виден.
@@ -1969,6 +2246,13 @@
         if (res.error) { toast(res.error, true); return; }
         toast("Журнал: " + res.path);
       });
+    });
+
+    // Проверка целостности: сверка файлов с хешем в индексе.
+    $("verify-btn").addEventListener("click", runVerify);
+    $("verify-repair-btn").addEventListener("click", repairBroken);
+    $("verify-close-btn").addEventListener("click", function () {
+      $("verify-note").hidden = true;
     });
 
     $("queue-start-btn").addEventListener("click", function () {
@@ -2059,19 +2343,20 @@
     var rows = [
       { id: 1, key: "youtube:aaa111bbb22", title: "Ночной дождик", status: "downloaded",
         status_label: "скачано", duration_s: 3725, uploaded_at: "2025-01-14",
-        channel: "Автор А", size: 240000000 },
+        channel: "Автор А", size: 240000000, user_rating: 5,
+        watched_at: "2026-01-02T10:00:00" },
       { id: 2, key: "youtube:ccc333ddd44", title: "Утренний туман", status: "known",
         status_label: "в индексе", duration_s: 130, uploaded_at: "2024-11-02",
-        channel: "Автор Б", size: 0 },
+        channel: "Автор Б", size: 0, user_rating: 0, watched_at: null },
       { id: 3, key: "youtube:eee555fff66", title: "Долгая дорога", status: "downloaded",
         status_label: "скачано", duration_s: 540, uploaded_at: "2023-06-30",
-        channel: "Автор А", size: 272000000 },
+        channel: "Автор А", size: 272000000, user_rating: 3, watched_at: null },
       { id: 4, key: "local:abc", title: "Файл без личности", status: "downloaded",
         status_label: "скачано", duration_s: 61, uploaded_at: null,
-        channel: null, size: 0 },
+        channel: null, size: 0, user_rating: 0, watched_at: null },
       { id: 5, key: "youtube:ggg777hhh88", title: "Снятый клип", status: "missing",
         status_label: "файл пропал", duration_s: 200, uploaded_at: "2022-02-02",
-        channel: "Автор В", size: 0 }
+        channel: "Автор В", size: 0, user_rating: 0, watched_at: null }
     ];
     var settings = {
       library_roots: [{ path: "D:\\видео\\библиотека", recursive: true, enabled: true }],
@@ -2121,6 +2406,12 @@
     var mockRepack = { running: false, done: 0, total: 0, current: "",
                        summary: null, error: null, errors: [] };
     var mockRepackTimer = null;
+    // Проверка целостности: симулируем один битый файл.
+    var mockVerify = { running: false, done: 0, total: 0, current: "",
+                       checked: 0, filled: 0, broken: [], broken_total: 0,
+                       missing: [], missing_total: 0, summary: null,
+                       error: null };
+    var mockVerifyTimer = null;
     var mockDupes = [
       { video_id: 7, key: "youtube:dup00000001", title: "Два раза",
         copies: 2, bytes: 400000,
@@ -2239,6 +2530,7 @@
             }
             return JSON.parse(JSON.stringify(mockSync));
           })(),
+          verify: JSON.parse(JSON.stringify(mockVerify)),
           schedule: { scan: { interval: 0, next_in: null, last: null },
                       sync: { interval: 30, next_in: 720,
                               last: "2026-10-07T15:04:00" } },
@@ -2254,6 +2546,7 @@
         req = req || {};
         var list = rows.filter(function (row) {
           if (req.status && row.status !== req.status) return false;
+          if (req.rating_min && (row.user_rating || 0) < Number(req.rating_min)) return false;
           if (req.query && row.title.toLowerCase().indexOf(req.query.toLowerCase()) < 0) return false;
           return true;
         });
@@ -2280,6 +2573,56 @@
       save_setting: function (pair) {
         settings[pair.key] = pair.value;
         return Promise.resolve({ settings: settings, settings_rev: 1 });
+      },
+      verify_start: function () {
+        mockVerify = { running: true, done: 0, total: 5,
+                       current: "файл-1.mp4", checked: 0, filled: 0,
+                       broken: [], broken_total: 0, missing: [],
+                       missing_total: 0, summary: null, error: null };
+        var step = 0;
+        mockVerifyTimer = setInterval(function () {
+          step += 1;
+          mockVerify.done = step;
+          mockVerify.checked = step;
+          mockVerify.current = "файл-" + step + ".mp4";
+          if (step >= 5) {
+            clearInterval(mockVerifyTimer);
+            mockVerify.running = false;
+            mockVerify.broken_total = 1;
+            mockVerify.broken = [{
+              video_id: 4, file_id: 9, title: "Файл без личности",
+              path: "D:\\видео\\библиотека\\битое.mp4",
+              expected: "sha256:aa", actual: "sha256:bb"
+            }];
+            mockVerify.summary = "Проверено 5 из 5 · битых 1 · без хеша 0 · нет файла 0";
+          }
+        }, 600);
+        return Promise.resolve({ ok: true });
+      },
+      verify_stop: function () {
+        if (mockVerifyTimer) clearInterval(mockVerifyTimer);
+        mockVerify.running = false;
+        mockVerify.summary = "Остановлено: проверено " + mockVerify.checked +
+          " из " + mockVerify.total + " · битых " + mockVerify.broken_total;
+        return Promise.resolve({ ok: true });
+      },
+      repair_broken: function () {
+        return Promise.resolve({ queued: mockVerify.broken_total });
+      },
+      save_fields: function (req) {
+        return Promise.resolve({ ok: true,
+                                 updated: ((req || {}).ids || []).length });
+      },
+      get_thumb: function () {
+        var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="135">' +
+          '<rect width="240" height="135" fill="#23444b"/>' +
+          '<text x="120" y="72" fill="#dcdedd" text-anchor="middle" ' +
+          'font-size="14">обложка (превью)</text></svg>';
+        return Promise.resolve({
+          ok: true,
+          data: "data:image/svg+xml;base64," +
+            btoa(unescape(encodeURIComponent(svg)))
+        });
       },
       pick_folder: function () {
         // В превью «выбираем» новую папку - тот же контракт, что у окна.

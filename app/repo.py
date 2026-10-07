@@ -607,14 +607,73 @@ def tree(conn: sqlite3.Connection) -> dict:
     return {"pool": pool, "channels": channels, "playlists": playlists}
 
 
+# Причина «файл битый»: очередь узнаёт по ней, что файл нужно скачать
+# заново с перезаписью, а не пропустить как уже скачанный.
+CHECKSUM_PREFIX = "контрольная сумма"
+
+
+def normalize_tags(text) -> str | None:
+    """«рок, живой,, 4К» -> «рок, живой, 4К».
+
+    Теги идут в FTS5 (ищутся поиском), поэтому: без пустых, без дублей
+    без учёта регистра, с ограничением на длину и количество - иначе
+    одна строка могла бы раздуть индекс.
+    """
+    if text is None:
+        return None
+    parts: list[str] = []
+    seen: set[str] = set()
+    for chunk in str(text).replace("\n", ",").split(","):
+        tag = chunk.strip()[:48]
+        if not tag or tag.casefold() in seen:
+            continue
+        seen.add(tag.casefold())
+        parts.append(tag)
+        if len(parts) >= 40:
+            break
+    return ", ".join(parts) or None
+
+
+def save_fields(conn, ids, fields: dict) -> int:
+    """Записать ЛОКАЛЬНЫЕ поля: теги, рейтинг, заметка, «просмотрено».
+
+    Whitelist обязателен: значения приходят из окна, а статус, хранилище
+    и метаданные площадки менять оттуда нельзя - это состояние диска и
+    источника, а не оценка пользователя. updated_at не трогаем: очередь
+    сортуется по нему, и правка тега не должна менять порядок загрузки.
+    """
+    allowed: dict = {}
+    if "user_tags" in fields:
+        allowed["user_tags"] = normalize_tags(fields.get("user_tags"))
+    if "user_rating" in fields:
+        try:
+            allowed["user_rating"] = max(0, min(5, int(fields.get("user_rating") or 0)))
+        except (TypeError, ValueError):
+            allowed["user_rating"] = 0
+    if "notes" in fields:
+        allowed["notes"] = str(fields.get("notes") or "").strip()[:2000] or None
+    if "watched" in fields:
+        allowed["watched_at"] = now_iso() if fields.get("watched") else None
+    if not allowed or not ids:
+        return 0
+
+    columns = ", ".join(f"{key}=?" for key in allowed)
+    marks = ",".join("?" * len(ids))
+    cursor = conn.execute(
+        f"UPDATE videos SET {columns} WHERE id IN ({marks})",
+        [*allowed.values(), *[int(i) for i in ids]])
+    return int(cursor.rowcount)
+
+
 def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
                 status: str | None = None, query: str = "",
+                rating_min: int | None = None,
                 offset: int = 0, limit: int = 200) -> dict:
     """Строки таблицы библиотеки: (total, rows) для виртуализированного списка.
 
     scope: {"type": "pool"|"channel"|"playlist", "id": int}.
-    Поиск - по FTS5 (название, описание, локальные теги), сортировка - по
-    выбранной колонке, страница - offset/limit.
+    Поиск - по FTS5 (название, описание, локальные теги), фильтры - по
+    статусу и рейтингу, страница - offset/limit.
     """
     scope = scope or {"type": "pool"}
     joins, where, args = [], [], []
@@ -628,6 +687,9 @@ def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
     if status:
         where.append("v.status=?")
         args.append(status)
+    if rating_min:
+        where.append("COALESCE(v.user_rating, 0) >= ?")
+        args.append(int(rating_min))
     query = (query or "").strip()
     if query:
         fts = fts_query(query)
@@ -643,7 +705,8 @@ def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
     order = "v.uploaded_at DESC NULLS LAST, v.id DESC"
     rows = [dict(row) for row in conn.execute(
         f"""SELECT v.id, v.key, v.title, v.status, v.duration_s, v.uploaded_at,
-                   v.origin, c.title AS channel,
+                   v.origin, v.user_rating, v.user_tags, v.watched_at,
+                   c.title AS channel,
                    (SELECT SUM(size) FROM files f
                      WHERE f.video_id=v.id AND f.kind='video' AND f.missing=0) AS size
               FROM videos v
@@ -906,7 +969,7 @@ def next_queued(conn: sqlite3.Connection) -> dict | None:
     """
     row = conn.execute(
         """SELECT id, key, platform, remote_id, title, webpage_url, status,
-                  target_storage_id, channel_id
+                  target_storage_id, channel_id, last_error
              FROM videos WHERE status='queued'
             ORDER BY updated_at, id LIMIT 1""").fetchone()
     return dict(row) if row else None

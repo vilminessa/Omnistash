@@ -40,7 +40,15 @@
       <div class="toolbar">
         <input type="search" id="search" placeholder="Поиск по названию, описанию, тегам…" autocomplete="off">
         <select id="status-filter" title="Фильтр по статусу"><option value="">все статусы</option></select>
+        <select id="rating-filter" title="Фильтр по рейтингу">
+          <option value="">рейтинг: любой</option>
+          <option value="1">рейтинг ≥ 1</option>
+          <option value="3">рейтинг ≥ 3</option>
+          <option value="5">рейтинг = 5</option>
+        </select>
         <span class="spacer"></span>
+        <button class="btn ghost" id="verify-btn"
+                title="Сверить файлы с хешем в индексе">Целостность</button>
         <button class="btn ghost" id="repack-btn"
                 title="Переименовать выбранные (или текущую область) по шаблону из настроек">Переупаковать…</button>
         <button class="btn ghost" id="dedupe-btn"
@@ -51,6 +59,18 @@
       <div class="scan-bar" id="scan-bar" hidden>
         <div class="scan-track"><div class="scan-fill" id="scan-fill"></div></div>
         <div class="scan-text" id="scan-text"></div>
+      </div>
+
+      <div class="scan-bar" id="verify-bar" hidden>
+        <div class="scan-track"><div class="scan-fill" id="verify-fill"></div></div>
+        <div class="scan-text" id="verify-text"></div>
+      </div>
+
+      <div class="notice" id="verify-note" hidden>
+        <span id="verify-note-text"></span>
+        <span class="spacer"></span>
+        <button class="btn ghost" id="verify-repair-btn" hidden>Перекачать битые</button>
+        <button class="btn ghost" id="verify-close-btn">Скрыть</button>
       </div>
 
       <div class="notice" id="dedupe-note" hidden>
@@ -66,6 +86,8 @@
                 title="Куда качать выбранные"></select>
         <span class="spacer"></span>
         <button class="btn ghost" id="sel-clear">Снять выбор</button>
+        <button class="btn ghost" id="sel-mark"
+                title="Теги, рейтинг, «просмотрено» для выбранных">Пометить…</button>
         <button class="btn ghost" id="sel-move"
                 title="Перенести выбранные файлы в другое хранилище">Перенести…</button>
         <button class="btn primary" id="sel-download">Скачать</button>
@@ -216,6 +238,17 @@
       <button class="icon-btn" id="add-close" aria-label="Закрыть">✕</button>
     </div>
     <div class="card-body" id="add-body"></div>
+  </div>
+</div>
+
+<!-- Пометки для группы строк: теги, рейтинг, «просмотрено» -->
+<div class="overlay" id="mark-overlay" hidden>
+  <div class="card" role="dialog" aria-modal="true">
+    <div class="card-head">
+      <div class="card-title" id="mark-title">Пометить</div>
+      <button class="icon-btn" id="mark-close" aria-label="Закрыть">✕</button>
+    </div>
+    <div class="card-body" id="mark-body"></div>
   </div>
 </div>
 

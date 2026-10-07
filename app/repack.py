@@ -64,7 +64,7 @@ def missing_fields(template: str, info: dict) -> list[str]:
     return sorted(missing)
 
 
-def _selection(conn, selection: dict) -> list[dict]:
+def selection_rows(conn, selection: dict) -> list[dict]:
     """Строки, которые подлежат переупаковке: явные id или область."""
     ids = [int(v) for v in (selection or {}).get("ids") or []]
     if ids:
@@ -142,7 +142,7 @@ def plan_repack(conn, selection: dict, template: str) -> dict:
     if "%" not in str(template):
         return {"error": "Похоже, шаблон без полей (нет ни одного %(…)s)"}
 
-    videos = _selection(conn, selection)
+    videos = selection_rows(conn, selection)
     if not videos:
         return {"error": "Нечего переупаковывать: не выбрано ни одного файла"}
     if len(videos) > MOVE_LIMIT:

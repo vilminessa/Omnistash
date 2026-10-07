@@ -49,10 +49,12 @@ class QueueCase(GuiCase):
     def fake_download(self, behaviour=None):
         """Подмена downloader.download: пишет файл и сайдкар в хранилище."""
 
-        def download(video, settings, *, stop, on_progress=None, dest=None):
+        def download(video, settings, *, stop, on_progress=None, dest=None,
+                     overwrite=False):
             if behaviour:
                 return behaviour(video, settings, stop=stop,
-                                 on_progress=on_progress, dest=dest)
+                                 on_progress=on_progress, dest=dest,
+                                 overwrite=overwrite)
             # dest приходит из очереди - цель, которую выбрал человек.
             target = pathlib.Path(dest or ".")
             target.mkdir(parents=True, exist_ok=True)
@@ -103,7 +105,8 @@ class TestWorker(QueueCase):
     def test_failure_marks_failed_and_counts(self):
         vid = make_video(self.api, "vid000000002", "Плохое")
 
-        def broken(video, settings, *, stop, on_progress=None, dest=None):
+        def broken(video, settings, *, stop, on_progress=None, dest=None,
+                   **kwargs):
             return {"cancelled": False, "files": [], "info": {},
                     "error": "площадка не отдала файл", "hash": None}
 
@@ -128,7 +131,8 @@ class TestWorker(QueueCase):
         make_video(self.api, "vid000000003", "Долгое")
         started = {"hit": False}
 
-        def slow(video, settings, *, stop, on_progress=None, dest=None):
+        def slow(video, settings, *, stop, on_progress=None, dest=None,
+                 **kwargs):
             started["hit"] = True
             stop.wait(10)          # качаем, пока не нажмут Стоп
             return {"cancelled": stop.is_set(), "files": [], "info": {},

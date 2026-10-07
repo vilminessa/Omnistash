@@ -144,6 +144,11 @@ class DownloadWorker:
             return
 
         repo.set_status(conn, [row["id"]], "downloading")
+        # Файл, который проверка целостности признала битым, нужно скачать
+        # ПОВТОРНО, а не пропустить как уже скачанный. Флаг снимаем до
+        # вызова (last_error чистится), поэтому запоминаем заранее.
+        overwrite = str(row.get("last_error") or "").startswith(
+            repo.CHECKSUM_PREFIX)
         repo.set_last_error(conn, row["id"], None)
         with self._lock:
             self._state["attempted"] += 1
@@ -166,7 +171,8 @@ class DownloadWorker:
 
         result = downloader.download(row, settings, stop=self._stop,
                                      on_progress=progress,
-                                     dest=target["path"])
+                                     dest=target["path"],
+                                     overwrite=overwrite)
 
         if result.get("cancelled"):
             # Стоп - не ошибка: файл остаётся к докачке (.part), статус
