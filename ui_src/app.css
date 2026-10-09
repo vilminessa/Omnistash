@@ -3,6 +3,17 @@
    программы выглядели одной семьёй. Всё лежит в одном файле: страница
    вшивается в окно строкой, отдельных запросов нет. */
 
+/* Атрибут hidden должен побеждать ЛЮБОЙ display из наших классов.
+   Правило [hidden]{display:none} живёт в UA-стилях браузера, а авторский
+   класс (например .empty{display:flex}) его перебивает - и «скрытые»
+   блоки остаются на экране поверх содержимого: заглушки «Источников пока
+   нет»/«Очередь пуста» лежали на таблицах, полосы прогресса и заметки не
+   убирались, панель выделения висела всегда. Точечные исключения
+   (.panel[hidden] и подобные) решали часть случаев и создавали иллюзию,
+   что проблема закрыта; глобальное правило ловит и будущие классы.
+   Проверка - в браузере по getComputedStyle, не по атрибуту hidden. */
+[hidden] { display: none !important; }
+
 :root {
   --bg: #0c1622;
   --surface: #111d2c;
@@ -197,7 +208,6 @@ body {
 .main { flex: 1 1 auto; min-height: 0; display: flex; }
 
 .panel { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; padding: 10px; gap: 10px; }
-.panel[hidden] { display: none; }
 
 .split { flex-direction: row; padding: 0; gap: 0; }
 
@@ -442,7 +452,6 @@ body[data-theme="light"] .row { border-bottom-color: rgba(0, 0, 0, .05); }
   z-index: 40;
   padding: 24px;
 }
-.overlay[hidden] { display: none; }
 
 .card {
   background: var(--surface);
@@ -746,7 +755,6 @@ body[data-theme="light"] .row { border-bottom-color: rgba(0, 0, 0, .05); }
   user-select: text;
   white-space: pre-wrap;
 }
-.log[hidden] { display: none; }
 
 .toast {
   position: fixed;
@@ -763,7 +771,6 @@ body[data-theme="light"] .row { border-bottom-color: rgba(0, 0, 0, .05); }
   font-size: 12.5px;
   max-width: 80vw;
 }
-.toast[hidden] { display: none; }
 .toast.err { border-color: var(--err); }
 
 @media (max-width: 900px) {
