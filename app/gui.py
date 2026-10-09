@@ -12,7 +12,9 @@
 
 from __future__ import annotations
 
+import base64
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -34,6 +36,30 @@ from .util import human_size
 MAX_LOG = 2000          # строк в кольцевом буфере памяти
 MAX_LOG_BYTES = 1_000_000   # ротация файла журнала: больше - обрезаем
 KEEP_LOG_BYTES = 512_000    # сколько хвоста храним после ротации
+THUMB_MAX_BYTES = 4 * 1024 * 1024   # обложку больше этой не тащим в data-URI
+THUMB_BATCH_LIMIT = 100       # id за один вызов get_thumbs
+THUMB_MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+              ".png": "image/png", ".webp": "image/webp",
+              ".avif": "image/avif"}
+
+
+def _thumb_data_uri(path: str) -> str | None:
+    """Локальный файл обложки -> data-URI (None: нет файла/слишком большой).
+
+    Так, а не по URL картинки с площадки: лишний сетевой запрос и след,
+    а файл уже лежит рядом с видео вместе с библиотекой.
+    """
+    try:
+        with open(path, "rb") as handle:
+            payload = handle.read(THUMB_MAX_BYTES + 1)
+    except OSError:
+        return None
+    if len(payload) > THUMB_MAX_BYTES:
+        return None
+    mime = THUMB_MIME.get(os.path.splitext(path)[1].lower(),
+                          "application/octet-stream")
+    return ("data:" + mime + ";base64," +
+            base64.b64encode(payload).decode("ascii"))
 HEAVY_TTL = 1.0  # секунд между пересчётом агрегатов
 
 
@@ -1348,11 +1374,7 @@ class Api:
         return {"ok": True, "updated": updated}
 
     def get_thumb(self, request=None) -> dict:
-        """Обложка из локального файла как data-URI.
-
-        Так, а не по URL: картинка с площадки - это лишний сетевой запрос
-        (и след), а файл у нас уже лежит рядом с видео.
-        """
+        """Одна обложка как data-URI (для карточки видео)."""
         try:
             video_id = int((request or {}).get("id") or 0)
         except (TypeError, ValueError):
@@ -1363,18 +1385,103 @@ class Api:
                 ORDER BY id LIMIT 1""", (video_id,)).fetchone()
         if not row:
             return {"ok": False, "reason": "обложка не скачана"}
+        data = _thumb_data_uri(row["path"])
+        if data is None:
+            return {"ok": False,
+                    "reason": "не прочиталась или слишком большая"}
+        return {"ok": True, "data": data}
+
+    def get_thumbs(self, request=None) -> dict:
+        """Пачка обложек для плиток: {"thumbs": {video_id: data-URI}}.
+
+        Один вызов моста вместо десятков: плитка просит превью, только
+        когда попадает на экран (IntersectionObserver), но таких плиток
+        всё равно много. id сверх лимита отклоняем честно - пусть UI
+        дробит сам; битые и пропавшие файлы молча не попадают в ответ,
+        плитка покажет заглушку.
+        """
+        request = request or {}
         try:
-            with open(row["path"], "rb") as handle:
-                payload = handle.read(4 * 1024 * 1024)
+            ids = [int(v) for v in request.get("ids") or []]
+        except (TypeError, ValueError):
+            return {"error": "некорректный список id"}
+        # dedupe с сохранением порядка, нули и мусор в сторону
+        ids = [video_id for video_id in dict.fromkeys(ids) if video_id > 0]
+        if not ids:
+            return {"thumbs": {}}
+        if len(ids) > THUMB_BATCH_LIMIT:
+            return {"error": f"слишком много id за раз: {len(ids)} "
+                             f"(максимум {THUMB_BATCH_LIMIT})"}
+        best: dict[int, str] = {}
+        for chunk_start in range(0, len(ids), 400):
+            chunk = ids[chunk_start:chunk_start + 400]
+            marks = ",".join("?" * len(chunk))
+            for row in self.db.conn.execute(
+                    f"""SELECT video_id, path FROM files
+                         WHERE kind='thumbnail' AND missing=0
+                           AND video_id IN ({marks})
+                         ORDER BY video_id, id""", chunk):
+                # у видео бывает несколько обложек - берём первую по id
+                best.setdefault(row["video_id"], row["path"])
+        thumbs = {}
+        for video_id, path in best.items():
+            data = _thumb_data_uri(path)
+            if data:
+                thumbs[str(video_id)] = data
+        return {"thumbs": thumbs}
+
+    # ------------------------------------------------------------------ #
+    #  Открыть локально: системный плеер и проводник
+    # ------------------------------------------------------------------ #
+
+    def _video_file(self, video_id: int) -> tuple:
+        """(путь к файлу видео, причина отказа). Путь - строго из индекса."""
+        row = self.db.conn.execute(
+            """SELECT path FROM files
+                WHERE video_id=? AND kind='video' AND missing=0
+                ORDER BY id LIMIT 1""", (video_id,)).fetchone()
+        if not row:
+            known = self.db.conn.execute(
+                "SELECT COUNT(*) n FROM files WHERE video_id=? AND kind='video'",
+                (video_id,)).fetchone()["n"]
+            return None, ("файл пропал с диска - переиндексируйте"
+                          if known else "видео не скачано")
+        if not os.path.exists(row["path"]):
+            return None, "файл пропал с диска - переиндексируйте"
+        return row["path"], None
+
+    def open_file(self, request=None) -> dict:
+        """Открыть видео в системном плеере (двойной клик по плитке/строке)."""
+        try:
+            video_id = int((request or {}).get("id") or 0)
+        except (TypeError, ValueError):
+            return {"error": "нет видео"}
+        path, error = self._video_file(video_id)
+        if error:
+            return {"error": error}
+        try:
+            # Windows: открыть ассоциированным приложением (плеер по умолчанию)
+            os.startfile(path)
         except OSError as exc:
-            return {"ok": False, "reason": f"не прочиталась: {exc}"}
-        import base64
-        ext = os.path.splitext(row["path"])[1].lower()
-        mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                ".png": "image/png", ".webp": "image/webp",
-                ".avif": "image/avif"}.get(ext, "application/octet-stream")
-        return {"ok": True, "data": f"data:{mime};base64,"
-                + base64.b64encode(payload).decode("ascii")}
+            return {"error": f"не удалось открыть: {exc}"}
+        self._log(f"Открыто: {path}")
+        return {"ok": True, "path": path}
+
+    def open_folder(self, request=None) -> dict:
+        """Открыть проводник с выделенным файлом видео."""
+        try:
+            video_id = int((request or {}).get("id") or 0)
+        except (TypeError, ValueError):
+            return {"error": "нет видео"}
+        path, error = self._video_file(video_id)
+        if error:
+            return {"error": error}
+        try:
+            subprocess.Popen(["explorer", "/select,",
+                              os.path.normpath(path)])
+        except OSError as exc:
+            return {"error": f"не удалось открыть папку: {exc}"}
+        return {"ok": True, "path": path}
 
     # ------------------------------------------------------------------ #
     #  Проверка целостности (сверка файлов с хешем в индексе)

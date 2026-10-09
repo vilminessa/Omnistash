@@ -717,6 +717,22 @@ def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
         [*args, int(limit), int(offset)])]
     for row in rows:
         row["status_label"] = STATUS_LABELS.get(row["status"], row["status"])
+
+    # Есть ли локальная обложка - одним запросом на страницу: коррелированный
+    # подзапрос на каждую строку стоил бы столько же, сколько вся выборка,
+    # а плитке нужен только флаг (саму картинку отдаёт get_thumbs).
+    thumbs: set[int] = set()
+    ids = [row["id"] for row in rows]
+    for start in range(0, len(ids), 400):
+        chunk = ids[start:start + 400]
+        marks = ",".join("?" * len(chunk))
+        thumbs.update(
+            r["video_id"] for r in conn.execute(
+                f"""SELECT DISTINCT video_id FROM files
+                     WHERE kind='thumbnail' AND missing=0
+                       AND video_id IN ({marks})""", chunk))
+    for row in rows:
+        row["has_thumb"] = row["id"] in thumbs
     return {"total": int(total), "rows": rows}
 
 

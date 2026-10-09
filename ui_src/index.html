@@ -46,6 +46,22 @@
           <option value="3">рейтинг ≥ 3</option>
           <option value="5">рейтинг = 5</option>
         </select>
+        <span class="view-toggle" id="view-toggle" role="group"
+              aria-label="Вид библиотеки">
+          <button class="icon-btn view-btn" id="view-list-btn"
+                  title="Списком" aria-label="Списком">☰</button>
+          <button class="icon-btn view-btn" id="view-grid-btn"
+                  title="Плиткой с превью" aria-label="Плиткой с превью">▦</button>
+        </span>
+        <span class="view-toggle" id="size-toggle" role="group"
+              aria-label="Размер плитки" hidden>
+          <button class="icon-btn size-btn" data-size="small"
+                  title="Мелкая плитка" aria-label="Мелкая плитка">М</button>
+          <button class="icon-btn size-btn" data-size="medium"
+                  title="Средняя плитка" aria-label="Средняя плитка">С</button>
+          <button class="icon-btn size-btn" data-size="large"
+                  title="Крупная плитка" aria-label="Крупная плитка">К</button>
+        </span>
         <span class="spacer"></span>
         <button class="btn ghost" id="verify-btn"
                 title="Сверить файлы с хешем в индексе">Целостность</button>
@@ -93,7 +109,7 @@
         <button class="btn primary" id="sel-download">Скачать</button>
       </div>
 
-      <div class="grid-head">
+      <div class="grid-head" id="grid-head">
         <span class="c-check"><input type="checkbox" id="sel-all"
             title="Выбрать всё на странице" aria-label="Выбрать всё"></span>
         <span class="c-status">Статус</span>

@@ -9,6 +9,16 @@
   "use strict";
 
   var ROW_H = 34;          // высота строки (должна совпадать с --row-h)
+  // Плитка: ширина подсказка, а фактические колонки считает ширина окна.
+  // row - высота ряда плиток (плитка + название + канал + воздух): виртуализация
+  // считает по ней, поэтому точность важна - плитка выше ряда легла бы на следующий.
+  var TILE = {
+    small:  { w: 160, row: 168, gap: 8 },
+    medium: { w: 240, row: 218, gap: 10 },
+    large:  { w: 320, row: 262, gap: 12 }
+  };
+  var THUMB_CACHE_MAX = 400;   // сколько data-URI обложек держим в памяти
+  var THUMB_BATCH = 100;       // id за один вызов get_thumbs (лимит бэкенда)
   var PAGE = 120;          // сколько строк тянем за один запрос
   var POLL_MS = 500;       // период опроса
   // Порядок статусов в фильтре - как движется видео: от «увидели» к «скачали».
@@ -37,7 +47,9 @@
     wizardDismissed: false, // «настроить позже» на первом запуске
     dedupeResolved: null,   // Set путей: разобранные «возможные переезды»
     ffmpeg: null,           // установка ffmpeg из poll (найден/качается/ошибка)
-    ffmpegNoteDismissed: false // «Скрыть» у заметки в очереди (до конца сессии)
+    ffmpegNoteDismissed: false, // «Скрыть» у заметки в очереди (до конца сессии)
+    viewMode: "list",       // «list»/«grid» - из настройки view_mode
+    tileSize: "medium"      // «small»/«medium»/«large» - из tile_size
   };
   state.selected = new Set();
   state.dedupeResolved = new Set();
@@ -193,7 +205,12 @@
       state.rev = snap.settings_rev;
       state.settings = snap.settings || state.settings;
       document.body.dataset.theme = state.settings.theme === "light" ? "light" : "dark";
+      // Вид/размер плитки живут в настройках - при смене перерисовываем
+      // без сброса: страницы загружены, выделение и скролл не трогаем.
+      var viewChanged = syncViewFromSettings();
+      applyViewState();
       renderSettings();
+      if (viewChanged) paintGrid();
     }
     $("stop-scan-btn").hidden = !(snap.scan && snap.scan.running);
     $("rescan-btn").disabled = !!(snap.scan && snap.scan.running);
@@ -1031,8 +1048,111 @@
   }
 
   /* ------------------------------------------------------------------ *
-   *  Таблица библиотеки (виртуализация)
+   *  Таблица библиотеки (виртуализация): список и плитка с превью
    * ------------------------------------------------------------------ */
+
+  function tileConf() {
+    return TILE[state.tileSize] || TILE.medium;
+  }
+
+  function tileCols() {
+    // Колонок столько, сколько влезло: ширина окна решает, не настройка.
+    var cfg = tileConf();
+    var width = $("grid-body").clientWidth - 2;   // минус рамка контейнера
+    return Math.max(1, Math.floor((width + cfg.gap) / (cfg.w + cfg.gap)));
+  }
+
+  function applyViewState() {
+    // Кнопки вида/размера и служебные элементы - по текущим настройкам.
+    var grid = state.viewMode === "grid";
+    $("view-list-btn").classList.toggle("active", !grid);
+    $("view-grid-btn").classList.toggle("active", grid);
+    $("size-toggle").hidden = !grid;
+    $("grid-head").hidden = grid;      // заголовки колонок списку нужны
+    Array.prototype.forEach.call(
+      document.querySelectorAll("#size-toggle .size-btn"), function (btn) {
+        btn.classList.toggle("active", btn.dataset.size === state.tileSize);
+      });
+  }
+
+  // -- превью: локальные обложки, грузятся по появлению на экране ---------
+
+  var thumbCache = new Map();     // id -> dataURI ("" = нет/не читается)
+  var thumbQueue = new Set();     // id, ждущие батча
+  var thumbTimer = null;
+
+  function rememberThumb(id, uri) {
+    if (thumbCache.has(id)) thumbCache.delete(id);   // LRU: свежие в конец
+    thumbCache.set(id, uri);
+    if (thumbCache.size > THUMB_CACHE_MAX) {
+      thumbCache.delete(thumbCache.keys().next().value);
+    }
+  }
+
+  function paintCachedThumbs() {
+    Array.prototype.forEach.call(
+      document.querySelectorAll("#grid-rows img.tile-thumb[data-vid]"),
+      function (img) {
+        var cached = thumbCache.get(Number(img.dataset.vid));
+        if (cached === undefined) return;             // ещё ждём ответа
+        if (cached) img.src = cached;
+        else img.replaceWith(noThumbNode());
+        img.removeAttribute("data-vid");
+      });
+  }
+
+  function noThumbNode() {
+    var div = document.createElement("div");
+    div.className = "tile-thumb tile-nothumb";
+    div.innerHTML = "<span>нет обложки</span>";
+    return div;
+  }
+
+  function scheduleThumbLoad() {
+    if (thumbTimer) return;
+    thumbTimer = setTimeout(function () {
+      thumbTimer = null;
+      var ids = Array.from(thumbQueue).slice(0, THUMB_BATCH);
+      ids.forEach(function (id) { thumbQueue.delete(id); });
+      if (!ids.length) return;
+      call("get_thumbs", { ids: ids }).then(function (res) {
+        var thumbs = (res && res.thumbs) || {};
+        Object.keys(thumbs).forEach(function (key) {
+          rememberThumb(Number(key), thumbs[key]);
+        });
+        // Чего не было в ответе (нет файла/битая) - кэшируем пустышкой,
+        // чтобы не спрашивать одно и то же на каждом скролле.
+        ids.forEach(function (id) {
+          if (!(String(id) in thumbs)) rememberThumb(id, "");
+        });
+        paintCachedThumbs();
+      }).catch(function () {
+        ids.forEach(function (id) { thumbQueue.delete(id); });
+      });
+    }, 120);
+  }
+
+  function requestThumbsForWindow() {
+    // Грузим обложки ровно для окна виртуализации: оно по определению
+    // равно видимой области плюс один ряд запаса на быстрый скролл, то
+    // есть «появилось на экране». IntersectionObserver здесь не берём:
+    // он не отдаёт события в скрытых документах (проверено в превью), а
+    // виртуализация и так не рисует невидимого.
+    Array.prototype.forEach.call(
+      document.querySelectorAll("#grid-rows img.tile-thumb[data-vid]"),
+      function (img) {
+        var id = Number(img.dataset.vid);
+        var cached = thumbCache.get(id);
+        if (cached !== undefined) {
+          if (cached) img.src = cached;
+          else img.replaceWith(noThumbNode());
+          img.removeAttribute("data-vid");
+          return;
+        }
+        thumbQueue.add(id);
+      });
+    if (thumbQueue.size) scheduleThumbLoad();
+  }
 
   /* ------------------------------------------------------------------ *
    *  Хранилища, мультивыбор и стартовый диалог
@@ -1181,7 +1301,13 @@
     var body = $("grid-body");
     var rows = $("grid-rows");
     var total = state.total;
-    $("grid-spacer").style.height = (total * ROW_H) + "px";
+    var grid = state.viewMode === "grid";
+    var cfg = tileConf();
+    var cols = grid ? tileCols() : 1;
+    var rowH = grid ? cfg.row : ROW_H;
+    var lineCount = grid ? Math.ceil(total / cols) : total;
+    rows.classList.toggle("tiles", grid);
+    $("grid-spacer").style.height = (lineCount * rowH) + "px";
     $("list-total").textContent = total
       ? total + " " + plural(total, ["запись", "записи", "записей"]) : "";
 
@@ -1196,20 +1322,55 @@
     }
     empty.hidden = true;
 
-    var start = Math.max(0, Math.floor(body.scrollTop / ROW_H) - 4);
-    var end = Math.min(total, Math.ceil((body.scrollTop + body.clientHeight) / ROW_H) + 4);
-    ensureRange(start, end, function () {
+    // Окно видимого с запасом: в списке - строки, в плитке - ряды плиток.
+    var overscan = grid ? 1 : 4;
+    var start = Math.max(0, Math.floor(body.scrollTop / rowH) - overscan);
+    var end = Math.min(lineCount,
+      Math.ceil((body.scrollTop + body.clientHeight) / rowH) + overscan);
+    var firstItem = start * cols;
+    var lastItem = Math.min(total, end * cols);
+    ensureRange(firstItem, lastItem, function () {
       var html = [];
-      for (var i = start; i < end; i++) {
-        var row = rowAt(i);
-        if (!row) continue;
-        html.push(rowHtml(row, i));
+      var index;
+      if (grid) {
+        rows.style.gridTemplateColumns = "repeat(" + cols + ", minmax(0, 1fr))";
+        rows.style.gap = cfg.gap + "px";
+        for (index = firstItem; index < lastItem; index++) {
+          var tile = rowAt(index);
+          if (tile) html.push(tileHtml(tile, index));
+        }
+      } else {
+        for (index = start; index < end; index++) {
+          var row = rowAt(index);
+          if (row) html.push(rowHtml(row, index));
+        }
       }
-      rows.style.transform = "translateY(" + (start * ROW_H) + "px)";
+      rows.style.transform = "translateY(" + (start * rowH) + "px)";
       rows.innerHTML = html.join("");
-      Array.prototype.forEach.call(rows.querySelectorAll(".row"), function (node) {
-        node.addEventListener("click", function () {
-          openDetail(Number(node.dataset.id));
+      bindGridItems();
+      if (grid) requestThumbsForWindow();
+    });
+  }
+
+  function bindGridItems() {
+    // Один биндинг на список и плитку: одиночный клик - карточка, двойной -
+    // воспроизведение. Задержка нужна, чтобы отличить одно нажатие от двух.
+    Array.prototype.forEach.call(
+      document.querySelectorAll("#grid-rows .row, #grid-rows .tile"),
+      function (node) {
+        var timer = null;
+        node.addEventListener("click", function (event) {
+          if (event.target.closest(".row-check, [data-play]")) return;
+          if (timer) { clearTimeout(timer); timer = null; return; }  // ждём второго
+          timer = setTimeout(function () {
+            timer = null;
+            openDetail(Number(node.dataset.id));
+          }, 240);
+        });
+        node.addEventListener("dblclick", function (event) {
+          if (event.target.closest(".row-check")) return;
+          if (timer) { clearTimeout(timer); timer = null; }
+          playVideo(Number(node.dataset.id));
         });
         // Чекбокс переключает выделение и НЕ открывает карточку.
         var box = node.querySelector(".row-check");
@@ -1219,7 +1380,20 @@
             toggleSelected(Number(box.dataset.id), box.checked, node);
           });
         }
+        var play = node.querySelector("[data-play]");
+        if (play) {
+          play.addEventListener("click", function (event) {
+            event.stopPropagation();
+            playVideo(Number(play.dataset.play));
+          });
+        }
       });
+  }
+
+  function playVideo(id) {
+    // Системный плеер по умолчанию: файл открывает Windows, не окно.
+    call("open_file", { id: id }).then(function (res) {
+      if (res && res.error) toast(res.error, true);
     });
   }
 
@@ -1234,13 +1408,8 @@
     var picked = state.selected.has(row.id);
     // Рейтинг - значок рядом с названием: видно, что размечено, не открывая
     // карточку; полные пометки живут там же.
-    var stars = row.user_rating
-      ? '<span class="star-badge" title="рейтинг ' + row.user_rating +
-        '">★' + row.user_rating + "</span>"
-      : "";
-    var watched = row.watched_at
-      ? '<span class="star-badge" title="просмотрено" style="color:var(--ok)">✓</span>'
-      : "";
+    var stars = starBadge(row);
+    var watched = watchBadge(row);
     return '<div class="row' + (picked ? " picked" : "") + '" data-id="' +
       row.id + '" data-i="' + index + '">' +
       '<span class="c-check"><input type="checkbox" class="row-check" data-id="' +
@@ -1254,6 +1423,48 @@
       '<span class="cell c-dur">' + humanDuration(row.duration_s) + "</span>" +
       '<span class="cell c-date">' + shortDate(row.uploaded_at) + "</span>" +
       '<span class="cell c-size">' + (row.size ? humanSize(row.size) : "—") + "</span>" +
+      "</div>";
+  }
+
+  function starBadge(row) {
+    return row.user_rating
+      ? '<span class="star-badge" title="рейтинг ' + row.user_rating +
+        '">★' + row.user_rating + "</span>"
+      : "";
+  }
+
+  function watchBadge(row) {
+    return row.watched_at
+      ? '<span class="star-badge" title="просмотрено" style="color:var(--ok)">✓</span>'
+      : "";
+  }
+
+  function tileHtml(row, index) {
+    // Плитка: обложка 16:9 (грузится лениво, см. observeThumbs), честная
+    // заглушка, если обложки нет, и те же пометки, что в списке.
+    var picked = state.selected.has(row.id);
+    var thumb = row.has_thumb
+      ? '<img class="tile-thumb" data-vid="' + row.id + '" alt="" ' +
+        'draggable="false">'
+      : '<div class="tile-thumb tile-nothumb"><span>нет обложки</span></div>';
+    return '<div class="tile' + (picked ? " picked" : "") + '" data-id="' +
+      row.id + '" data-i="' + index + '">' +
+      '<span class="c-check tile-check-wrap"><input type="checkbox" ' +
+        'class="row-check tile-check" data-id="' + row.id + '"' +
+        (picked ? " checked" : "") + ' aria-label="Выбрать плитку"></span>' +
+      thumb +
+      '<button class="tile-play" data-play="' + row.id +
+        '" title="Открыть в плеере" aria-label="Открыть в плеере">▶</button>' +
+      '<span class="tile-badges">' +
+        '<span class="status status-dot" data-s="' + esc(row.status) +
+        '" title="' + esc(row.status_label || statusLabel(row.status)) +
+        '"></span>' + starBadge(row) + watchBadge(row) + "</span>" +
+      '<div class="tile-title" title="' + esc(row.title) + '">' +
+        esc(row.title || "—") + "</div>" +
+      '<div class="tile-sub" title="' + esc(row.channel) + '">' +
+        esc(row.channel || "") +
+        (row.duration_s ? " · " + humanDuration(row.duration_s) : "") +
+      "</div>" +
       "</div>";
   }
 
@@ -1313,6 +1524,8 @@
           return f.kind === "video" && !f.missing;
         })[0];
         if (localFile) {
+          actions.push('<button class="btn primary" data-detail="play">' +
+            "Открыть</button>");
           actions.push('<button class="btn" data-detail="folder">Открыть папку</button>');
         }
       }
@@ -1468,13 +1681,13 @@
             $("detail-overlay").hidden = true;
             switchTab("queue");
           } else if (action === "folder") {
-            // Папка - это каталог самого видео, а не его родитель от корня.
-            var file = (data.files || []).filter(function (f) {
-              return f.kind === "video" && !f.missing;
-            })[0];
-            if (file) {
-              call("open_path", file.path.replace(/[\\/][^\\/]*$/, ""));
-            }
+            // Проводник открывается с выделенным самим файлом - так видно,
+            // что именно лежит на диске.
+            call("open_folder", { id: data.id }).then(function (res) {
+              if (res && res.error) toast(res.error, true);
+            });
+          } else if (action === "play") {
+            playVideo(data.id);
           } else if (action === "source" && data.webpage_url) {
             call("open_url", data.webpage_url);
           }
@@ -1941,13 +2154,29 @@
     });
   }
 
+  function syncViewFromSettings() {
+    // Вид/размер плитки - обычные настройки; возвращает true, если что-то
+    // изменилось (тогда нужна перерисовка без сброса страниц и выделения).
+    var newView = state.settings.view_mode === "grid" ? "grid" : "list";
+    var newSize = state.settings.tile_size || "medium";
+    var changed = (state.viewMode !== newView) || (state.tileSize !== newSize);
+    state.viewMode = newView;
+    state.tileSize = newSize;
+    return changed;
+  }
+
   function saveSetting(key, value) {
     call("save_setting", { key: key, value: value }).then(function (res) {
       if (!res) return;
       state.settings = res.settings || state.settings;
       state.rev = res.settings_rev;
       document.body.dataset.theme = state.settings.theme === "light" ? "light" : "dark";
+      // Вид библиотеки - тоже настройка, применяем сразу: у следующего
+      // опроса rev уже совпадёт, ветка в applySnapshot не сработает.
+      var viewChanged = syncViewFromSettings();
+      applyViewState();
       renderSettings();
+      if (viewChanged) paintGrid();
       toast("Сохранено");
     }).catch(function (err) { toast("Не удалось сохранить: " + err, true); });
   }
@@ -2308,6 +2537,38 @@
       }
     });
 
+    // Вид библиотеки: список/плитка и размер плитки - в настройках,
+    // чтобы выбор пережил перезапуск окна.
+    $("view-list-btn").addEventListener("click", function () {
+      if (state.viewMode !== "list") saveSetting("view_mode", "list");
+    });
+    $("view-grid-btn").addEventListener("click", function () {
+      if (state.viewMode !== "grid") saveSetting("view_mode", "grid");
+    });
+    Array.prototype.forEach.call(
+      document.querySelectorAll("#size-toggle .size-btn"), function (btn) {
+        btn.addEventListener("click", function () {
+          if (state.tileSize !== btn.dataset.size) {
+            saveSetting("tile_size", btn.dataset.size);
+          }
+        });
+      });
+    // Сколько колонок плитки поместилось - решает ширина окна, не настройка.
+    if (window.ResizeObserver) {
+      var lastCols = 0;
+      new ResizeObserver(function () {
+        if (state.viewMode !== "grid") return;
+        var cols = tileCols();
+        if (cols === lastCols) return;
+        lastCols = cols;
+        if (paintGrid._raf) return;
+        paintGrid._raf = requestAnimationFrame(function () {
+          paintGrid._raf = 0;
+          paintGrid();
+        });
+      }).observe($("grid-body"));
+    }
+
     $("rescan-btn").addEventListener("click", startScan);
     $("stop-scan-btn").addEventListener("click", function () { call("stop_scan"); });
 
@@ -2494,20 +2755,24 @@
     var rows = [
       { id: 1, key: "youtube:aaa111bbb22", title: "Ночной дождик", status: "downloaded",
         status_label: "скачано", duration_s: 3725, uploaded_at: "2025-01-14",
-        channel: "Автор А", size: 240000000, user_rating: 5,
+        channel: "Автор А", size: 240000000, user_rating: 5, has_thumb: true,
         watched_at: "2026-01-02T10:00:00" },
       { id: 2, key: "youtube:ccc333ddd44", title: "Утренний туман", status: "known",
         status_label: "в индексе", duration_s: 130, uploaded_at: "2024-11-02",
-        channel: "Автор Б", size: 0, user_rating: 0, watched_at: null },
+        channel: "Автор Б", size: 0, user_rating: 0, watched_at: null,
+        has_thumb: false },
       { id: 3, key: "youtube:eee555fff66", title: "Долгая дорога", status: "downloaded",
         status_label: "скачано", duration_s: 540, uploaded_at: "2023-06-30",
-        channel: "Автор А", size: 272000000, user_rating: 3, watched_at: null },
+        channel: "Автор А", size: 272000000, user_rating: 3, watched_at: null,
+        has_thumb: true },
       { id: 4, key: "local:abc", title: "Файл без личности", status: "downloaded",
         status_label: "скачано", duration_s: 61, uploaded_at: null,
-        channel: null, size: 0, user_rating: 0, watched_at: null },
+        channel: null, size: 0, user_rating: 0, watched_at: null,
+        has_thumb: false },
       { id: 5, key: "youtube:ggg777hhh88", title: "Снятый клип", status: "missing",
         status_label: "файл пропал", duration_s: 200, uploaded_at: "2022-02-02",
-        channel: "Автор В", size: 0, user_rating: 0, watched_at: null }
+        channel: "Автор В", size: 0, user_rating: 0, watched_at: null,
+        has_thumb: false }
     ];
     var settings = {
       library_roots: [{ path: "D:\\видео\\библиотека", recursive: true, enabled: true }],
@@ -2516,11 +2781,13 @@
       dest_dir: "D:\\видео\\downloads",
       output_template: "%(channel)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s",
       quality: "high", subtitles: "none", transcode: "none",
+      view_mode: "list", tile_size: "medium",
       delay_ms: 500, retries: 3, resume_queue: true,
       scan_interval_min: 0, sync_interval_min: 30,
       theme: "dark", app_version: ""
     };
     var counter = 0;
+    var settingsRev = 1;
     // Симуляция качалки: в превью нет сети, но поведение панели очереди
     // (кнопки, полоса, счётчики) должно быть проверяемо.
     var mockDl = { running: false, done: 3, failed: 1, attempted: 4,
@@ -2569,6 +2836,15 @@
                        // в превью - сборка без QSV, чтобы была видна пометка
                        encoders: ["libx265", "nvenc", "amf"] };
     var mockFfmpegTimer = null;
+    // Data-URI «обложки» для превью: настоящая картинка моку не нужна.
+    function mockThumbUri() {
+      var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="135">' +
+        '<rect width="240" height="135" fill="#23444b"/>' +
+        '<text x="120" y="72" fill="#dcdedd" text-anchor="middle" ' +
+        'font-size="14">обложка (превью)</text></svg>';
+      return "data:image/svg+xml;base64," +
+        btoa(unescape(encodeURIComponent(svg)));
+    }
     var mockDupes = [
       { video_id: 7, key: "youtube:dup00000001", title: "Два раза",
         copies: 2, bytes: 400000,
@@ -2630,6 +2906,18 @@
         label: "Автосинк каждые, мин",
         hint: "0 - выключено. Новые видео в очередь - только в «Полной».",
         min: 0, max: 1440, default: 30 },
+      { key: "view_mode", type: "choice", section: "Библиотека",
+        label: "Вид библиотеки",
+        hint: "Список - строки; плитка - обложки (превью берутся только из " +
+              "локальных файлов и только когда попадают на экран).",
+        choices: [["list", "Список"], ["grid", "Плитка с превью"]],
+        default: "list" },
+      { key: "tile_size", type: "choice", section: "Библиотека",
+        label: "Размер плитки",
+        hint: "Действует в режиме «Плитка»; колонок столько, сколько влезло.",
+        choices: [["small", "Мелкая"], ["medium", "Средняя"],
+                  ["large", "Крупная"]],
+        default: "medium" },
       { key: "theme", type: "choice", section: "Внешний вид", label: "Тема",
         choices: [["dark", "Тёмная"], ["light", "Светлая"]], default: "dark" }
     ];
@@ -2637,7 +2925,7 @@
       get_initial: function () {
         return Promise.resolve({
           version: "0.1.0 (preview)", settings: settings,
-          schema: schema, settings_rev: 1
+          schema: schema, settings_rev: settingsRev
         });
       },
       poll: function () {
@@ -2712,7 +3000,7 @@
           add_flow: { phase: "idle", mode: "partial", url: "", fetch: null,
                       plan: null, stages: [], result: null, error: null },
           storages: JSON.parse(JSON.stringify(mockStorages)),
-          settings: settings, settings_rev: 1
+          settings: settings, settings_rev: settingsRev
         });
       },
       list_videos: function (req) {
@@ -2745,7 +3033,10 @@
       open_url: function () { return Promise.resolve(null); },
       save_setting: function (pair) {
         settings[pair.key] = pair.value;
-        return Promise.resolve({ settings: settings, settings_rev: 1 });
+        // rev растёт, как в настоящем окне: иначе после первого сохранения
+        // ветка смены настроек в превью перестанет срабатывать.
+        return Promise.resolve({ settings: settings,
+                                 settings_rev: ++settingsRev });
       },
       ffmpeg_start: function () {
         if (mockFfmpeg.found) {
@@ -2824,15 +3115,23 @@
                                  updated: ((req || {}).ids || []).length });
       },
       get_thumb: function () {
-        var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="135">' +
-          '<rect width="240" height="135" fill="#23444b"/>' +
-          '<text x="120" y="72" fill="#dcdedd" text-anchor="middle" ' +
-          'font-size="14">обложка (превью)</text></svg>';
-        return Promise.resolve({
-          ok: true,
-          data: "data:image/svg+xml;base64," +
-            btoa(unescape(encodeURIComponent(svg)))
+        return Promise.resolve({ ok: true, data: mockThumbUri() });
+      },
+      get_thumbs: function (req) {
+        // В моке обложки есть у «нечётных» id - как has_thumb в фикстурах.
+        var thumbs = {};
+        (((req || {}).ids) || []).forEach(function (id) {
+          if (id % 2 === 1) thumbs[String(id)] = mockThumbUri();
         });
+        return Promise.resolve({ thumbs: thumbs });
+      },
+      open_file: function (req) {
+        return Promise.resolve({ ok: true,
+                                 path: "(превью) видео " + (req || {}).id + ".mp4" });
+      },
+      open_folder: function (req) {
+        return Promise.resolve({ ok: true,
+                                 path: "(превью) папка для " + (req || {}).id });
       },
       pick_folder: function () {
         // В превью «выбираем» новую папку - тот же контракт, что у окна.

@@ -264,6 +264,105 @@ body {
 
 .field-hint.warn { color: var(--warn); }
 
+/* ---------------------- вид библиотеки: список/плитка ---------------- */
+
+.view-toggle { display: inline-flex; gap: 2px; align-items: center; }
+.view-btn, .size-btn {
+  font-size: 13px;
+  line-height: 1;
+  padding: 5px 7px;
+  border-radius: 6px;
+}
+.view-btn.active, .size-btn.active {
+  background: var(--widget);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/* Плитки. Высота ряда задаётся в TILE (JS виртуализирует по ней), поэтому
+   .tile обрезает всё лишнее: неточность в пару пикселей не должна была бы
+   накрыть следующий ряд. */
+#grid-rows.tiles { align-content: start; }
+.tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+  cursor: pointer;
+}
+.tile:hover { border-color: var(--accent); }
+.tile.picked { border-color: var(--accent); outline: 1px solid var(--accent); }
+.tile-thumb {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  background: var(--surface-2);
+  flex: 0 0 auto;
+}
+.tile-nothumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 11px;
+}
+.tile-play {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 42px;
+  height: 42px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(4, 9, 16, .68);
+  color: var(--text);
+  font-size: 16px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .12s;
+  z-index: 2;
+}
+.tile:hover .tile-play { opacity: 1; }
+.tile-play:hover { background: var(--accent); }
+.tile-badges {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  z-index: 2;
+}
+.tile-badges .status { font-size: 0; }   /* нужен только кружок статуса */
+.tile-check-wrap {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+}
+.tile-title {
+  padding: 6px 8px 0;
+  font-size: 12.5px;
+  line-height: 1.25;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.tile-sub {
+  padding: 2px 8px 8px;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .verify-list { margin-top: 6px; flex-basis: 100%; }
 #verify-note { flex-wrap: wrap; align-items: center; }
 
