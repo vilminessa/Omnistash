@@ -2929,7 +2929,7 @@
     mock = {
       get_initial: function () {
         return Promise.resolve({
-          version: "0.1.0 (preview)", settings: settings,
+          version: "0.1.1 (preview)", settings: settings,
           schema: schema, settings_rev: settingsRev
         });
       },
