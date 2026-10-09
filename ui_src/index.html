@@ -181,6 +181,16 @@
       <button class="btn" id="queue-retry-btn" hidden>Повторить упавшие</button>
     </div>
 
+    <!-- Появляется, когда очередь реально качала без ffmpeg, и гаснет после
+         установки: тихая деградация не должна оставаться тихой. -->
+    <div class="notice" id="ffmpeg-note" hidden>
+      <span id="ffmpeg-note-text">ffmpeg не найден: склейка, метаданные и
+        субтитры в файл, перекодировка - недоступны.</span>
+      <span class="spacer"></span>
+      <button class="btn ghost" id="ffmpeg-note-btn">Установить ffmpeg</button>
+      <button class="btn ghost" id="ffmpeg-note-close">Скрыть</button>
+    </div>
+
     <div class="dl-bar" id="dl-bar" hidden>
       <div class="dl-meta">
         <b id="dl-title">—</b>
@@ -282,6 +292,17 @@
       <button class="icon-btn" id="dedupe-close" aria-label="Закрыть">✕</button>
     </div>
     <div class="card-body" id="dedupe-body"></div>
+  </div>
+</div>
+
+<!-- Установка ffmpeg: только по кнопке пользователя (GPL не вшиваем) -->
+<div class="overlay" id="ffmpeg-overlay" hidden>
+  <div class="card" role="dialog" aria-modal="true">
+    <div class="card-head">
+      <div class="card-title">Установка FFmpeg</div>
+      <button class="icon-btn" id="ffmpeg-close" aria-label="Закрыть">✕</button>
+    </div>
+    <div class="card-body" id="ffmpeg-body"></div>
   </div>
 </div>
 

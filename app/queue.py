@@ -27,6 +27,8 @@ class DownloadWorker:
         self._lock = threading.Lock()
         self._state = {"running": False, "done": 0, "failed": 0,
                        "attempted": 0, "current": None, "error": None}
+        # Раз за сессию предупреждаем, что без ffmpeg идёт тихая деградация.
+        self._ffmpeg_warned = False
 
     # ------------------------------------------------------------------ #
 
@@ -37,6 +39,15 @@ class DownloadWorker:
             snap = dict(self._state)
             snap["current"] = dict(self._state["current"]) if self._state["current"] else None
             return snap
+
+    @property
+    def ffmpeg_warned(self) -> bool:
+        """Очередь уже жаловалась на отсутствие ffmpeg (раз за сессию).
+
+        Окно превращает это в заметку: раз деградация реально случилась -
+        пусть видна, но гаснет после установки, а не висит вечно.
+        """
+        return self._ffmpeg_warned
 
     def start(self) -> dict:
         """Запустить цикл (идемпотентно: повторный вызов - no-op)."""
@@ -134,6 +145,16 @@ class DownloadWorker:
         return None, "не выбрано хранилище - укажите его при постановке в очередь"
 
     def _download_one(self, conn, row: dict, settings: dict) -> None:
+        if not self._ffmpeg_warned and not downloader.find_ffmpeg():
+            # Без ffmpeg склейки и субтитров в файл не будет, а перекодировка
+            # пропустится молча - пусть в журнале это видно ровно один раз.
+            self._ffmpeg_warned = True
+            extra = (" (перекодировка из настроек будет пропущена)"
+                     if str(settings.get("transcode") or "none") != "none"
+                     else "")
+            self._log("ffmpeg не найден: склейка видео+аудио, метаданные и "
+                      "субтитры в файл, перекодировка - недоступны"
+                      f"{extra}; установка кнопкой в настройках, «Загрузка»")
         target, error = self._resolve_target(conn, row, settings)
         if error:
             repo.set_status(conn, [row["id"]], "failed")

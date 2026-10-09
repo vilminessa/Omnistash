@@ -19,6 +19,8 @@ import time
 import traceback
 
 from . import __version__, indexer, migrate as migrate_mod, repo, settings
+from . import downloader as downloader_mod
+from . import ffmpeg_installer as ffmpeg_mod
 from . import repack as repack_mod
 from . import schedule as schedule_mod
 from . import settings_schema, sources
@@ -106,17 +108,18 @@ class Api:
                               "summary": None, "error": None}
         self._verify_stop = threading.Event()
         self._verify_thread: threading.Thread | None = None
+        # ffmpeg: установка ТОЛЬКО по кнопке пользователя (GPL не вшиваем).
+        self._ffmpeg: dict = {"running": False, "phase": "", "pct": 0,
+                              "error": None}
+        self._ffmpeg_stop = threading.Event()
+        self._ffmpeg_thread: threading.Thread | None = None
         # Качалка: очередь живёт в таблице videos, воркер - фоновый поток.
         self.dl = DownloadWorker(self.db, self._current_settings, log=self._log)
         settings.reload_if_changed(self._settings_cache)
         self._log("Индекс открыт: " + str(self.db.path))
-        # Версия сборки (version.py): в журнале видно, что именно запущено -
-        # для exe это единственный способ узнать, какая сборка работает.
-        try:
-            from version import __version__
-            self._log(f"Omnistash {__version__}")
-        except Exception:  # noqa: BLE001 - версия не критична для работы
-            pass
+        # Версия сборки: в журнале всегда видно, что за exe работает
+        # (значение одно на весь проект - app.__version__).
+        self._log(f"Omnistash {__version__}")
         # Версия pywebview в журнале: API между мажорными версиями
         # меняется (диалог папки уже переезжал) - пусть видно, с чем работаем.
         try:
@@ -303,6 +306,18 @@ class Api:
             verify_state = dict(self._verify)
             verify_state["broken"] = list(self._verify.get("broken") or [])[:100]
             verify_state["missing"] = list(self._verify.get("missing") or [])[:100]
+            ffmpeg_state = dict(self._ffmpeg)
+        # Найден ли ffmpeg - дешёвые stat-вызовы: спрашиваем при каждом
+        # опросе, чтобы правда не отставала от установки/удаления руками.
+        ff_path = downloader_mod.find_ffmpeg()
+        ffmpeg_state["found"] = bool(ff_path)
+        ffmpeg_state["path"] = ff_path
+        # Очередь уже качала без ffmpeg? -> в панели очереди появится заметка.
+        ffmpeg_state["degraded"] = bool(getattr(self.dl, "ffmpeg_warned", False))
+        # Какие кодировщики реально есть в сборке (кэш по mtime в downloader):
+        # настройка «Перекодировка» гасит недоступные варианты честно.
+        ffmpeg_state["encoders"] = (downloader_mod.available_transcoders(ff_path)
+                                    if ff_path else [])
         config = settings.as_public(self._current_settings())
         heavy = self._heavy_snapshot()
         return {
@@ -318,6 +333,7 @@ class Api:
             "repack": repack_state,
             "schedule": schedule_state,
             "verify": verify_state,
+            "ffmpeg": ffmpeg_state,
             "settings": config,
             "settings_rev": rev,
             **heavy,
@@ -1463,6 +1479,70 @@ class Api:
         self._log(summary)
 
     # ------------------------------------------------------------------ #
+    #  ffmpeg: докачка по согласию (GPL не вшиваем - см. ffmpeg_installer)
+    # ------------------------------------------------------------------ #
+
+    def ffmpeg_start(self, request=None) -> dict:
+        """Скачать ffmpeg. Только по явному нажатию пользователя."""
+        found = downloader_mod.find_ffmpeg()
+        if found:
+            # Уже есть (наш, из PATH или у Synfronia) - качать незачем.
+            with self._lock:
+                self._ffmpeg.update(running=False, phase="found", error=None)
+            return {"ok": True, "already": True, "path": found}
+        with self._lock:
+            if self._ffmpeg.get("running"):
+                return {"error": "Установка ffmpeg уже идёт"}
+            self._ffmpeg.update(running=True, phase="start", pct=0, error=None)
+            self._ffmpeg_stop.clear()
+            self._busy = True
+            self._status = "Скачиваем ffmpeg…"
+        thread = threading.Thread(target=self._ffmpeg_worker, daemon=True,
+                                  name="omnistash-ffmpeg")
+        self._ffmpeg_thread = thread
+        thread.start()
+        return {"ok": True}
+
+    def ffmpeg_stop(self) -> dict:
+        """Отменить идущую установку (частичные файлы убирает воркер)."""
+        with self._lock:
+            running = bool(self._ffmpeg.get("running"))
+        if not running:
+            return {"ok": False}
+        self._ffmpeg_stop.set()
+        self._log("Остановка установки ffmpeg запрошена")
+        return {"ok": True}
+
+    def _ffmpeg_worker(self) -> None:
+        def progress(phase: str, pct: float) -> None:
+            with self._lock:
+                self._ffmpeg.update(phase=phase, pct=int(pct))
+
+        try:
+            path = ffmpeg_mod.install(progress=progress, log=self._log,
+                                      stop=self._ffmpeg_stop)
+        except ffmpeg_mod.InstallCancelled:
+            with self._lock:
+                self._ffmpeg.update(running=False, phase="cancelled", pct=0)
+                self._busy = False
+                self._status = "Готово"
+            self._log("Установка ffmpeg отменена")
+        except Exception as exc:  # noqa: BLE001 - фон не должен молча умереть
+            with self._lock:
+                self._ffmpeg.update(running=False, phase="error",
+                                    error=str(exc))
+                self._busy = False
+                self._status = "Готово"
+            self._log(f"ffmpeg не установлен: {exc}")
+        else:
+            with self._lock:
+                self._ffmpeg.update(running=False, phase="done", pct=100,
+                                    error=None)
+                self._busy = False
+                self._status = "Готово"
+            self._log(f"ffmpeg готов: {path}")
+
+    # ------------------------------------------------------------------ #
     #  Расписание
     # ------------------------------------------------------------------ #
 
@@ -1674,11 +1754,12 @@ class Api:
         self._migrate_stop.set()
         self._repack_stop.set()
         self._verify_stop.set()
+        self._ffmpeg_stop.set()
         self.dl.stop()
         self.sched.stop()
         for thread in (self._scan_thread, self._add_thread, self._sync_thread,
                        self._migrate_thread, self._repack_thread,
-                       self._verify_thread,
+                       self._verify_thread, self._ffmpeg_thread,
                        getattr(self, "_avail_thread", None),
                        getattr(self, "_check_thread", None)):
             if thread is not None and thread.is_alive():

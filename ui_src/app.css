@@ -252,6 +252,8 @@ body {
 }
 .schedule-line b { color: var(--text); font-weight: 600; }
 
+.field-hint.warn { color: var(--warn); }
+
 .verify-list { margin-top: 6px; flex-basis: 100%; }
 #verify-note { flex-wrap: wrap; align-items: center; }
 

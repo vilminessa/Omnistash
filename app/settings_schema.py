@@ -15,6 +15,7 @@ from __future__ import annotations
 #   choice - выпадающий список: choices = [[значение, подпись], ...]
 #   path   - текст + кнопка «выбрать папку»
 #   roots  - список корней библиотеки (путь / рекурсия / включён)
+#   action - кнопка действия (поле transient: в settings.json не пишется)
 FIELDS: tuple[dict, ...] = (
     # ---- библиотека ----
     {
@@ -116,9 +117,31 @@ FIELDS: tuple[dict, ...] = (
         "type": "choice",
         "section": "Загрузка",
         "label": "Перекодировка",
-        "hint": "HEVC экономит место; требует ffmpeg.",
-        "choices": [["none", "Не перекодировать"], ["libx265", "HEVC (libx265)"]],
+        "hint": "Перекодировать скачанное в HEVC (H.265): место меньше. "
+                "Какие кодировщики реально есть - спрашивается у ffmpeg; "
+                "недоступные в вашей сборке помечены в списке. Требует "
+                "ffmpeg (см. строку ниже).",
+        "choices": [["none", "Не перекодировать"],
+                    ["libx265", "HEVC (x265, программный)"],
+                    ["nvenc", "HEVC NVIDIA NVENC"],
+                    ["amf", "HEVC AMD AMF"],
+                    ["qsv", "HEVC Intel QSV"]],
         "default": "none",
+    },
+    {
+        "key": "_ffmpeg",
+        "type": "action",
+        "section": "Загрузка",
+        "label": "FFmpeg",
+        "hint": "Склейка видео+аудио, метаданные, субтитры в файл и "
+                "перекодировка требуют ffmpeg. Мы его НЕ вшиваем (GPL): "
+                "ставите сами кнопкой - сборка gyan.dev, встаёт в "
+                "%LOCALAPPDATA%\\Omnistash\\bin, удаляется удалением папки.",
+        "action": "ffmpeg-install",
+        "action_label": "Скачать ffmpeg",
+        # transient: поле-кнопка, а не настройка - в settings.json не пишется.
+        "transient": True,
+        "default": [],
     },
     {
         "key": "delay_ms",

@@ -35,7 +35,9 @@
     storages: [],          // хранилища из poll (вместо старых корней)
     selStorage: "",        // явный выбор в панели выделения
     wizardDismissed: false, // «настроить позже» на первом запуске
-    dedupeResolved: null   // Set путей: разобранные «возможные переезды»
+    dedupeResolved: null,   // Set путей: разобранные «возможные переезды»
+    ffmpeg: null,           // установка ffmpeg из poll (найден/качается/ошибка)
+    ffmpegNoteDismissed: false // «Скрыть» у заметки в очереди (до конца сессии)
   };
   state.selected = new Set();
   state.dedupeResolved = new Set();
@@ -181,6 +183,10 @@
     }
     if (changed("schedule", snap.schedule)) renderSchedule(snap.schedule);
     if (changed("verify", snap.verify)) renderVerify(snap.verify);
+    if (changed("ffmpeg", snap.ffmpeg)) {
+      state.ffmpeg = snap.ffmpeg;
+      renderFfmpegState();
+    }
     appendLogs(snap.logs);
 
     if (snap.settings_rev !== state.rev) {
@@ -428,6 +434,102 @@
             });
         });
       });
+  }
+
+  /* ------------------------------------------------------------------ *
+   *  Установка ffmpeg (по кнопке: GPL не вшиваем)
+   * ------------------------------------------------------------------ */
+
+  function renderFfmpegState() {
+    var ff = state.ffmpeg || {};
+    if (ff.found) state.ffmpegNoteDismissed = false;
+    var span = document.querySelector("#settings-body [data-ffmpeg-state]");
+    if (span) {
+      span.textContent = ff.found ? "найден: " + (ff.path || "")
+        : (ff.running ? "скачивается " + (ff.pct || 0) + "%" : "не установлен");
+    }
+    refreshTranscodeField();
+    var note = $("ffmpeg-note");
+    if (note) {
+      note.hidden = !(ff.degraded && !ff.found && !ff.running) ||
+        !!state.ffmpegNoteDismissed;
+    }
+    if (!$("ffmpeg-overlay").hidden) renderFfmpegBody();
+  }
+
+  function refreshTranscodeField() {
+    // Список кодировщиков живой: что реально есть в сборке ffmpeg - то и
+    // выбираемостно, остальное гасим с пояснением (не молчаливый пропуск).
+    var select = document.querySelector(
+      '#settings-body select[data-key="transcode"]');
+    if (!select) return;
+    var ff = state.ffmpeg || {};
+    Array.prototype.forEach.call(select.options, function (opt) {
+      if (opt.dataset.label === undefined) opt.dataset.label = opt.textContent;
+      var label = opt.dataset.label;
+      if (opt.value === "none") {
+        opt.disabled = false;
+        opt.textContent = label;
+        return;
+      }
+      var missing = !ff.found ||
+        (ff.encoders && ff.encoders.indexOf(opt.value) < 0);
+      opt.disabled = !!missing;
+      opt.textContent = label + (missing
+        ? (!ff.found ? " (нет ffmpeg)" : " (нет в сборке)") : "");
+    });
+    var note = document.querySelector(
+      "#settings-body [data-transcode-note]");
+    if (note) note.hidden = !!ff.found;
+  }
+
+  function openFfmpegOverlay() {
+    $("ffmpeg-overlay").hidden = false;
+    renderFfmpegBody();
+  }
+
+  function renderFfmpegBody() {
+    var ff = state.ffmpeg || {};
+    var head =
+      "<p>Склейка видео и аудио, метаданные, субтитры <b>внутрь файла</b> и " +
+      "перекодировка требуют <b>ffmpeg</b> - внешнего инструмента под GPL.</p>" +
+      '<p class="muted">Omnistash его не содержит и не распространяет: ' +
+      "вы скачиваете его сами с gyan.dev (при недоступности - зеркало BtbN " +
+      "на GitHub). Файлы встают в <code>%LOCALAPPDATA%\\Omnistash\\bin</code> " +
+      "(порядка 100 МБ на диске), удаляются простым удалением этой папки. " +
+      "Без ffmpeg всё остальное работает: качаются готовые потоки, просто " +
+      "без склейки.</p>";
+    var actions;
+    var progress = "";
+    if (ff.found) {
+      actions = '<div class="card-actions">' +
+        '<button class="btn" data-ffmpeg="close">Закрыть</button></div>';
+      progress = '<div class="notice"><span>ffmpeg уже найден: ' +
+        esc(ff.path || "") + "</span></div>";
+    } else if (ff.running) {
+      var pct = ff.pct || 0;
+      var phases = { start: "начинаем", download: "скачиваем",
+                     extract: "распаковываем", verify: "проверяем",
+                     done: "готово" };
+      progress = '<div class="scan-bar"><div class="scan-track">' +
+        '<div class="scan-fill" style="width:' + pct + '%"></div></div>' +
+        '<div class="scan-text">' + esc(phases[ff.phase] || ff.phase || "") +
+        " · " + pct + "%</div></div>";
+      actions = '<div class="card-actions">' +
+        '<button class="btn" data-ffmpeg="stop">Остановить</button></div>';
+    } else if (ff.error) {
+      progress = '<div class="notice"><span>Не удалось: ' + esc(ff.error) +
+        "</span></div>";
+      actions = '<div class="card-actions">' +
+        '<button class="btn" data-ffmpeg="install">Повторить</button>' +
+        '<button class="btn" data-ffmpeg="close">Закрыть</button></div>';
+    } else {
+      actions = '<div class="card-actions">' +
+        '<button class="btn" data-ffmpeg="close">Отмена</button>' +
+        '<button class="btn primary" data-ffmpeg="install">' +
+        "Скачать FFmpeg</button></div>";
+    }
+    $("ffmpeg-body").innerHTML = head + progress + actions;
   }
 
   /* ------------------------------------------------------------------ *
@@ -1568,6 +1670,8 @@
         bySection[name].map(fieldHtml).join("") + "</div>";
     }).join("");
     bindSettings();
+    // Строка ffmpeg жива: её текст зависит от снимка, а не от схемы.
+    renderFfmpegState();
   }
 
   function fieldHtml(field) {
@@ -1582,6 +1686,15 @@
           return '<option value="' + esc(pair[0]) + '"' +
             (value === pair[0] ? " selected" : "") + ">" + esc(pair[1]) + "</option>";
         }).join("") + "</select>";
+      if (field.key === "transcode") {
+        // Живая пометка: без ffmpeg перекодировки нет вовсе; какие кодеки
+        // есть в конкретной сборке - уточняет refreshTranscodeField().
+        control += '<div class="field-hint warn" data-transcode-note' +
+          (state.ffmpeg && state.ffmpeg.found ? " hidden" : "") +
+          ">ffmpeg не найден - перекодировка недоступна. " +
+          '<button class="link-btn" data-action="ffmpeg-install">' +
+          "Установить ffmpeg</button></div>";
+      }
     } else if (field.type === "int") {
       control = '<input type="number" data-key="' + field.key + '" value="' +
         esc(value) + '"' +
@@ -1591,6 +1704,12 @@
       control = '<input type="text" data-key="' + field.key + '" value="' +
         esc(value) + '"><button class="btn ghost" data-browse="' + field.key +
         '">…</button>';
+    } else if (field.type === "action") {
+      // Поле-кнопка (transient): значение не читаем, действие - по data-action.
+      control = '<button class="btn ghost" data-action="' +
+        esc(field.action || "") + '">' +
+        esc(field.action_label || "Выполнить") + "</button>" +
+        '<span class="muted" data-ffmpeg-state></span>';
     } else if (field.type === "storages") {
       control = storagesHtml();
     } else {
@@ -1667,6 +1786,14 @@
           var key = input.dataset.key;
           var value = input.type === "checkbox" ? input.checked : input.value;
           saveSetting(key, value);
+        });
+      });
+
+    // Поля-кнопки: действие опознаём по data-action (сейчас одно - ffmpeg).
+    Array.prototype.forEach.call(
+      document.querySelectorAll("#settings-body [data-action]"), function (btn) {
+        btn.addEventListener("click", function () {
+          if (btn.dataset.action === "ffmpeg-install") openFfmpegOverlay();
         });
       });
 
@@ -2255,6 +2382,30 @@
       $("verify-note").hidden = true;
     });
 
+    // Установка ffmpeg: overlay живёт по снимку, кнопки - делегированием.
+    $("ffmpeg-close").addEventListener("click", function () {
+      $("ffmpeg-overlay").hidden = true;
+    });
+    $("ffmpeg-body").addEventListener("click", function (event) {
+      var btn = event.target && event.target.closest
+        ? event.target.closest("[data-ffmpeg]") : null;
+      if (!btn) return;
+      var action = btn.dataset.ffmpeg;
+      if (action === "close") { $("ffmpeg-overlay").hidden = true; return; }
+      if (action === "install") {
+        call("ffmpeg_start").then(function (res) {
+          if (res && res.error) toast(res.error, true);
+        });
+        return;
+      }
+      if (action === "stop") call("ffmpeg_stop");
+    });
+    $("ffmpeg-note-btn").addEventListener("click", openFfmpegOverlay);
+    $("ffmpeg-note-close").addEventListener("click", function () {
+      state.ffmpegNoteDismissed = true;
+      $("ffmpeg-note").hidden = true;
+    });
+
     $("queue-start-btn").addEventListener("click", function () {
       call("queue_start").then(function (res) {
         if (res && res.error) toast(res.error, true);
@@ -2412,6 +2563,12 @@
                        missing: [], missing_total: 0, summary: null,
                        error: null };
     var mockVerifyTimer = null;
+    // Установка ffmpeg: в превью её имитируем, чтобы оверлей было видно.
+    var mockFfmpeg = { running: false, phase: "", pct: 0, error: null,
+                       found: false, path: null, degraded: true,
+                       // в превью - сборка без QSV, чтобы была видна пометка
+                       encoders: ["libx265", "nvenc", "amf"] };
+    var mockFfmpegTimer = null;
     var mockDupes = [
       { video_id: 7, key: "youtube:dup00000001", title: "Два раза",
         copies: 2, bytes: 400000,
@@ -2446,6 +2603,21 @@
       { key: "quality", type: "choice", section: "Загрузка", label: "Качество",
         choices: [["best", "Исходное"], ["high", "Высокое"],
                   ["mid", "Среднее"], ["low", "Низкое"]], default: "high" },
+      { key: "_ffmpeg", type: "action", section: "Загрузка", label: "FFmpeg",
+        hint: "Склейка, метаданные, субтитры в файл и перекодировка требуют " +
+              "ffmpeg. Мы его НЕ вшиваем (GPL) - ставите сами кнопкой.",
+        action: "ffmpeg-install", action_label: "Скачать ffmpeg",
+        transient: true, default: [] },
+      { key: "transcode", type: "choice", section: "Загрузка",
+        label: "Перекодировка",
+        hint: "Перекодировать скачанное в HEVC (H.265): место меньше. " +
+              "Недоступные в вашей сборке кодеки помечены в списке.",
+        choices: [["none", "Не перекодировать"],
+                  ["libx265", "HEVC (x265, программный)"],
+                  ["nvenc", "HEVC NVIDIA NVENC"],
+                  ["amf", "HEVC AMD AMF"],
+                  ["qsv", "HEVC Intel QSV"]],
+        default: "none" },
       { key: "delay_ms", type: "int", section: "Загрузка",
         label: "Пауза между запросами, мс",
         hint: "Меньше - быстрее, но площадка может начать резать поток.",
@@ -2531,6 +2703,7 @@
             return JSON.parse(JSON.stringify(mockSync));
           })(),
           verify: JSON.parse(JSON.stringify(mockVerify)),
+          ffmpeg: JSON.parse(JSON.stringify(mockFfmpeg)),
           schedule: { scan: { interval: 0, next_in: null, last: null },
                       sync: { interval: 30, next_in: 720,
                               last: "2026-10-07T15:04:00" } },
@@ -2573,6 +2746,43 @@
       save_setting: function (pair) {
         settings[pair.key] = pair.value;
         return Promise.resolve({ settings: settings, settings_rev: 1 });
+      },
+      ffmpeg_start: function () {
+        if (mockFfmpeg.found) {
+          return Promise.resolve({ ok: true, already: true,
+                                   path: mockFfmpeg.path });
+        }
+        mockFfmpeg.running = true;
+        mockFfmpeg.phase = "download";
+        mockFfmpeg.pct = 0;
+        mockFfmpeg.error = null;
+        if (mockFfmpegTimer) clearInterval(mockFfmpegTimer);
+        mockFfmpegTimer = setInterval(function () {
+          mockFfmpeg.pct = Math.min(100, mockFfmpeg.pct + 20);
+          if (mockFfmpeg.phase === "download" && mockFfmpeg.pct >= 60) {
+            mockFfmpeg.phase = "extract";
+          }
+          if (mockFfmpeg.pct >= 100) {
+            clearInterval(mockFfmpegTimer);
+            mockFfmpegTimer = null;
+            mockFfmpeg.running = false;
+            mockFfmpeg.phase = "done";
+            mockFfmpeg.found = true;
+            mockFfmpeg.degraded = false;
+            mockFfmpeg.path = "C:\\превью\\AppData\\Local\\Omnistash\\bin\\ffmpeg.exe";
+          }
+        }, 500);
+        return Promise.resolve({ ok: true });
+      },
+      ffmpeg_stop: function () {
+        if (mockFfmpegTimer) {
+          clearInterval(mockFfmpegTimer);
+          mockFfmpegTimer = null;
+        }
+        mockFfmpeg.running = false;
+        mockFfmpeg.phase = "cancelled";
+        mockFfmpeg.pct = 0;
+        return Promise.resolve({ ok: true });
       },
       verify_start: function () {
         mockVerify = { running: true, done: 0, total: 5,
