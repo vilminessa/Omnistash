@@ -1333,7 +1333,12 @@
       var html = [];
       var index;
       if (grid) {
-        rows.style.gridTemplateColumns = "repeat(" + cols + ", minmax(0, 1fr))";
+        // Колонки фиксированной ширины из настройки (М/С/К), а не 1fr:
+        // плитка должна быть ровно cfg.w, иначе смена размера ничего не
+        // меняет визуально. minmax(0, Wpx) - на узком окне колонка
+        // сжимается, не вылезая за край.
+        rows.style.gridTemplateColumns = "repeat(" + cols + ", minmax(0, " +
+          cfg.w + "px))";
         rows.style.gap = cfg.gap + "px";
         for (index = firstItem; index < lastItem; index++) {
           var tile = rowAt(index);

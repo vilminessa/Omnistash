@@ -155,5 +155,26 @@ class TestViewSettings(unittest.TestCase):
         self.assertEqual(size["default"], "medium")
 
 
+class TestTilesAreGrid(unittest.TestCase):
+    """Страж: у #grid-rows.tiles должно быть display: grid.
+
+    Без него grid-свойства, выставленные инлайном из JS, мертвы: плитки
+    шли полноширинной стопкой, виртуализация (высота рядов из TILE)
+    считала не то, и смена размера М/С/К не меняла ничего на экране.
+    Поведение в браузере офлайн не проверить - держим факт наличия.
+    """
+
+    CSS = Path(__file__).resolve().parent.parent / "ui_src" / "app.css"
+
+    def test_grid_rows_tiles_declares_display_grid(self):
+        import re
+        text = self.CSS.read_text(encoding="utf-8")
+        match = re.search(r"#grid-rows\.tiles\s*\{([^}]*)\}", text)
+        self.assertIsNotNone(match, "правило #grid-rows.tiles не найдено")
+        self.assertRegex(match.group(1), r"display:\s*grid",
+                         "#grid-rows.tiles обязан быть display: grid - иначе "
+                         "плитки рассыпаются в полноширинную стопку")
+
+
 if __name__ == "__main__":
     unittest.main()

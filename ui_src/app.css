@@ -281,8 +281,14 @@ body {
 
 /* Плитки. Высота ряда задаётся в TILE (JS виртуализирует по ней), поэтому
    .tile обрезает всё лишнее: неточность в пару пикселей не должна была бы
-   накрыть следующий ряд. */
-#grid-rows.tiles { align-content: start; }
+   накрыть следующий ряд. display:grid обязателен - без него grid-свойства,
+   выставленные инлайном из JS, мертвы, и плитки шли полноширинной стопкой
+   (а размер плитки «М/С/К» не влиял ни на что). */
+#grid-rows.tiles {
+  display: grid;
+  align-content: start;
+  justify-content: start;
+}
 .tile {
   position: relative;
   display: flex;
