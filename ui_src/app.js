@@ -1881,6 +1881,9 @@
     var sections = [];
     var bySection = {};
     state.schema.forEach(function (field) {
+      // Скрытые поля backend в схему не присылает; мок обязан врать так же
+      // честно, иначе превью показывает то, чего в окне нет.
+      if (field.hidden) return;
       var name = field.section || "Прочее";
       if (!bySection[name]) { bySection[name] = []; sections.push(name); }
       bySection[name].push(field);
@@ -2398,7 +2401,9 @@
         '<div class="field-label">Режим синхронизации</div>' +
         modeRadios(addForm.mode, "add-mode") +
         storageRowHtml() +
-        '<div class="card-actions"><button class="btn primary" data-act="run">Индексировать</button></div>';
+        '<div class="card-actions">' +
+        '<button class="btn" data-act="close">Отмена</button>' +
+        '<button class="btn primary" data-act="run">Индексировать</button></div>';
     }
 
     body.innerHTML = html;
@@ -2744,6 +2749,10 @@
       renderAddFlow(lastAddFlow);
     });
     $("add-close").addEventListener("click", closeAdd);
+    // Клик мимо карточки закрывает диалог - как в других оверлеях (плюс Esc).
+    $("add-overlay").addEventListener("click", function (event) {
+      if (event.target === $("add-overlay")) closeAdd();
+    });
 
     $("detail-close").addEventListener("click", function () { $("detail-overlay").hidden = true; });
     $("detail-overlay").addEventListener("click", function (event) {
