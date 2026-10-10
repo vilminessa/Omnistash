@@ -26,8 +26,8 @@ import re
 import time
 from pathlib import Path
 
-from . import repo, storages as storages_mod
-from .metadata import PLATFORM, normalize_video, slim_info, video_key
+from . import aggregate, repo, storages as storages_mod
+from .metadata import PLATFORM, normalize_video, video_key
 from .util import SIDECAR_SUFFIX, norm_title, now_iso, sanitize_name
 
 # Расширения, которые считаем видео (индексируются как kind='video').
@@ -61,16 +61,12 @@ def file_hash(path: str | Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-def read_sidecar(path: str | Path) -> dict | None:
-    """post.json рядом с файлом: наше собственное описание загрузки.
+def _payload(data: dict) -> dict | None:
+    """Payload сайдкара/записи агрегата -> {remote_id, info, hash, ...}.
 
     Формат терпим к чужим файлам: берём то, что нашли (remote_id сверху
     или внутри info), и не ругаемся на лишние ключи.
     """
-    try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return None
     if not isinstance(data, dict):
         return None
     info = data.get("info") if isinstance(data.get("info"), dict) else {}
@@ -86,6 +82,15 @@ def read_sidecar(path: str | Path) -> dict | None:
             merged[key] = data[key]
     return {"remote_id": str(remote_id), "info": merged,
             "hash": data.get("hash"), "downloaded_at": data.get("downloaded_at")}
+
+
+def read_sidecar(path: str | Path) -> dict | None:
+    """post.json рядом с файлом: наше собственное описание загрузки."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return _payload(data)
 
 
 def rewrite_sidecar(video_path: str | Path, sidecar_path: str | Path) -> None:
@@ -112,19 +117,29 @@ def rewrite_sidecar(video_path: str | Path, sidecar_path: str | Path) -> None:
 
 
 def build_sidecar(info: dict, path: str | Path, digest: str | None = None) -> str:
-    """post.json для свежескачанного файла (пишет загрузчик)."""
-    payload = {
-        "omnistash": 1,
-        "platform": PLATFORM,
-        "remote_id": str(info.get("id") or ""),
-        "path": str(path),
-        "size": os.path.getsize(path) if os.path.exists(path) else None,
-        "hash": digest,
-        "created_at": now_iso(),
-        # slim_info: полезное целиком, списки форматов - сводкой
-        "info": json.loads(slim_info(info) or "{}"),
-    }
+    """post.json для свежескачанного файла (пишет загрузчик в режиме files)."""
+    payload = aggregate.build_record(info, path, digest)
+    # У пофайлового сайдкара путь полный (исторически): rewrite_sidecar
+    # держит его в курсе переименований.
+    payload["path"] = str(path)
     return json.dumps(payload, ensure_ascii=False, indent=1)
+
+
+def _aggregate_sidecar(folder, stem: str, lookups) -> dict | None:
+    """Запись из .omnistash.json папки: метаданные без пофайлового сайдкара.
+
+    Файл опознаётся по ID-токену в имени (часть [%(id)s] в шаблоне имени
+    обязательна - на неё рассчитано и шаг 3). Кэш папки живёт на весь
+    прогон: json перечитывается один раз на каталог, а не на файл.
+    """
+    videos = aggregate.read(folder, cache=lookups.aggregates)
+    if not videos:
+        return None
+    for token in _TOKEN_RE.findall(stem):
+        record = videos.get(token)
+        if record is not None:
+            return _payload(record)
+    return None
 
 
 def _title_variants(stem: str) -> list[str]:
@@ -155,6 +170,9 @@ class _Lookups:
         # Кэш хранилищ на весь прогон: без него record_file на каждом файле
         # читал бы таблицу заново (десятки тысяч лишних запросов).
         self.storages = storages_mod.all_storages(conn, include_detached=True)
+        # Кэш агрегатов папок (.omnistash.json): файл читается один раз
+        # на папку, а не на каждый найденный в ней файл.
+        self.aggregates: dict[str, dict] = {}
 
         for row in conn.execute(
                 """SELECT f.path, f.video_id, f.hash, f.size, f.mtime, f.missing,
@@ -266,13 +284,18 @@ def _attach_aux(conn, video_id: int, media_path: Path, size, mtime, digest,
 
 
 def scan(roots, db, *, progress=None, stop=None, compute_hash: bool = True,
-         keep_sidecar: bool = True) -> dict:
+         keep_sidecar: bool = True, sidecar_mode: str = "files") -> dict:
     """Переиндексировать корни. Возвращает отчёт (см. ScanReport-словарь).
 
     progress(done, total, path) - для полосы прогресса; stop - событие,
         по которому скан вежливо останавливается (кнопка «Отмена»);
     keep_sidecar - дописывать ли post.json файлам, у которых его нет
-        (самоусиление: дешёвая переинициализация при следующем переезде).
+        (самоусиление в режиме files: дешёвая переинициализация при
+        следующем переезде);
+    sidecar_mode - куда дописывать метаданные при самоусилении: «files» -
+        пофайловый post.json, «embed» - запись в .omnistash.json папки.
+        Чтение НЕ зависит от режима: скан понимает оба формата всегда,
+        поэтому переключение настройки библиотеку не ломает.
     """
     started = time.time()
     report = {"roots": [], "scanned": 0, "added": 0, "bound_sidecar": 0,
@@ -335,7 +358,8 @@ def scan(roots, db, *, progress=None, stop=None, compute_hash: bool = True,
 
             try:
                 _index_one(conn, lookups, file_path, size, mtime,
-                           compute_hash, multi_title, report, keep_sidecar)
+                           compute_hash, multi_title, report, keep_sidecar,
+                           sidecar_mode)
             except OSError as exc:
                 report["errors"].append(f"{file_path}: {exc}")
                 continue
@@ -357,19 +381,24 @@ def scan(roots, db, *, progress=None, stop=None, compute_hash: bool = True,
 
 def _selfheal_sidecar(conn, lookups, video_id: int, file_path: str,
                       digest: str | None, *, enabled: bool,
-                      compute_hash: bool, report: dict) -> bool:
-    """Дописать post.json файлу, у которого его нет (самоусиление).
+                      compute_hash: bool, report: dict,
+                      sidecar_mode: str = "files") -> bool:
+    """Дописать метаданные файлу, у которого их нет (самоусиление).
 
     Переинициализация отвязанной папки стоит ровно столько, сколько в ней
-    сайдкаров: каждый дописанный делает следующий раз дешевле и снимает
-    зависимость от имён файлов. Поэтому скан не только читает, но и
-    лечит то, что умеет восстановить из индекса.
+    сайдкаров и записей агрегата: каждая дописанная делает следующий раз
+    дешевле и снимает зависимость от имён файлов. Поэтому скан не только
+    читает, но и лечит то, что умеет восстановить из индекса.
 
-    Локальные файлы (platform='local') не получают сайдкар: их «личность»
-    - это хеш пути, а не площадочный ID, и read_sidecar такое не поймёт.
+    sidecar_mode решает, КУДА дописывать: «files» - пофайловый post.json
+    (как раньше, его и гасит флаг enabled), «embed» - запись в общий
+    .omnistash.json папки. Embed-режим - осознанный выбор настройкой,
+    поэтому настройка «не дописывать post.json» его не касается.
+
+    Локальные файлы (platform='local') не получают ни того, ни другого:
+    их «личность» - это хеш пути, а не площадочный ID, и read_sidecar
+    такое не поймёт.
     """
-    if not enabled:
-        return False
     row = conn.execute(
         """SELECT v.platform, v.remote_id, v.title, v.description,
                   v.uploaded_at, v.duration_s, v.view_count, v.category,
@@ -381,9 +410,12 @@ def _selfheal_sidecar(conn, lookups, video_id: int, file_path: str,
         return False
 
     media = Path(file_path)
+    folder = media.parent
     sidecar = media.with_suffix(SIDECAR_SUFFIX)   # "x.mp4" -> "x.post.json"
-    if sidecar.exists():
-        return False
+    embed = sidecar_mode == "embed"
+    if not embed:
+        if not enabled or sidecar.exists():
+            return False
 
     if digest is None and compute_hash:
         try:
@@ -402,6 +434,25 @@ def _selfheal_sidecar(conn, lookups, video_id: int, file_path: str,
         "channel": row["channel_title"],
         "channel_id": channel_id if channel_id.startswith("UC") else None,
     }
+
+    if embed:
+        # Запись уже есть - лечить нечего, если только её хеш не устарел
+        # (файл перекодили/перезаписали руками: тогда освежаем запись).
+        current = aggregate.find(folder, row["remote_id"],
+                                 cache=lookups.aggregates)
+        if current is not None and (
+                not compute_hash or current.get("hash") == digest):
+            return False
+        try:
+            aggregate.write_record(
+                folder, row["remote_id"],
+                aggregate.build_record(info, file_path, digest),
+                cache=lookups.aggregates)
+        except OSError:
+            return False
+        report["sidecars"] += 1
+        return True
+
     try:
         sidecar.write_text(build_sidecar(info, file_path, digest),
                            encoding="utf-8")
@@ -481,7 +532,7 @@ def _hash_case(lookups, old_path: str) -> str:
 
 def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
                compute_hash: bool, multi_title: set[str], report: dict,
-               keep_sidecar: bool = True) -> str:
+               keep_sidecar: bool = True, sidecar_mode: str = "files") -> str:
     """Опознать один файл и записать его в индекс. Возвращает исход."""
     known = lookups.by_path.get(file_path)
     if known is not None and known["size"] == size and known["mtime"] == mtime:
@@ -502,15 +553,20 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
     stem = media_path.stem
 
     def heal(video_id: int, path: str, digest: str | None) -> None:
-        """Самоусиление: дописать сайдкар опознанному файлу (см. выше)."""
+        """Самоусиление: дописать метаданные опознанному файлу (см. выше)."""
         _selfheal_sidecar(conn, lookups, video_id, path, digest,
                           enabled=keep_sidecar, compute_hash=compute_hash,
-                          report=report)
+                          report=report, sidecar_mode=sidecar_mode)
 
-    # 2. sidecar - полная правда о файле
+    # 2. sidecar - полная правда о файле: post.json рядом или запись
+    #    из агрегата папки (.omnistash.json, режим «всё в видео»).
     sidecar = read_sidecar(media_path.parent / (stem + SIDECAR_SUFFIX))
+    origin = "sidecar"
+    if sidecar is None:
+        sidecar = _aggregate_sidecar(media_path.parent, stem, lookups)
+        origin = "aggregate"
     if sidecar:
-        data = normalize_video(sidecar["info"], origin="sidecar")
+        data = normalize_video(sidecar["info"], origin=origin)
         if not data.get("remote_id"):
             data["remote_id"] = sidecar["remote_id"]
             data["key"] = video_key(PLATFORM, sidecar["remote_id"])
@@ -697,7 +753,8 @@ def headless_scan() -> int:
 
     report = scan(roots, db, progress=progress,
                   compute_hash=bool(config.get("compute_hash", True)),
-                  keep_sidecar=bool(config.get("keep_sidecar", True)))
+                  keep_sidecar=bool(config.get("keep_sidecar", True)),
+                  sidecar_mode=str(config.get("sidecar_mode") or "files"))
     print(json.dumps({k: v for k, v in report.items() if k != "roots"},
                      ensure_ascii=False, indent=2))
     return 0 if not report["errors"] else 2

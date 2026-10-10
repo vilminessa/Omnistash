@@ -17,6 +17,19 @@ class TestCoerce(unittest.TestCase):
         self.assertTrue(settings_schema.coerce("keep_sidecar", True))
         self.assertTrue(settings_schema.coerce("keep_sidecar", "мусор"))  # дефолт True
 
+    def test_sidecar_mode_choice(self):
+        # Новый выбор «Метаданные рядом с видео»: по умолчанию - всё в видео.
+        self.assertEqual(settings_schema.coerce("sidecar_mode", "embed"), "embed")
+        self.assertEqual(settings_schema.coerce("sidecar_mode", "files"), "files")
+        self.assertEqual(settings_schema.coerce("sidecar_mode", "мусор"), "embed")
+        self.assertEqual(settings_schema.defaults()["sidecar_mode"], "embed")
+
+    def test_keep_sidecar_hidden_but_supported(self):
+        # Старый флаг ушёл из карточки, но остался в схеме: чужие
+        # settings.json с явным False должны продолжать читаться.
+        self.assertTrue(settings_schema.field("keep_sidecar").get("hidden"))
+        self.assertFalse(settings_schema.coerce("keep_sidecar", False))
+
     def test_int_clamped(self):
         self.assertEqual(settings_schema.coerce("delay_ms", 999999), 60000)
         self.assertEqual(settings_schema.coerce("delay_ms", -5), 0)

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 
+from . import aggregate
 from .indexer import file_hash, rewrite_sidecar
 
 CHUNK = 1024 * 1024          # копирование кусками: так виден прогресс
@@ -158,6 +159,16 @@ def move_files(conn, plan: dict, target: dict, *, stop=None, progress=None) -> d
     new_video_path = {item["video_id"]: item["dst"] for item in items
                       if item["kind"] == "video"}
 
+    # Агрегатам (.omnistash.json) при переезде видео нужен remote_id.
+    _remote_cache: dict[int, str | None] = {}
+
+    def remote_id_of(video_id: int) -> str | None:
+        if video_id not in _remote_cache:
+            row = conn.execute("SELECT remote_id FROM videos WHERE id=?",
+                               (video_id,)).fetchone()
+            _remote_cache[video_id] = row["remote_id"] if row else None
+        return _remote_cache[video_id]
+
     done_files = 0
     done_bytes = 0
     errors: list[str] = []
@@ -213,6 +224,15 @@ def move_files(conn, plan: dict, target: dict, *, stop=None, progress=None) -> d
             moved_video = new_video_path.get(item["video_id"])
             if moved_video:
                 rewrite_sidecar(moved_video, item["dst"])
+
+        if item["kind"] == "video":
+            remote_id = remote_id_of(item["video_id"])
+            if remote_id:
+                # Запись агрегата едет за видео в новую папку (старая
+                # папка записи не теряет - relocate сначала пишет в цель).
+                aggregate.relocate(os.path.dirname(item["src"]), remote_id,
+                                   os.path.dirname(item["dst"]),
+                                   os.path.basename(item["dst"]))
 
         try:
             os.remove(item["src"])

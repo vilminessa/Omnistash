@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from app import repack, repo
+from app import aggregate, repack, repo
 from app.indexer import SIDECAR_SUFFIX
 from tests.test_gui import GuiCase
 
@@ -271,6 +271,69 @@ class TestApiRepack(RepackCase):
     def test_preview_of_empty_selection(self):
         result = self.api.repack_preview({"scope": {"type": "pool"}})
         self.assertIn("error", result)
+
+
+class TestAggregateFollows(RepackCase):
+    """Агрегат папки (.omnistash.json): запись живёт вместе с видео.
+
+    Запись хранит только имя файла, поэтому переименование в той же
+    папке правит одно поле, а смена папки - переносит запись целиком.
+    """
+
+    def _record(self, remote_id, name):
+        return {"omnistash": 1, "platform": "youtube",
+                "remote_id": remote_id, "path": name,
+                "hash": "sha256:aa",
+                "info": {"id": remote_id, "title": "Ролик"}}
+
+    def test_record_moves_to_new_folder(self):
+        self.make_video(title="Ролик", date="20250101", channel="Автор",
+                        with_sidecar=False)
+        aggregate.write_record(self.root, "vid000000001",
+                               self._record("vid000000001",
+                                            "Ролик [vid000000001].mp4"))
+        # Сосед по папке, который никуда не едет.
+        aggregate.write_record(self.root, "vid000000002",
+                               self._record("vid000000002", "Сосед.mp4"))
+
+        plan = repack.plan_repack(self.conn, self.pool(), TEMPLATE)
+        result = repack.apply_repack(self.conn, plan)
+        self.assertEqual(result["renamed"], 1, result)
+        self.assertEqual(result["errors"], [])
+
+        new_folder = self.root / "Автор"
+        record = aggregate.find(new_folder, "vid000000001")
+        self.assertIsNotNone(record, "запись не переехала в новую папку")
+        self.assertEqual(record["path"],
+                         "20250101 - Ролик [vid000000001].mp4")
+        self.assertIsNone(aggregate.find(self.root, "vid000000001"))
+        self.assertIsNotNone(
+            aggregate.find(self.root, "vid000000002"),
+            "чужая запись обязана остаться в исходной папке")
+
+    def test_record_path_updated_on_rename_in_place(self):
+        self.make_video(title="Ролик", date="20250101", channel=None,
+                        with_sidecar=False)
+        aggregate.write_record(self.root, "vid000000001",
+                               self._record("vid000000001",
+                                            "Ролик [vid000000001].mp4"))
+        template = "%(title)s v2 [%(id)s].%(ext)s"
+        plan = repack.plan_repack(self.conn, self.pool(), template)
+        result = repack.apply_repack(self.conn, plan)
+        self.assertEqual(result["renamed"], 1, result)
+
+        record = aggregate.find(self.root, "vid000000001")
+        self.assertEqual(record["path"], "Ролик v2 [vid000000001].mp4")
+        self.assertTrue((self.root / "Ролик v2 [vid000000001].mp4").exists())
+
+    def test_without_record_is_noop(self):
+        # Файловый режим (записи нет): переупаковка работает как раньше.
+        self.make_video(title="Ролик", date="20250101", channel="Автор")
+        plan = repack.plan_repack(self.conn, self.pool(), TEMPLATE)
+        result = repack.apply_repack(self.conn, plan)
+        self.assertEqual(result["renamed"], 1, result)
+        self.assertEqual(result["errors"], [])
+        self.assertFalse((self.root / aggregate.FILENAME).exists())
 
 
 if __name__ == "__main__":

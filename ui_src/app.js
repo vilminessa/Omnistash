@@ -3114,7 +3114,7 @@
     var settings = {
       library_roots: [{ path: "D:\\видео\\библиотека", recursive: true, enabled: true }],
       default_storage_id: "st_preview1",
-      default_sync_mode: "partial", keep_sidecar: true, compute_hash: true,
+      default_sync_mode: "partial", sidecar_mode: "embed", compute_hash: true,
       dest_dir: "D:\\видео\\downloads",
       output_template: "%(channel)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s",
       quality: "high", subtitles: "none", transcode: "none",
@@ -3223,8 +3223,16 @@
                   ["manual", "Ручная"]], default: "partial" },
       { key: "keep_sidecar", type: "bool", section: "Библиотека",
         label: "Сохранять post.json рядом с файлом",
-        hint: "Позволяет переиндексировать библиотеку после переезда.",
-        default: true },
+        hint: "Служебный флаг режима «файлы рядом».",
+        hidden: true, default: true },
+      { key: "sidecar_mode", type: "choice", section: "Библиотека",
+        label: "Метаданные рядом с видео",
+        hint: "«Всё в видео»: обложка и метаданные вшиты в mp4, сведения " +
+              "всех видео папки - в одном .omnistash.json. «Файлы рядом»: " +
+              "как раньше - post.json и обложка отдельными файлами.",
+        choices: [["embed", "Всё в видео (+ .omnistash.json на папку)"],
+                  ["files", "Файлы рядом с видео (post.json, обложка)"]],
+        default: "embed" },
       { key: "dest_dir", type: "path", section: "Загрузка",
         label: "Куда скачивать", hint: "нет - заменено хранилищами",
         hidden: true, default: "D:\\видео\\downloads" },

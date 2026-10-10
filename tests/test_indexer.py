@@ -6,9 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app import repo
+from app import aggregate, repo
 from app.db import Database
-from app.indexer import SIDECAR_SUFFIX, scan
+from app.indexer import SIDECAR_SUFFIX, file_hash, scan
 from app.metadata import normalize_video
 
 
@@ -215,6 +215,115 @@ class TestSelfHeal(ScanCase):
         self.assertEqual(report["sidecars"], 0)
         self.assertFalse((self.root / ("Клип [dQw4w9WgXcQ]" +
                                        SIDECAR_SUFFIX)).exists())
+
+
+class TestAggregateBinding(ScanCase):
+    """Опознание по агрегату папки (.omnistash.json, режим «всё в видео»).
+
+    Файл без пофайлового сайдкара, но с записью в общем json папки -
+    полная правда о нём: скан понимает оба формата независимо от
+    настройки, поэтому переключение режима библиотеку не ломает.
+    """
+
+    def _record(self, vid, title, digest="sha256:aa"):
+        return {"omnistash": 1, "platform": "youtube", "remote_id": vid,
+                "path": f"Пост [{vid}].mp4", "hash": digest,
+                "info": {"id": vid, "title": title, "channel": "Автор",
+                         "upload_date": "20250304"}}
+
+    def test_bound_by_aggregate_record(self):
+        self.write("Пост [abc000000001].mp4", b"payload-a")
+        aggregate.write_record(self.root, "abc000000001",
+                               self._record("abc000000001",
+                                            "Название из агрегата"))
+        report = self.run_scan()
+        self.assertEqual(report["bound_sidecar"], 1)
+        row = self.rows()[0]
+        self.assertEqual(row["remote_id"], "abc000000001")
+        self.assertEqual(row["title"], "Название из агрегата")
+        # Агрегат - не файл видео: строка ровно одна, на сам mp4.
+        detail = repo.video_detail(self.conn, row["id"])
+        kinds = {f["kind"] for f in detail["files"]}
+        self.assertEqual(kinds, {"video"})
+
+    def test_perfile_sidecar_wins_over_aggregate(self):
+        # Оба формата легальны одновременно (библиотека на разных
+        # режимах): пофайловый сайдкар - старший по приоритету.
+        self.write("Пост [abc000000001].mp4", b"payload-a")
+        (self.root / ("Пост [abc000000001]" + SIDECAR_SUFFIX)).write_text(
+            json.dumps({"omnistash": 1, "remote_id": "abc000000001",
+                        "info": {"id": "abc000000001",
+                                 "title": "Из сайдкара"}}), encoding="utf-8")
+        aggregate.write_record(self.root, "abc000000001",
+                               self._record("abc000000001", "Из агрегата"))
+        report = self.run_scan()
+        self.assertEqual(report["bound_sidecar"], 1)
+        self.assertEqual(self.rows()[0]["title"], "Из сайдкара")
+
+    def test_record_for_other_video_is_not_used(self):
+        # ID в имени не совпал ни с одной записью - шаги идут дальше,
+        # и файл честно становится локальным, а не получает чужие данные.
+        self.write("Ни с чем не совпало [zzz999999999].mp4")
+        aggregate.write_record(self.root, "aaaaaaaaaaa",
+                               self._record("aaaaaaaaaaa", "Чужой"))
+        report = self.run_scan()
+        self.assertEqual(report["added"], 1)
+        self.assertEqual(report["bound_sidecar"], 0)
+        self.assertEqual(self.rows()[0]["platform"], "local")
+
+
+class TestSelfHealEmbed(ScanCase):
+    """Самоусиление в режиме «всё в видео»: агрегат вместо post.json."""
+
+    def _video(self):
+        repo.upsert_video(self.conn, normalize_video(
+            {"id": "dQw4w9WgXcQ", "title": "Клип", "channel": "Автор",
+             "upload_date": "20091025", "duration": 213}), full=True)
+
+    def test_scan_writes_aggregate_not_sidecar(self):
+        self._video()
+        self.write("Клип [dQw4w9WgXcQ].mp4", b"content")
+        report = self.run_scan(sidecar_mode="embed")
+        self.assertEqual(report["bound_id"], 1)
+        self.assertEqual(report["sidecars"], 1)
+        self.assertFalse(
+            (self.root / ("Клип [dQw4w9WgXcQ]" + SIDECAR_SUFFIX)).exists(),
+            "в режиме embed пофайловый сайдкар не появляется")
+        record = aggregate.find(self.root, "dQw4w9WgXcQ")
+        self.assertIsNotNone(record, "запись агрегата не дописана")
+        self.assertEqual(record["info"]["title"], "Клип")
+        self.assertEqual(record["path"], "Клип [dQw4w9WgXcQ].mp4")
+        self.assertTrue(record["hash"].startswith("sha256:"))
+
+        # Повторный скан: запись уже есть - ничего не переписывается.
+        again = self.run_scan(sidecar_mode="embed")
+        self.assertEqual(again["sidecars"], 0)
+        self.assertEqual(again["unchanged"], 1)
+
+    def test_wrong_hash_in_record_is_corrected(self):
+        # Запись с неверным хешем (ручная правка/последствия перезаписи):
+        # когда скан считает настоящий хеш, запись освежается.
+        self._video()
+        self.write("Клип.mp4", b"content")          # без ID в имени -> шаг 4
+        aggregate.write_record(self.root, "dQw4w9WgXcQ", {
+            "omnistash": 1, "platform": "youtube", "remote_id": "dQw4w9WgXcQ",
+            "path": "Клип.mp4", "hash": "sha256:wrong",
+            "info": {"id": "dQw4w9WgXcQ", "title": "Клип"}})
+        report = self.run_scan(sidecar_mode="embed")
+        self.assertEqual(report["bound_title"], 1)
+        self.assertEqual(report["sidecars"], 1)
+        record = aggregate.find(self.root, "dQw4w9WgXcQ")
+        self.assertEqual(record["hash"],
+                         file_hash(self.root / "Клип.mp4"),
+                         "хеш в записи должен стать настоящим")
+
+    def test_files_mode_leaves_no_aggregate(self):
+        self._video()
+        self.write("Клип [dQw4w9WgXcQ].mp4", b"content")
+        self.run_scan()                            # режим files по умолчанию
+        self.assertFalse((self.root / aggregate.FILENAME).exists())
+        self.assertTrue((self.root / ("Клип [dQw4w9WgXcQ]"
+                                      + SIDECAR_SUFFIX)).exists())
 
 
 if __name__ == "__main__":

@@ -115,7 +115,8 @@ class TestLiveChannel(LiveCase):
 
 class TestLiveDownload(LiveCase):
     def test_download_then_reindex_recognises_file(self):
-        """Сквозная проверка: очередь -> файл -> sidecar -> сканер опознаёт."""
+        """Сквозная: очередь -> mp4 (обложка/метаданные внутри) ->
+        .omnistash.json на папку -> свежий скан опознаёт файл."""
         import pathlib
 
         from app import indexer
@@ -152,13 +153,15 @@ class TestLiveDownload(LiveCase):
             "SELECT status FROM videos WHERE id=?", (row["id"],)).fetchone()["status"]
         self.assertEqual(status, "downloaded")
 
-        # 4. файл, сайдкар и хеш на месте, имя - по шаблону с ID
+        # 4. файл, агрегат папки и хеш на месте, имя - по шаблону с ID.
+        #    Режим по умолчанию - «всё в видео»: пофайловых сайдкаров нет.
         files = [dict(r) for r in api.db.conn.execute(
             "SELECT kind, path, size, hash FROM files WHERE video_id=?",
             (row["id"],))]
         kinds = {f["kind"] for f in files}
         self.assertIn("video", kinds)
-        self.assertIn("sidecar", kinds, "sidecar post.json не записан")
+        self.assertNotIn("sidecar", kinds,
+                         "embed-режим не должен писать post.json")
         video_file = next(f for f in files if f["kind"] == "video")
         path = pathlib.Path(video_file["path"])
         self.assertTrue(path.is_file(), path)
@@ -166,10 +169,42 @@ class TestLiveDownload(LiveCase):
         remote_id = row["key"].split(":", 1)[1]
         self.assertIn(f"[{remote_id}]", path.name,
                       f"имя не по шаблону: {path.name}")
+
+        from app import aggregate
+        record = aggregate.find(path.parent, remote_id)
+        self.assertIsNotNone(record, "запись агрегата не написана")
+        self.assertEqual(record["path"], path.name)
+        self.assertEqual(record["hash"], video_file["hash"],
+                         "в записи - хеш финального (в том числе со вшитой "
+                         "обложкой) файла")
+
+        # С ffmpeg обложка и метаданные вшиваются: рядом с видео ничего,
+        # а внутри файла лежат теги. Без ffmpeg встроить нечем - обложка
+        # честно остаётся файлом, очередь об этом предупреждает.
+        from app import downloader
+        ffmpeg = downloader.find_ffmpeg()
+        if ffmpeg:
+            self.assertNotIn("thumbnail", kinds,
+                             "обложка должна быть вшита, а не лежать рядом")
+            probe = pathlib.Path(ffmpeg).with_name("ffprobe.exe")
+            if probe.is_file():
+                import json as _json
+                import subprocess
+                done = subprocess.run(
+                    [str(probe), "-v", "error", "-show_entries",
+                     "format_tags=title", "-of", "json", str(path)],
+                    capture_output=True, text=True, timeout=60)
+                tags = ((_json.loads(done.stdout or "{}").get("format")
+                         or {}).get("tags") or {})
+                self.assertIn("title", tags, "метаданные не вшиты в файл")
+        else:
+            self.assertIn("thumbnail", kinds,
+                          "без ffmpeg обложка должна остаться файлом")
         self.assertEqual(api.poll(0)["stats"]["downloaded"], 1)
 
         # 5. переезд библиотеки: СВЕЖАЯ база (путь она не знает) обязана
-        #    опознать файл по сайдкару, а не завести «неизвестный».
+        #    опознать файл по агрегату (шаг 2) или по ID в имени (шаг 3),
+        #    а не завести «неизвестный».
         from app import storages as storages_mod
         from app.db import Database as FreshDatabase
 

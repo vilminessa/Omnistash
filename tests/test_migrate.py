@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from app import migrate, repo
+from app import aggregate, migrate, repo
 from app.indexer import SIDECAR_SUFFIX
 from tests.test_gui import GuiCase
 
@@ -256,6 +256,43 @@ class TestApiMigrate(MigrateCase):
             "video_ids": [made["vid"]],
             "target_storage_id": self.storage_b["id"]})
         self.assertIn("Нечего переносить", result["error"])
+
+
+class TestAggregateMove(MigrateCase):
+    """Перенос между хранилищами: агрегат покидает источник вместе с видео.
+
+    Общий json не строка files - его никто не копирует «сам», поэтому
+    relocate переносит запись явно (иначе в цели метаданные появятся
+    только к следующему скану, а база может умереть раньше).
+    """
+
+    def _record(self, remote_id, name):
+        return {"omnistash": 1, "platform": "youtube",
+                "remote_id": remote_id, "path": name,
+                "hash": "sha256:aa",
+                "info": {"id": remote_id, "title": "Клип"}}
+
+    def test_aggregate_record_follows_video(self):
+        made = self.make_library()
+        folder = self.dir / "A" / "Автор"
+        aggregate.write_record(folder, "vid000000001",
+                               self._record("vid000000001",
+                                            made["media"].name))
+        aggregate.write_record(folder, "vid000000002",
+                               self._record("vid000000002", "Сосед.mp4"))
+
+        plan = migrate.plan_move(self.conn, [made["vid"]], self.storage_b)
+        result = migrate.move_files(self.conn, plan, self.storage_b)
+        self.assertEqual(result["errors"], [])
+
+        target = self.dir / "B" / "Автор"
+        record = aggregate.find(target, "vid000000001")
+        self.assertIsNotNone(record, "запись не поехала с видео")
+        self.assertEqual(record["path"], made["media"].name)
+        self.assertIsNone(aggregate.find(folder, "vid000000001"))
+        self.assertIsNotNone(
+            aggregate.find(folder, "vid000000002"),
+            "записи неперенесённых видео остаются в источнике")
 
 
 if __name__ == "__main__":

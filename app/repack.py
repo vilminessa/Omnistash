@@ -22,7 +22,7 @@ from pathlib import Path
 
 import yt_dlp
 
-from . import indexer
+from . import aggregate, indexer
 from .util import SIDECAR_SUFFIX
 
 DISPLAY_LIMIT = 100     # сколько «было -> станет» отдаём в превью
@@ -229,6 +229,7 @@ def plan_repack(conn, selection: dict, template: str) -> dict:
                                                  new_stem + suffix)})
 
         items.append({"video_id": video["id"], "title": video.get("title"),
+                      "remote_id": video.get("remote_id"),
                       "storage_id": video["storage_id"],
                       "storage_path": storage_path,
                       "old_path": video_file["path"], "new_path": target,
@@ -324,6 +325,15 @@ def apply_repack(conn, plan: dict, *, stop=None, progress=None) -> dict:
                             if new.lower().endswith(SIDECAR_SUFFIX)), None)
             if sidecar:
                 indexer.rewrite_sidecar(item["new_path"], sidecar)
+
+            # Агрегат папки (.omnistash.json): имя файла в записи должно
+            # следовать за переименованием, а при смене папки - переехать
+            # в новый каталог. Без записи файлов режима это не трогаем.
+            if item.get("remote_id"):
+                aggregate.relocate(
+                    os.path.dirname(item["old_path"]), item["remote_id"],
+                    os.path.dirname(item["new_path"]),
+                    os.path.basename(item["new_path"]))
 
             old_dirs.add(os.path.dirname(item["old_path"]))
             # Пустые папки чистим только ВНУТРИ хранилища: сам корень

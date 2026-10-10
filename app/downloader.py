@@ -24,10 +24,17 @@ import threading
 from pathlib import Path
 
 import yt_dlp
-from yt_dlp.postprocessor.ffmpeg import (FFmpegPostProcessor,
+from yt_dlp.postprocessor.ffmpeg import (FFmpegMetadataPP, FFmpegPostProcessor,
                                          FFmpegPostProcessorError)
 
-from . import google_auth
+try:
+    # yt-dlp 2025+ вынес встроение обложки в отдельный модуль.
+    from yt_dlp.postprocessor.embedthumbnail import EmbedThumbnailPP
+except ImportError:  # старые версии прятали PP в ffmpeg.py
+    from yt_dlp.postprocessor.ffmpeg import \
+        FFmpegEmbedThumbnailPP as EmbedThumbnailPP
+
+from . import aggregate, google_auth
 from .indexer import SIDECAR_SUFFIX, build_sidecar, file_hash
 from .paths import base_dir
 
@@ -215,6 +222,20 @@ class TranscodePP(FFmpegPostProcessor):
                 continue
             os.replace(temp, out_path)
             _rename_siblings(filename, out_path)
+            # yt-dlp смотрит обложку по info['thumbnails']: если путь не
+            # переписать, встроение после перекодировки (стадия after_move)
+            # файл не найдёт и оставит обложку отдельным файлом.
+            old_stem = Path(filename).stem
+            new_stem = Path(out_path).stem
+            new_dir = os.path.dirname(out_path)
+            for thumb in info.get("thumbnails") or []:
+                if not isinstance(thumb, dict):
+                    continue
+                fp = thumb.get("filepath")
+                base = os.path.basename(fp) if fp else ""
+                if base.startswith(old_stem + "."):
+                    thumb["filepath"] = os.path.join(
+                        new_dir, new_stem + base[len(old_stem):])
             try:
                 os.remove(filename)
             except OSError:
@@ -234,6 +255,18 @@ class TranscodePP(FFmpegPostProcessor):
             except OSError:
                 pass
         return [], info
+
+
+def embed_mode(settings: dict) -> bool:
+    """Режим «всё в видео»: обложка и метаданные внутрь mp4, метаданные
+    всех видео папки - в один .omnistash.json вместо пофайловых сайдкаров.
+
+    Ключа нет в словаре - старое поведение («файлы рядом»): прямые вызовы
+    качалки со словарём из тестов или скриптов не должны молча менять
+    формат библиотеки; приложение всегда получает ключ из схемы настроек
+    (там по умолчанию «embed»).
+    """
+    return str(settings.get("sidecar_mode") or "files") == "embed"
 
 
 def format_selector(settings: dict) -> str:
@@ -324,7 +357,9 @@ def build_opts(settings: dict, dest_dir: str | Path, *, stop: threading.Event,
         if ffmpeg:
             opts["embedsubtitles"] = True   # субтитры в файл, а не рядом
 
-    if settings.get("save_thumb", True):
+    # Обложка нужна и для встраивания в mp4 (embed-режим): yt-dlp скачивает
+    # её в файл, EmbedThumbnailPP вшивает и удаляет файл после успеха.
+    if settings.get("save_thumb", True) or (embed_mode(settings) and ffmpeg):
         opts["writethumbnail"] = True
 
     return opts
@@ -435,14 +470,26 @@ def _download(video: dict, settings: dict, *, stop: threading.Event,
         if browser_opt:
             opts["cookiesfrombrowser"] = browser_opt
     encoder = str(settings.get("transcode") or "none")
+    ffmpeg = find_ffmpeg()
+    embed = embed_mode(settings) and bool(ffmpeg)
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            if encoder in TRANSCODERS and find_ffmpeg():
+            if encoder in TRANSCODERS and ffmpeg:
                 # Перекодировка включается настройкой «Загрузка/Перекодировка».
                 # Без ffmpeg пропускаем её (очередь предупреждает) - качать
                 # без ffmpeg умеем, а вот тормозить очередь из-за настройки
                 # нельзя.
                 ydl.add_post_processor(TranscodePP(ydl, encoder=encoder))
+            if embed:
+                # Метаданные и обложка вшиваются стадией after_move - ПОСЛЕ
+                # перекодировки: встроенный в исходник HEVC-перекодчик взял
+                # бы только видеопоток и обложку потерял. Порядок важен:
+                # метаданные первыми (их remux не должен тронуть обложку),
+                # встраивание обложки - последним.
+                ydl.add_post_processor(FFmpegMetadataPP(ydl), when="after_move")
+                # already_have_thumbnail=False: после успеха PP сам удаляет
+                # файл обложки - в папке остаётся один mp4.
+                ydl.add_post_processor(EmbedThumbnailPP(ydl), when="after_move")
             info = ydl.extract_info(url, download=True)
     except DownloadCancelled:
         return {"cancelled": True, "files": [], "info": {}, "error": None}
@@ -469,16 +516,32 @@ def _download(video: dict, settings: dict, *, stop: threading.Event,
         except OSError:
             digest = None
 
-    # Sidecar рядом с видео: полные метаданные + хеш файла.
-    if video_files and settings.get("keep_sidecar", True):
+    # Метаданные рядом с видео: в режиме embed - одна запись в агрегат
+    # папки, в режиме files - как раньше, пофайловый post.json. digest
+    # здесь уже финальный: обложка (если встраивалась) вшита до этого.
+    if video_files:
         main = Path(video_files[0])
-        # "video.mp4" -> "video.post.json" (тот же конвейер у сканера).
-        sidecar = main.with_suffix(SIDECAR_SUFFIX)
-        try:
-            sidecar.write_text(build_sidecar(info, main, digest), encoding="utf-8")
-            files.append((str(sidecar), "sidecar"))
-        except OSError:
-            pass  # диск забит/нет прав: библиотека и без сайдкара работает
+        if embed_mode(settings):
+            try:
+                aggregate.write_record(
+                    main.parent, str(info.get("id") or ""),
+                    aggregate.build_record(info, main, digest))
+                # Сайдкар от прежнего режима остался бы врать (старый хеш
+                # не про этот файл) - убираем только после успеха записи.
+                stale = main.with_suffix(SIDECAR_SUFFIX)
+                if stale.exists():
+                    stale.unlink()
+            except OSError:
+                pass  # диск забит/нет прав: библиотека и без агрегата работает
+        elif settings.get("keep_sidecar", True):
+            # "video.mp4" -> "video.post.json" (тот же конвейер у сканера).
+            sidecar = main.with_suffix(SIDECAR_SUFFIX)
+            try:
+                sidecar.write_text(build_sidecar(info, main, digest),
+                                   encoding="utf-8")
+                files.append((str(sidecar), "sidecar"))
+            except OSError:
+                pass  # диск забит/нет прав: библиотека и без сайдкара работает
 
     return {"cancelled": False, "files": files, "info": info, "error": None,
             "hash": digest}
