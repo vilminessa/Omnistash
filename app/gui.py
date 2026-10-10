@@ -19,10 +19,12 @@ import sys
 import threading
 import time
 import traceback
+from pathlib import Path
 
 from . import __version__, indexer, migrate as migrate_mod, repo, settings
 from . import downloader as downloader_mod
 from . import ffmpeg_installer as ffmpeg_mod
+from . import google_auth
 from . import repack as repack_mod
 from . import schedule as schedule_mod
 from . import settings_schema, sources
@@ -31,7 +33,7 @@ from . import verify as verify_mod
 from .db import SYNC_MODES, Database
 from .paths import log_path
 from .queue import DownloadWorker
-from .util import human_size
+from .util import human_size, now_iso
 
 MAX_LOG = 2000          # строк в кольцевом буфере памяти
 MAX_LOG_BYTES = 1_000_000   # ротация файла журнала: больше - обрезаем
@@ -139,6 +141,10 @@ class Api:
                               "error": None}
         self._ffmpeg_stop = threading.Event()
         self._ffmpeg_thread: threading.Thread | None = None
+        # Аккаунт Google: окно входа живёт отдельно от главного.
+        self._login_window = None
+        self._login_cancel = threading.Event()
+        self._account_note = ""
         # Качалка: очередь живёт в таблице videos, воркер - фоновый поток.
         self.dl = DownloadWorker(self.db, self._current_settings, log=self._log)
         settings.reload_if_changed(self._settings_cache)
@@ -344,6 +350,11 @@ class Api:
         # настройка «Перекодировка» гасит недоступные варианты честно.
         ffmpeg_state["encoders"] = (downloader_mod.available_transcoders(ff_path)
                                     if ff_path else [])
+        # Аккаунт Google: только факты, никаких секретов (см. google_auth).
+        account_state = google_auth.account_state(self._current_settings())
+        with self._lock:
+            account_state["note"] = self._account_note
+            account_state["logging_in"] = self._login_window is not None
         config = settings.as_public(self._current_settings())
         heavy = self._heavy_snapshot()
         return {
@@ -360,6 +371,7 @@ class Api:
             "schedule": schedule_state,
             "verify": verify_state,
             "ffmpeg": ffmpeg_state,
+            "account": account_state,
             "settings": config,
             "settings_rev": rev,
             **heavy,
@@ -1678,6 +1690,176 @@ class Api:
             self._log(f"ffmpeg готов: {path}")
 
     # ------------------------------------------------------------------ #
+    #  Аккаунт Google: куки для загрузки (см. google_auth)
+    # ------------------------------------------------------------------ #
+
+    LOGIN_TIMEOUT = 15 * 60     # секунд жизни окна входа
+
+    # Опознаватели сессии Google: без них снимок «вошли» не считаем -
+    # страница выдаёт куки и до входа (рекламные, визитёрские).
+    _LOGIN_MARKERS = ("SID", "HSID", "SSID", "SAPISID", "LOGIN_INFO",
+                      "__Secure-1PSID", "__Secure-3PSID")
+
+    def account_login_start(self, request=None) -> dict:
+        """Открыть окно входа в Google; куки снимаем сами.
+
+        Окно живёт само: как только площадка выдаст сессию (аккаунтские
+        куки на google/youtube), куки шифруются и сохраняются, окно
+        закрывается. Пользователю достаточно войти.
+        """
+        with self._lock:
+            if self._login_window is not None:
+                return {"error": "Окно входа уже открыто"}
+        try:
+            import webview
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"pywebview недоступен: {exc}"}
+        try:
+            window = webview.create_window(
+                "Войдите в Google - Omnistash",
+                "https://www.youtube.com/signin",
+                width=540, height=780, min_size=(480, 620))
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"Не удалось открыть окно: {exc}"}
+        if window is None:
+            return {"error": "Окно не создалось - повторите"}
+        self._login_cancel.clear()
+        with self._lock:
+            self._login_window = window
+            self._account_note = "Идёт вход: войдите в аккаунт в открытом окне"
+        thread = threading.Thread(target=self._login_worker, args=(window,),
+                                  daemon=True, name="omnistash-glogin")
+        self._login_thread = thread
+        thread.start()
+        self._log("Окно входа открыто: куки снимутся автоматически, "
+                  "окно закроется само")
+        return {"ok": True}
+
+    def account_login_stop(self) -> dict:
+        """Закрыть окно входа вручную (куки в этот момент не сняты)."""
+        with self._lock:
+            window = self._login_window
+        if not window:
+            return {"ok": False}
+        self._login_cancel.set()
+        try:
+            window.destroy()
+        except Exception:  # noqa: BLE001 - окно могло закрыться само
+            pass
+        return {"ok": True}
+
+    def _guess_account_label(self, window) -> str:
+        """Email со страницы входа - если страница его показывает."""
+        try:
+            found = window.evaluate_js(
+                "(() => { const m = document.body.innerText.match("
+                "/[\\w.+-]+@[\\w.-]+\\.[A-Za-z]{2,}/); "
+                "return m ? m[0] : ''; })()")
+            return str(found or "").strip()[:120]
+        except Exception:  # noqa: BLE001 - без email тоже проживём
+            return ""
+
+    def _login_worker(self, window) -> None:
+        """Опрос окна до поимки сессии; дальше - шифрование и сохранение."""
+        deadline = time.time() + self.LOGIN_TIMEOUT
+        picked: list = []
+        label = ""
+        try:
+            while time.time() < deadline:
+                if self._login_cancel.is_set():
+                    break
+                try:
+                    cookies = window.get_cookies() or []
+                except Exception:  # noqa: BLE001 - окно могли закрыть
+                    cookies = []
+                google = [c for c in cookies
+                          if google_auth.is_google_cookie(c)]
+                if (len(google) >= 3 and
+                        any(c.name in self._LOGIN_MARKERS for c in google)):
+                    picked = google
+                    # Окно ещё живо - вытаскиваем email для подписи статуса.
+                    label = self._guess_account_label(window)
+                    break
+                time.sleep(2)
+        finally:
+            try:
+                window.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+        with self._lock:
+            self._login_window = None
+        if not picked:
+            with self._lock:
+                self._account_note = ("Вход не завершён - куки не получены "
+                                      "(закрыли окно или площадка не пустила)")
+            self._log("Вход в Google: куки не получены")
+            return
+        try:
+            count = google_auth.save_cookies(picked)
+        except (OSError, RuntimeError) as exc:
+            with self._lock:
+                self._account_note = f"Не удалось сохранить куки: {exc}"
+            self._log(f"Вход в Google: куки не сохранены - {exc}")
+            return
+        settings.set_value("google_account_label",
+                           label or "вход выполнен (куки)")
+        settings.set_value("google_account_since", now_iso())
+        with self._lock:
+            self._account_note = f"Аккаунт сохранён ({count} кук)"
+            self._heavy_at = 0.0
+        self._log(f"Аккаунт Google: куки сохранены ({count} шт)")
+
+    def account_import(self, request=None) -> dict:
+        """Импорт cookies.txt (Netscape) через системный диалог файла."""
+        try:
+            import webview
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"pywebview недоступен: {exc}"}
+        win = self._window
+        if win is None:
+            win = webview.windows[0] if webview.windows else None
+        if win is None:
+            return {"error": "Окно ещё не готово - повторите через секунду"}
+        try:
+            dialog_type = getattr(webview, "FileDialog", None)
+            kind = (dialog_type.OPEN if dialog_type is not None
+                    else getattr(webview, "OPEN_DIALOG", 0))
+            chosen = win.create_file_dialog(
+                kind, allow_multiple=False,
+                file_types=("Файлы кук (*.txt)", "*.txt"))
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"Диалог не открылся: {exc}"}
+        if not chosen:
+            return {"cancelled": True}
+        path = chosen[0] if isinstance(chosen, (list, tuple)) else chosen
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+            count = google_auth.save_text_cookies(text)
+        except (OSError, RuntimeError, ValueError) as exc:
+            with self._lock:
+                self._account_note = f"Импорт не удался: {exc}"
+            self._log(f"Импорт cookies.txt: {exc}")
+            return {"error": str(exc)}
+        settings.set_value("google_account_label", "импорт cookies.txt")
+        settings.set_value("google_account_since", now_iso())
+        with self._lock:
+            self._account_note = f"Импортировано кук: {count}"
+        self._log(f"Аккаунт Google: импортировано {count} кук из файла")
+        return {"ok": True, "count": count}
+
+    def account_forget(self, request=None) -> dict:
+        """«Забыть аккаунт»: удалить зашифрованные копии и метки."""
+        removed = google_auth.forget().get("removed") or []
+        settings.set_value("google_account_label", "")
+        settings.set_value("google_account_since", "")
+        with self._lock:
+            self._account_note = ("Аккаунт забыт" if removed
+                                  else "Аккаунт и так не был задан")
+        self._log("Аккаунт Google забыт" + (f" (удалено: {', '.join(removed)})"
+                                            if removed else ""))
+        return {"ok": True, "removed": removed}
+
+    # ------------------------------------------------------------------ #
     #  Расписание
     # ------------------------------------------------------------------ #
 
@@ -1894,6 +2076,14 @@ class Api:
         self._repack_stop.set()
         self._verify_stop.set()
         self._ffmpeg_stop.set()
+        self._login_cancel.set()
+        with self._lock:
+            login_window = self._login_window
+        if login_window is not None:
+            try:
+                login_window.destroy()
+            except Exception:  # noqa: BLE001 - окно могло закрыться само
+                pass
         self.dl.stop()
         self.sched.stop()
         for thread in (self._scan_thread, self._add_thread, self._sync_thread,

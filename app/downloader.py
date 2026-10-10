@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
@@ -26,6 +27,7 @@ import yt_dlp
 from yt_dlp.postprocessor.ffmpeg import (FFmpegPostProcessor,
                                          FFmpegPostProcessorError)
 
+from . import google_auth
 from .indexer import SIDECAR_SUFFIX, build_sidecar, file_hash
 from .paths import base_dir
 
@@ -371,6 +373,27 @@ def _paths_after_download(info: dict) -> list[tuple[str, str]]:
     return unique
 
 
+@contextlib.contextmanager
+def _account_cookies(settings: dict):
+    """Куки аккаунта Google на время одной загрузки.
+
+    Расшифровываем копию во временный файл, отдаём качалке, убираем сразу
+    после: сессия на диске живёт ровно столько, сколько идёт загрузка.
+    Если копия не расшифровалась (чужая учётка/повреждение) - качаем без
+    аккаунта, а площадка сама скажет, если без входа не обойтись.
+    """
+    path = None
+    if settings.get("use_google_cookies", True):
+        try:
+            path = google_auth.temporary_cookiefile()
+        except OSError:
+            path = None
+    try:
+        yield path
+    finally:
+        google_auth.release_temp(path)
+
+
 def download(video: dict, settings: dict, *, stop: threading.Event,
              on_progress=None, dest: str | None = None,
              overwrite: bool = False) -> dict:
@@ -382,10 +405,21 @@ def download(video: dict, settings: dict, *, stop: threading.Event,
     остаётся fallback в settings.dest_dir;
     overwrite=True - перезаписать существующий файл: так качается файл,
     который проверка целостности признала битым (иначе yt-dlp счёл бы его
-    уже скачанным и пропустил).
+    уже скачанным и пропустил);
+    аккаунт Google (если сохранён и включён) передаётся качалке как
+    cookiefile - на время одной загрузки, см. _account_cookies.
     возвращает {"cancelled": bool, "files": [(путь, kind)], "info": {...},
     "error": str|None}. Ничего в БД не пишет - это делает очередь.
     """
+    with _account_cookies(settings) as cookiefile:
+        return _download(video, settings, stop=stop, on_progress=on_progress,
+                         dest=dest, overwrite=overwrite,
+                         cookiefile=cookiefile)
+
+
+def _download(video: dict, settings: dict, *, stop: threading.Event,
+              on_progress=None, dest: str | None = None,
+              overwrite: bool = False, cookiefile: "Path | None" = None) -> dict:
     dest_dir = Path(dest or settings.get("dest_dir") or ".").expanduser()
     dest_dir.mkdir(parents=True, exist_ok=True)
     url = video.get("webpage_url") or (
@@ -393,6 +427,8 @@ def download(video: dict, settings: dict, *, stop: threading.Event,
 
     opts = build_opts(settings, dest_dir, stop=stop, on_progress=on_progress,
                       overwrite=overwrite)
+    if cookiefile:
+        opts["cookiefile"] = str(cookiefile)
     encoder = str(settings.get("transcode") or "none")
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:

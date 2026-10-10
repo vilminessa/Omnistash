@@ -26,7 +26,10 @@ class DownloadWorker:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._state = {"running": False, "done": 0, "failed": 0,
-                       "attempted": 0, "current": None, "error": None}
+                       "attempted": 0, "current": None, "error": None,
+                       # Площадка просила вход («подтвердите, что не бот»):
+                       # окно подскажет настроить аккаунт.
+                       "bot_hint": False}
         # Раз за сессию предупреждаем, что без ffmpeg идёт тихая деградация.
         self._ffmpeg_warned = False
 
@@ -207,6 +210,10 @@ class DownloadWorker:
             repo.set_last_error(conn, row["id"], result["error"])
             with self._lock:
                 self._state["failed"] += 1
+                if "требует вход" in str(result["error"]):
+                    # Площандка просит сессию браузера - подсказываем про
+                    # аккаунт (гаснет, как только куки появятся).
+                    self._state["bot_hint"] = True
             self._log(f"Ошибка: {row['title'] or row['key']} - {result['error']}")
             return
 

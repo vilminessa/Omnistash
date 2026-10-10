@@ -58,3 +58,17 @@ def db_path() -> Path:
 def log_path() -> Path:
     """Журнал приложения (плюс stdout в консоль при отладке)."""
     return profile_dir() / "omnistash.log"
+
+
+def google_cookies_path() -> Path:
+    """Зашифрованная (DPAPI) копия кук аккаунта Google.
+
+    Сам файл - не секрет (без ключа пользователя он мусор), но и его
+    держим в профиле: «Забыть аккаунт» просто удаляет файлы.
+    """
+    return profile_dir() / "google_cookies.bin"
+
+
+def google_tokens_path() -> Path:
+    """Зашифрованный (DPAPI) refresh-токен OAuth (G1b)."""
+    return profile_dir() / "google_tokens.bin"

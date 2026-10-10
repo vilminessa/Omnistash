@@ -49,7 +49,9 @@
     ffmpeg: null,           // установка ffmpeg из poll (найден/качается/ошибка)
     ffmpegNoteDismissed: false, // «Скрыть» у заметки в очереди (до конца сессии)
     viewMode: "list",       // «list»/«grid» - из настройки view_mode
-    tileSize: "medium"      // «small»/«medium»/«large» - из tile_size
+    tileSize: "medium",     // «small»/«medium»/«large» - из tile_size
+    account: null,          // состояние аккаунта Google из poll (без секретов)
+    botNoteDismissed: false // «Скрыть» у подсказки про аккаунт
   };
   state.selected = new Set();
   state.dedupeResolved = new Set();
@@ -182,7 +184,10 @@
     if (changed("sources", snap.sources)) renderSources(snap.sources);
     if (changed("runs", snap.runs)) renderRuns(snap.runs);
     if (changed("queue", snap.queue)) renderQueue(snap.queue);
-    if (changed("dl", snap.dl)) renderDl(snap.dl);
+    if (changed("dl", snap.dl)) {
+      renderDl(snap.dl);
+      updateBotNote();
+    }
     if (changed("sync", snap.sync)) renderSync(snap.sync);
     if (changed("add", snap.add_flow)) renderAddFlow(snap.add_flow);
     if (changed("migrate", snap.migrate)) {
@@ -198,6 +203,11 @@
     if (changed("ffmpeg", snap.ffmpeg)) {
       state.ffmpeg = snap.ffmpeg;
       renderFfmpegState();
+    }
+    if (changed("account", snap.account)) {
+      state.account = snap.account;
+      renderAccountState();
+      updateBotNote();
     }
     appendLogs(snap.logs);
 
@@ -547,6 +557,93 @@
         "Скачать FFmpeg</button></div>";
     }
     $("ffmpeg-body").innerHTML = head + progress + actions;
+  }
+
+  /* ------------------------------------------------------------------ *
+   *  Аккаунт Google: куки для загрузки (см. app/google_auth)
+   * ------------------------------------------------------------------ */
+
+  function renderAccountState() {
+    var acc = state.account || {};
+    var span = document.querySelector("#settings-body [data-account-state]");
+    if (span) {
+      span.textContent = acc.logging_in
+        ? "идёт вход в открытом окне…"
+        : (acc.has_cookies
+          ? ("куки сохранены" + (acc.label ? ": " + acc.label : "") +
+             (acc.since ? " · " + shortTime(acc.since) : ""))
+          : (acc.note || "аккаунт не задан"));
+    }
+    Array.prototype.forEach.call(
+      document.querySelectorAll('#settings-body [data-act-account="login"]'),
+      function (btn) { btn.disabled = !!acc.logging_in; });
+  }
+
+  function updateBotNote() {
+    // Подсказка видна, когда площадка реально просила вход, а кук ещё нет.
+    var acc = state.account || {};
+    var dl = state.dl || {};
+    var note = $("bot-note");
+    if (note) {
+      note.hidden = !dl.bot_hint || !!acc.has_cookies ||
+        state.botNoteDismissed;
+    }
+  }
+
+  function openAccountOverlay() {
+    $("account-overlay").hidden = false;
+    renderAccountOverlayBody();
+  }
+
+  function renderAccountOverlayBody() {
+    var acc = state.account || {};
+    $("account-body").innerHTML =
+      "<p>Чтобы качать возрастной контент и не получать «подтвердите, что вы " +
+      "не бот», качалке нужны куки вашей сессии YouTube.</p>" +
+      '<p class="muted">Как это работает: откроется отдельное окно на ' +
+      "странице входа YouTube - войдите там. Когда площадка выдаст сессию, " +
+      "куки снимутся <b>сами</b>, окно закроется, а копия сохранится " +
+      "<b>зашифрованной</b> (DPAPI - привязка к вашей Windows-учётке, на " +
+      "другой машине файл бесполезен). Мы ничего не отправляем наружу: и " +
+      "запросы, и хранение - только на этом компьютере. Войдя, вы " +
+      "соглашаетесь с правилами площадки; аккаунт можно забыть в любой " +
+      "момент.</p>" +
+      '<p class="muted">Если Google откажет во входе из окна - другой путь: ' +
+      "экспортируйте куки из своего браузера расширением (cookies.txt) и " +
+      "воспользуйтесь импортом.</p>" +
+      (acc.has_cookies
+        ? '<div class="notice ok">Аккаунт уже сохранён' +
+          (acc.label ? ": " + esc(acc.label) : "") + "</div>"
+        : "") +
+      '<div class="card-actions">' +
+      '<button class="btn" data-account-act="import">' +
+      "Импортировать cookies.txt…</button>" +
+      '<button class="btn" data-account-act="close">Отмена</button>' +
+      '<button class="btn primary" data-account-act="login">' +
+      "Открыть окно входа</button></div>";
+  }
+
+  function importCookies() {
+    call("account_import").then(function (res) {
+      if (!res) return;
+      if (res.error) { toast(res.error, true); return; }
+      if (res.cancelled) return;
+      toast("Импортировано кук: " + (res.count || 0));
+    });
+  }
+
+  function forgetAccount() {
+    call("account_forget").then(function (res) {
+      toast(res && res.removed && res.removed.length
+        ? "Аккаунт забыт" : "Аккаунт и так не был задан");
+    });
+  }
+
+  function startAccountLogin() {
+    call("account_login_start").then(function (res) {
+      if (res && res.error) { toast(res.error, true); return; }
+      toast("Окно входа открыто - войдите в аккаунт, окно закроется само");
+    });
   }
 
   /* ------------------------------------------------------------------ *
@@ -1847,6 +1944,7 @@
 
   function renderDl(dl) {
     if (!dl) return;
+    state.dl = dl;   // снимок нужен подсказке про аккаунт (bot_hint)
     // Кнопки отражают состояние воркера: пока идёт - можно только стоп.
     $("queue-start-btn").hidden = !!dl.running;
     $("queue-stop-btn").hidden = !dl.running;
@@ -1893,8 +1991,10 @@
         bySection[name].map(fieldHtml).join("") + "</div>";
     }).join("");
     bindSettings();
-    // Строка ffmpeg жива: её текст зависит от снимка, а не от схемы.
+    // Строки живут вне схемы: после перерисовки тела подтягиваем их
+    // состояние заново (ffmpeg-строка и аккаунт Google).
     renderFfmpegState();
+    renderAccountState();
   }
 
   function fieldHtml(field) {
@@ -1933,6 +2033,16 @@
         esc(field.action || "") + '">' +
         esc(field.action_label || "Выполнить") + "</button>" +
         '<span class="muted" data-ffmpeg-state></span>';
+    } else if (field.type === "account") {
+      // Виджет аккаунта: живое состояние + три действия. Статус тянет
+      // renderAccountState, секретов в нём нет по построению.
+      control = '<span class="muted" data-account-state></span>' +
+        '<button class="btn ghost" data-act-account="login">' +
+        "Войти в окне…</button>" +
+        '<button class="btn ghost" data-act-account="import">' +
+        "Импортировать cookies.txt…</button>" +
+        '<button class="btn ghost" data-act-account="forget">' +
+        "Забыть аккаунт</button>";
     } else if (field.type === "storages") {
       control = storagesHtml();
     } else {
@@ -2017,6 +2127,18 @@
       document.querySelectorAll("#settings-body [data-action]"), function (btn) {
         btn.addEventListener("click", function () {
           if (btn.dataset.action === "ffmpeg-install") openFfmpegOverlay();
+        });
+      });
+
+    // Виджет аккаунта Google: вход/импорт/забыть.
+    Array.prototype.forEach.call(
+      document.querySelectorAll("#settings-body [data-act-account]"),
+      function (btn) {
+        btn.addEventListener("click", function () {
+          var act = btn.dataset.actAccount;
+          if (act === "login") openAccountOverlay();
+          else if (act === "import") importCookies();
+          else if (act === "forget") forgetAccount();
         });
       });
 
@@ -2719,6 +2841,30 @@
       $("ffmpeg-note").hidden = true;
     });
 
+    // Аккаунт Google: оверлей входа и подсказка в очереди.
+    $("account-close").addEventListener("click", function () {
+      $("account-overlay").hidden = true;
+    });
+    $("account-body").addEventListener("click", function (event) {
+      var btn = event.target && event.target.closest
+        ? event.target.closest("[data-account-act]") : null;
+      if (!btn) return;
+      var action = btn.dataset.accountAct;
+      if (action === "close") { $("account-overlay").hidden = true; return; }
+      if (action === "import") { importCookies(); return; }
+      if (action === "login") {
+        $("account-overlay").hidden = true;
+        startAccountLogin();
+      }
+    });
+    $("bot-note-btn").addEventListener("click", function () {
+      switchTab("settings");
+    });
+    $("bot-note-close").addEventListener("click", function () {
+      state.botNoteDismissed = true;
+      $("bot-note").hidden = true;
+    });
+
     $("queue-start-btn").addEventListener("click", function () {
       call("queue_start").then(function (res) {
         if (res && res.error) toast(res.error, true);
@@ -2838,6 +2984,7 @@
       output_template: "%(channel)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s",
       quality: "high", subtitles: "none", transcode: "none",
       view_mode: "list", tile_size: "medium",
+      use_google_cookies: true,
       delay_ms: 500, retries: 3, resume_queue: true,
       scan_interval_min: 0, sync_interval_min: 30,
       theme: "dark", app_version: ""
@@ -2859,6 +3006,9 @@
                     fetch: null, plan: null, stages: [], result: null,
                     error: null };
     var mockAddTimer = null;
+    // Симуляция аккаунта Google: вход «сам снимает куки» через секунды.
+    var mockAccount = { has_cookies: false, use_cookies: true, label: "",
+                        since: "", note: "", logging_in: false };
     function mockStorageLabel(id) {
       var hit = mockStorages.filter(function (s) { return s.id === id; })[0];
       return hit ? hit.label : null;
@@ -2985,6 +3135,15 @@
         choices: [["small", "Мелкая"], ["medium", "Средняя"],
                   ["large", "Крупная"]],
         default: "medium" },
+      { key: "use_google_cookies", type: "bool", section: "Аккаунт Google",
+        label: "Использовать аккаунт при загрузках",
+        hint: "Куки аккаунта уходят в качалку: возрастной контент и «подтвердите, " +
+              "что вы не бот». Копия хранится зашифрованной (DPAPI).",
+        default: true },
+      { key: "_google_account", type: "account", section: "Аккаунт Google",
+        label: "Вход в Google",
+        hint: "Вход в окне приложения (куки снимаются сами) или импорт cookies.txt.",
+        transient: true, default: [] },
       { key: "theme", type: "choice", section: "Внешний вид", label: "Тема",
         choices: [["dark", "Тёмная"], ["light", "Светлая"]], default: "dark" }
     ];
@@ -3038,7 +3197,9 @@
             }
             return { running: mockDl.running, done: mockDl.done,
                      failed: mockDl.failed, attempted: mockDl.attempted,
-                     current: mockDl.current, error: null };
+                     current: mockDl.current, error: null,
+                     // площадка просила вход - подсказка видна в превью
+                     bot_hint: true };
           })(),
           sync: (function () {
             if (mockSync.running) {
@@ -3064,6 +3225,7 @@
           })(),
           verify: JSON.parse(JSON.stringify(mockVerify)),
           ffmpeg: JSON.parse(JSON.stringify(mockFfmpeg)),
+          account: JSON.parse(JSON.stringify(mockAccount)),
           schedule: { scan: { interval: 0, next_in: null, last: null },
                       sync: { interval: 30, next_in: 720,
                               last: "2026-10-07T15:04:00" } },
@@ -3108,6 +3270,35 @@
         // ветка смены настроек в превью перестанет срабатывать.
         return Promise.resolve({ settings: settings,
                                  settings_rev: ++settingsRev });
+      },
+      account_login_start: function () {
+        mockAccount.logging_in = true;
+        mockAccount.note = "";
+        setTimeout(function () {
+          // «Авто-поимка»: площадка выдала сессию - куки сохранены.
+          mockAccount.logging_in = false;
+          mockAccount.has_cookies = true;
+          mockAccount.label = "превью@example.com";
+          mockAccount.since = "2026-10-10T12:00:00";
+        }, 1800);
+        return Promise.resolve({ ok: true });
+      },
+      account_login_stop: function () {
+        mockAccount.logging_in = false;
+        return Promise.resolve({ ok: true });
+      },
+      account_import: function () {
+        mockAccount.has_cookies = true;
+        mockAccount.label = "импорт cookies.txt";
+        mockAccount.since = "2026-10-10T12:00:00";
+        return Promise.resolve({ ok: true, count: 17 });
+      },
+      account_forget: function () {
+        var removed = mockAccount.has_cookies ? ["google_cookies.bin"] : [];
+        mockAccount.has_cookies = false;
+        mockAccount.label = "";
+        mockAccount.since = "";
+        return Promise.resolve({ ok: true, removed: removed });
       },
       ffmpeg_start: function () {
         if (mockFfmpeg.found) {

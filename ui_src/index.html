@@ -208,6 +208,16 @@
       <button class="btn ghost" id="ffmpeg-note-close">Скрыть</button>
     </div>
 
+    <!-- Площадка просила вход («подтвердите, что не бот») - подсказываем
+         настроить аккаунт; гаснет, как только куки появятся. -->
+    <div class="notice warn" id="bot-note" hidden>
+      <span>Площадка просила войти в аккаунт («подтвердите, что вы не бот»)
+        - настройте аккаунт Google.</span>
+      <span class="spacer"></span>
+      <button class="btn ghost" id="bot-note-btn">Настроить аккаунт</button>
+      <button class="btn ghost" id="bot-note-close">Скрыть</button>
+    </div>
+
     <div class="dl-bar" id="dl-bar" hidden>
       <div class="dl-meta">
         <b id="dl-title">—</b>
@@ -320,6 +330,17 @@
       <button class="icon-btn" id="ffmpeg-close" aria-label="Закрыть">✕</button>
     </div>
     <div class="card-body" id="ffmpeg-body"></div>
+  </div>
+</div>
+
+<!-- Вход в Google: куки снимаются сами, копия шифруется (DPAPI) -->
+<div class="overlay" id="account-overlay" hidden>
+  <div class="card" role="dialog" aria-modal="true">
+    <div class="card-head">
+      <div class="card-title">Вход в Google</div>
+      <button class="icon-btn" id="account-close" aria-label="Закрыть">✕</button>
+    </div>
+    <div class="card-body" id="account-body"></div>
   </div>
 </div>
 

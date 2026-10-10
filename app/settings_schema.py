@@ -164,6 +164,49 @@ FIELDS: tuple[dict, ...] = (
         "transient": True,
         "default": [],
     },
+    # ---- аккаунт Google ----
+    {
+        "key": "use_google_cookies",
+        "type": "bool",
+        "section": "Аккаунт Google",
+        "label": "Использовать аккаунт при загрузках",
+        "hint": "Куки аккаунта уходят в качалку: возрастной контент и "
+                "«подтвердите, что вы не бот». Копия хранится "
+                "зашифрованной (DPAPI - привязка к вашей учётке Windows).",
+        "default": True,
+    },
+    {
+        "key": "_google_account",
+        "type": "account",
+        "section": "Аккаунт Google",
+        "label": "Вход в Google",
+        "hint": "Вход в окне приложения (куки снимаются сами) или импорт "
+                "cookies.txt из браузерного расширения. Куки вашего браузера "
+                "напрямую мы читать не будем.",
+        # transient: виджет состояния, а не настройка.
+        "transient": True,
+        "default": [],
+    },
+    # Метки аккаунта (email/способ входа и дата) - не секреты, но живут в
+    # схеме как скрытые поля: set_value молча отбрасывает неизвестные ключи.
+    {
+        "key": "google_account_label",
+        "type": "str",
+        "section": "",
+        "label": "",
+        "hint": "Подпись аккаунта в статусе.",
+        "hidden": True,
+        "default": "",
+    },
+    {
+        "key": "google_account_since",
+        "type": "str",
+        "section": "",
+        "label": "",
+        "hint": "Когда куки были сохранены (ISO).",
+        "hidden": True,
+        "default": "",
+    },
     {
         "key": "delay_ms",
         "type": "int",
