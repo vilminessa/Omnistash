@@ -565,14 +565,25 @@
 
   function renderAccountState() {
     var acc = state.account || {};
-    var span = document.querySelector("#settings-body [data-account-state]");
-    if (span) {
-      span.textContent = acc.logging_in
-        ? "идёт вход в открытом окне…"
-        : (acc.has_cookies
-          ? ("куки сохранены" + (acc.label ? ": " + acc.label : "") +
-             (acc.since ? " · " + shortTime(acc.since) : ""))
-          : (acc.note || "аккаунт не задан"));
+    var box = document.querySelector("#settings-body [data-account-list]");
+    if (box) {
+      var accounts = acc.accounts || [];
+      var rows = accounts.map(function (item) {
+        return '<div class="account-row">' +
+          '<span class="muted">' + esc(item.label || item.id) + "</span>" +
+          '<span class="muted">· ' + esc(shortTime(item.since)) + "</span>" +
+          '<span class="spacer"></span>' +
+          '<button class="link-btn" data-account-forget="' +
+            esc(item.id) + '">забыть</button></div>';
+      }).join("");
+      if (acc.logging_in) {
+        rows += '<div class="muted">Идёт вход в открытом окне…</div>';
+      }
+      if (acc.note) {
+        rows += '<div class="muted">' + esc(acc.note) + "</div>";
+      }
+      box.innerHTML = rows || '<div class="muted">Аккаунтов нет: куки ' +
+        "применяются только у источников, к которым аккаунт привязан.</div>";
     }
     Array.prototype.forEach.call(
       document.querySelectorAll('#settings-body [data-act-account="login"]'),
@@ -580,12 +591,13 @@
   }
 
   function updateBotNote() {
-    // Подсказка видна, когда площадка реально просила вход, а кук ещё нет.
+    // Подсказка видна, когда площадка просила вход, а аккаунтов нет вовсе:
+    // с привязкой разбираются в диалоге добавления источника.
     var acc = state.account || {};
     var dl = state.dl || {};
     var note = $("bot-note");
     if (note) {
-      note.hidden = !dl.bot_hint || !!acc.has_cookies ||
+      note.hidden = !dl.bot_hint || !!(acc.accounts || []).length ||
         state.botNoteDismissed;
     }
   }
@@ -611,11 +623,10 @@
       '<p class="muted">Если Google откажет во входе из окна - другой путь: ' +
       "экспортируйте куки из своего браузера расширением (cookies.txt) и " +
       "воспользуйтесь импортом.</p>" +
-      (acc.has_cookies
-        ? '<div class="notice ok">Аккаунт уже сохранён' +
-          (acc.label ? ": " + esc(acc.label) : "") + "</div>"
-        : "") +
+      '<div data-account-facts></div>' +
       '<div class="card-actions">' +
+      '<button class="btn ghost" data-account-act="facts">' +
+      "Проверить, что видит программа</button>" +
       '<button class="btn" data-account-act="import">' +
       "Импортировать cookies.txt…</button>" +
       '<button class="btn" data-account-act="close">Отмена</button>' +
@@ -628,14 +639,7 @@
       if (!res) return;
       if (res.error) { toast(res.error, true); return; }
       if (res.cancelled) return;
-      toast("Импортировано кук: " + (res.count || 0));
-    });
-  }
-
-  function forgetAccount() {
-    call("account_forget").then(function (res) {
-      toast(res && res.removed && res.removed.length
-        ? "Аккаунт забыт" : "Аккаунт и так не был задан");
+      toast("Аккаунт добавлен из файла");
     });
   }
 
@@ -643,6 +647,27 @@
     call("account_login_start").then(function (res) {
       if (res && res.error) { toast(res.error, true); return; }
       toast("Окно входа открыто - войдите в аккаунт, окно закроется само");
+    });
+  }
+
+  function checkAccountVisible() {
+    // Диагностика поимки: что окно входа видит сейчас (без значений кук).
+    call("account_visible").then(function (res) {
+      var box = document.querySelector("#account-body [data-account-facts]");
+      if (!box) return;
+      if (res && res.error) {
+        box.innerHTML = '<div class="notice err">' + esc(res.error) + "</div>";
+        return;
+      }
+      box.innerHTML = '<div class="notice">Окно видит кук: <b>' +
+        (res.total || 0) + "</b> (Google/YouTube: " + (res.google || 0) +
+        "), аккаунтских (SID и пр.): <b>" + (res.markers || 0) + "</b>.<br>" +
+        '<span class="muted">Домены: ' +
+        esc((res.domains || []).join(", ") || "нет") + "</span></div>" +
+        ((res.markers || 0) === 0 && (res.total || 0) > 0
+          ? '<div class="notice warn">Куки есть, но аккаунтских нет - ' +
+            "скорее всего вы ещё не вошли на этой странице.</div>"
+          : "");
     });
   }
 
@@ -1810,8 +1835,12 @@
         "<td>" + esc(src.title || src.remote_id) + "</td>" +
         "<td>" + esc(src.kind_label) + "</td>" +
         "<td>" + modeLabel(src.sync_mode) + "</td>" +
-        // Назначение источника: куда уйдут «Полная» и будущие синки.
-        '<td class="muted">' + esc(src.storage_label || "по умолчанию") + "</td>" +
+        // Назначение источника: куда уйдут «Полная» и будущие синки; аккаунт -
+        // чьи куки уходят в синк/загрузку этого источника.
+        '<td class="muted">' + esc(src.storage_label || "по умолчанию") +
+        (src.account_label
+          ? '<div class="muted">аккаунт: ' + esc(src.account_label) + "</div>"
+          : "") + "</td>" +
         '<td class="num">' + (src.total || 0) + "</td>" +
         '<td class="num">' + (src.downloaded || 0) + "</td>" +
         '<td class="num">' + (src.pending || 0) + "</td>" +
@@ -2034,15 +2063,13 @@
         esc(field.action_label || "Выполнить") + "</button>" +
         '<span class="muted" data-ffmpeg-state></span>';
     } else if (field.type === "account") {
-      // Виджет аккаунта: живое состояние + три действия. Статус тянет
-      // renderAccountState, секретов в нём нет по построению.
-      control = '<span class="muted" data-account-state></span>' +
+      // Виджет аккаунтов: живой список (метка/дата/удаление) + добавление.
+      // Куки применяются там, где аккаунт привязан к источнику.
+      control = '<div class="account-list" data-account-list></div>' +
         '<button class="btn ghost" data-act-account="login">' +
         "Войти в окне…</button>" +
         '<button class="btn ghost" data-act-account="import">' +
-        "Импортировать cookies.txt…</button>" +
-        '<button class="btn ghost" data-act-account="forget">' +
-        "Забыть аккаунт</button>";
+        "Импортировать cookies.txt…</button>";
     } else if (field.type === "storages") {
       control = storagesHtml();
     } else {
@@ -2130,7 +2157,7 @@
         });
       });
 
-    // Виджет аккаунта Google: вход/импорт/забыть.
+    // Виджет аккаунтов Google: вход/импорт + удаление конкретного аккаунта.
     Array.prototype.forEach.call(
       document.querySelectorAll("#settings-body [data-act-account]"),
       function (btn) {
@@ -2138,9 +2165,23 @@
           var act = btn.dataset.actAccount;
           if (act === "login") openAccountOverlay();
           else if (act === "import") importCookies();
-          else if (act === "forget") forgetAccount();
         });
       });
+    // Удаление аккаунта - делегированием: список перерисовывается целиком
+    // (renderAccountState), прямые слушатели на кнопках «забыть» отвалились.
+    var accountBox = document.querySelector(
+      "#settings-body [data-account-list]");
+    if (accountBox) {
+      accountBox.addEventListener("click", function (event) {
+        var btn = event.target && event.target.closest
+          ? event.target.closest("[data-account-forget]") : null;
+        if (!btn) return;
+        call("account_forget", { id: btn.dataset.accountForget })
+          .then(function (res) {
+            toast(res && res.error ? res.error : "Аккаунт забыт");
+          });
+      });
+    }
 
     bindStorageActions(document.getElementById("settings-body"));
   }
@@ -2332,7 +2373,8 @@
 
   var addOpen = false;       // окно открыл пользователь
   var lastAddFlow = null;
-  var addForm = { url: "", mode: "partial", storageId: "", picked: {} };
+  var addForm = { url: "", mode: "partial", storageId: "", accountId: "",
+                  picked: {} };
 
   var ADD_MODES = [
     ["partial", "Частичная", "Новые видео попадают в индекс, контент выбираете вручную"],
@@ -2351,6 +2393,28 @@
         storageOptionsHtml(preferred) + "</select>" +
       '<div class="muted">Выбор запоминается у источника: синхронизация ' +
       "и режим «Полная» будут качать именно сюда.</div>";
+  }
+
+  function accountRowHtml() {
+    // Аккаунт привязывается к источнику: его куки используются при синке
+    // этого источника и загрузке его видео. Глобального аккаунта нет.
+    var acc = state.account || {};
+    var accounts = acc.accounts || [];
+    var preferred = addForm.accountId || "";
+    var options = ['<option value="">без аккаунта</option>'].concat(
+      accounts.map(function (item) {
+        return '<option value="' + esc(item.id) + '"' +
+          (item.id === preferred ? " selected" : "") + ">" +
+          esc(item.label || item.id) + "</option>";
+      }));
+    return '<div class="field-label">Аккаунт Google</div>' +
+      '<select id="add-account" aria-label="Аккаунт для входа на площадку">' +
+      options.join("") + "</select>" +
+      (accounts.length
+        ? '<div class="muted">Куки аккаунта уходят в синк и загрузку ' +
+          "только этого источника.</div>"
+        : '<div class="muted">Аккаунтов нет: если площадка просит вход ' +
+          "(«подтвердите, что вы не бот»), войдите в настройках.</div>");
   }
 
   function modeRadios(current, name) {
@@ -2429,6 +2493,7 @@
         '<div class="field-label">Режим синхронизации</div>' +
         modeRadios(addForm.mode, "add-mode") +
         storageRowHtml() +
+        accountRowHtml() +
         '<div class="card-actions">' +
         '<button class="btn" data-act="close">Отмена</button>' +
         '<button class="btn primary" data-act="confirm">Добавить</button></div>';
@@ -2464,6 +2529,7 @@
         "Уже было в библиотеке: " + (stats.known_videos || 0),
         "Связей создано: " + (stats.links_to_create || 0),
         "Куда качать: " + (result.storage_label || "по умолчанию"),
+        "Аккаунт: " + (result.account_label || "не привязан"),
         (stats.removed ? "Убрано из плейлиста: " + stats.removed : "")
       ].filter(Boolean).map(function (line) {
         return "<li>" + esc(line) + "</li>";
@@ -2523,6 +2589,7 @@
         '<div class="field-label">Режим синхронизации</div>' +
         modeRadios(addForm.mode, "add-mode") +
         storageRowHtml() +
+        accountRowHtml() +
         '<div class="card-actions">' +
         '<button class="btn" data-act="close">Отмена</button>' +
         '<button class="btn primary" data-act="run">Индексировать</button></div>';
@@ -2553,6 +2620,12 @@
     if (addStorage) {
       addStorage.addEventListener("change", function () {
         addForm.storageId = addStorage.value;
+      });
+    }
+    var addAccount = document.getElementById("add-account");
+    if (addAccount) {
+      addAccount.addEventListener("change", function () {
+        addForm.accountId = addAccount.value;
       });
     }
 
@@ -2594,7 +2667,8 @@
     if (!addForm.url.trim()) { toast("Вставьте ссылку", true); return; }
     addForm.storageId = currentAddStorage();
     call("add_start", { url: addForm.url.trim(), mode: addForm.mode,
-                        storage_id: addForm.storageId })
+                        storage_id: addForm.storageId,
+                        account_id: addForm.accountId })
       .then(function (res) {
         if (res && res.error) toast(res.error, true);
         else addOpen = true;
@@ -2607,7 +2681,8 @@
     if (action === "confirm") {
       addForm.storageId = currentAddStorage();
       call("add_confirm", { mode: addForm.mode,
-                            storage_id: addForm.storageId }).then(function (res) {
+                            storage_id: addForm.storageId,
+                            account_id: addForm.accountId }).then(function (res) {
         if (res && res.error) toast(res.error, true);
       });
       return;
@@ -2852,6 +2927,7 @@
       var action = btn.dataset.accountAct;
       if (action === "close") { $("account-overlay").hidden = true; return; }
       if (action === "import") { importCookies(); return; }
+      if (action === "facts") { checkAccountVisible(); return; }
       if (action === "login") {
         $("account-overlay").hidden = true;
         startAccountLogin();
@@ -3006,9 +3082,9 @@
                     fetch: null, plan: null, stages: [], result: null,
                     error: null };
     var mockAddTimer = null;
-    // Симуляция аккаунта Google: вход «сам снимает куки» через секунды.
-    var mockAccount = { has_cookies: false, use_cookies: true, label: "",
-                        since: "", note: "", logging_in: false };
+    // Симуляция аккаунтов Google: реестр + вход «сам снимает куки».
+    var mockAccount = { accounts: [], labels: {}, logging_in: false,
+                        note: "", visible: null };
     function mockStorageLabel(id) {
       var hit = mockStorages.filter(function (s) { return s.id === id; })[0];
       return hit ? hit.label : null;
@@ -3170,6 +3246,7 @@
           sources: [{ id: 1, title: "Тестовый плейлист", kind_label: "плейлист",
                       sync_mode: "partial", total: 3, downloaded: 1, pending: 2,
                       storage_label: "библиотека",
+                      account_label: "привязанный@example.com",
                       last_synced_at: "2026-10-06T16:38:45" },
                     { id: 2, title: "Старый канал", kind_label: "загрузки канала",
                       sync_mode: "full", total: 9, downloaded: 0, pending: 9,
@@ -3275,11 +3352,14 @@
         mockAccount.logging_in = true;
         mockAccount.note = "";
         setTimeout(function () {
-          // «Авто-поимка»: площадка выдала сессию - куки сохранены.
+          // «Авто-поимка»: площадка выдала сессию - аккаунт в реестре.
           mockAccount.logging_in = false;
-          mockAccount.has_cookies = true;
-          mockAccount.label = "превью@example.com";
-          mockAccount.since = "2026-10-10T12:00:00";
+          mockAccount.accounts = mockAccount.accounts.concat([{
+            id: "acc_preview", label: "превью@example.com",
+            since: "2026-10-10T12:00:00"
+          }]);
+          mockAccount.note = "Аккаунт добавлен: превью@example.com - " +
+            "привяжите его к источнику";
         }, 1800);
         return Promise.resolve({ ok: true });
       },
@@ -3287,18 +3367,29 @@
         mockAccount.logging_in = false;
         return Promise.resolve({ ok: true });
       },
-      account_import: function () {
-        mockAccount.has_cookies = true;
-        mockAccount.label = "импорт cookies.txt";
-        mockAccount.since = "2026-10-10T12:00:00";
-        return Promise.resolve({ ok: true, count: 17 });
+      account_visible: function () {
+        if (!mockAccount.logging_in) {
+          return Promise.resolve({ error: "Окно входа не открыто" });
+        }
+        return Promise.resolve({ total: 4, google: 4, markers: 3,
+                                 domains: ["google.com", "youtube.com"],
+                                 names: ["SID", "HSID", "SAPISID"] });
       },
-      account_forget: function () {
-        var removed = mockAccount.has_cookies ? ["google_cookies.bin"] : [];
-        mockAccount.has_cookies = false;
-        mockAccount.label = "";
-        mockAccount.since = "";
-        return Promise.resolve({ ok: true, removed: removed });
+      account_import: function () {
+        mockAccount.accounts = mockAccount.accounts.concat([{
+          id: "acc_file", label: "импорт cookies.txt",
+          since: "2026-10-10T12:00:00"
+        }]);
+        mockAccount.note = "Аккаунт добавлен из файла";
+        return Promise.resolve({ ok: true });
+      },
+      account_forget: function (req) {
+        var id = (req || {}).id;
+        mockAccount.accounts = mockAccount.accounts.filter(function (a) {
+          return a.id !== id;
+        });
+        mockAccount.note = "Аккаунт забыт";
+        return Promise.resolve({ ok: true, removed: true });
       },
       ffmpeg_start: function () {
         if (mockFfmpeg.found) {
@@ -3616,7 +3707,9 @@
         }
         if (mockAddTimer) clearInterval(mockAddTimer);
         mockAdd = { phase: "fetching", mode: req.mode || "partial",
-                    storage_id: req.storage_id || null, url: req.url,
+                    storage_id: req.storage_id || null,
+                    account_id: req.account_id || null,
+                    url: req.url,
                     fetch: { got: 0, total: 40 }, plan: null, stages: [],
                     result: null, error: null };
         var got = 0;
@@ -3643,10 +3736,16 @@
         if (req.storage_id !== undefined) {
           mockAdd.storage_id = req.storage_id || null;
         }
+        if (req.account_id !== undefined) {
+          mockAdd.account_id = req.account_id || null;
+        }
         if (req.mode) mockAdd.mode = req.mode;
         mockAdd.phase = "committing";
         setTimeout(function () {
           var full = mockAdd.mode === "full";
+          var account = (mockAccount.accounts || []).filter(function (a) {
+            return a.id === mockAdd.account_id;
+          })[0];
           mockAdd.phase = "done";
           mockAdd.result = {
             stats: { new_videos: 12, known_videos: 3, links_to_create: 12,
@@ -3660,6 +3759,8 @@
             picker_total: full ? 0 : 12,
             storage_id: mockAdd.storage_id,
             storage_label: mockStorageLabel(mockAdd.storage_id),
+            account_id: mockAdd.account_id,
+            account_label: account ? account.label : "",
             title: mockAdd.plan ? mockAdd.plan.title : "(превью) Плейлист",
             url: mockAdd.url
           };

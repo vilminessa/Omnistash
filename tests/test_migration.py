@@ -169,5 +169,51 @@ class TestIdempotency(MigrationCase):
         self.assertIn("storage_id", db_mod._columns(self.conn, "files"))
 
 
+class TestAccountColumnV3(unittest.TestCase):
+    """Миграция v3: playlists.account_id на базе, уже стоявшей на v2.
+
+    Ловушка, которую ловим: правка _migrate_v2 задним числом НЕ сработала
+    бы - существующие базы имеют user_version=2 и старый шаг не выполняют,
+    а sources() уже читает колонку.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "v2.db"
+        conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
+        db_mod._migrate_v1(conn)
+        db_mod._migrate_v2(conn)
+        conn.execute("PRAGMA user_version = 2")
+        conn.execute(
+            "INSERT INTO playlists (platform, remote_id, title, created_at, "
+            "updated_at) VALUES ('youtube','PLv2','Плейлист','t','t')")
+        conn.commit()
+        conn.close()
+
+    def test_v3_adds_account_column_and_keeps_data(self):
+        database = db_mod.Database(self.path)
+        self.addCleanup(database.close)
+        sql = database.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='playlists'"
+        ).fetchone()["sql"]
+        self.assertIn("account_id", sql, "колонка аккаунта должна появиться")
+        self.assertEqual(
+            int(database.conn.execute("PRAGMA user_version").fetchone()[0]), 3)
+        row = database.conn.execute("SELECT remote_id FROM playlists").fetchone()
+        self.assertEqual(row["remote_id"], "PLv2", "данные должны пережить")
+
+    def test_second_run_is_idempotent(self):
+        db_mod.Database(self.path).close()
+        database = db_mod.Database(self.path)
+        self.addCleanup(database.close)
+        self.assertEqual(
+            int(database.conn.execute("PRAGMA user_version").fetchone()[0]), 3)
+        count = database.conn.execute(
+            "SELECT COUNT(*) n FROM playlists").fetchone()["n"]
+        self.assertEqual(count, 1, "повторный запуск не должен дублировать")
+
+
 if __name__ == "__main__":
     unittest.main()

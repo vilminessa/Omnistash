@@ -71,7 +71,8 @@ class AddFlowCase(GuiCase):
         return self.make_api()
 
     def patch_fetch(self, snapshot, delay=0.0):
-        def fake(url, settings=None, on_progress=None, stop=None):
+        def fake(url, settings=None, on_progress=None, stop=None,
+                 account_id=None):
             total = snapshot["total"]
             if on_progress:
                 on_progress(0, total)
@@ -197,7 +198,7 @@ class TestCancelAndErrors(AddFlowCase):
         real_commit = repo_mod.commit_plan
 
         def commit_with_cancel(conn, snapshot, plan, on_stage=None,
-                               storage_id=None):
+                               storage_id=None, account_id=None):
             def hook(name, state, current, total):
                 # Рвём на первой записи, дошедшей до стадии видео: у маленького
                 # списка промежуточного active может и не быть (сразу done).
@@ -206,7 +207,7 @@ class TestCancelAndErrors(AddFlowCase):
                 if on_stage:
                     on_stage(name, state, current, total)
             return real_commit(conn, snapshot, plan, on_stage=hook,
-                               storage_id=storage_id)
+                               storage_id=storage_id, account_id=account_id)
 
         import unittest.mock as mock
         with mock.patch("app.gui.repo.commit_plan", side_effect=commit_with_cancel):
@@ -232,7 +233,8 @@ class TestCancelAndErrors(AddFlowCase):
     def test_fetch_error_is_shown_not_swallowed(self):
         api = self.api()
 
-        def boom(url, settings=None, on_progress=None, stop=None):
+        def boom(url, settings=None, on_progress=None, stop=None,
+                 account_id=None):
             raise sources.FetchError("Площадка не ответила: 403")
 
         import unittest.mock as mock
@@ -298,7 +300,7 @@ class TestChunking(unittest.TestCase):
         total = 250
         calls, progress = [], []
 
-        def fake_extract(url, items, settings=None):
+        def fake_extract(url, items, settings=None, cookiefile=None):
             calls.append(items)
             start, end = (int(x) for x in items.split("-"))
             last = min(end, total)
@@ -325,7 +327,7 @@ class TestChunking(unittest.TestCase):
         stop = threading.Event()
         stop.set()   # «Отмена» дошла, пока шёл первый запрос
 
-        def fake_extract(url, items, settings=None):
+        def fake_extract(url, items, settings=None, cookiefile=None):
             return self._head([{"id": "vid000000001", "title": "A"}], 3)
 
         with mock.patch("app.sources._extract", side_effect=fake_extract):
@@ -336,7 +338,7 @@ class TestChunking(unittest.TestCase):
         """Маленький список не должен порождать лишних запросов."""
         calls = []
 
-        def fake_extract(url, items, settings=None):
+        def fake_extract(url, items, settings=None, cookiefile=None):
             calls.append(items)
             return self._head([{"id": f"vid{i:09d}", "title": f"V{i}"}
                                for i in range(1, 4)], 3)

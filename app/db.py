@@ -397,8 +397,18 @@ def _migrate_v2(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS files_storage_idx ON files(storage_id)")
 
 
+def _migrate_v3(conn: sqlite3.Connection) -> None:
+    """Аккаунт Google источника: куки этой учётки для синка и загрузки.
+
+    Правка _migrate_v2 задним числом НЕ сработала бы: существующие базы
+    уже имеют user_version=2 и старый шаг не выполняется - колонка
+    добавляется только новым миграциям.
+    """
+    _add_column(conn, "playlists", "account_id TEXT")
+
+
 # Порядок важен: номер версии = индекс + 1.
-MIGRATIONS = (_migrate_v1, _migrate_v2)
+MIGRATIONS = (_migrate_v1, _migrate_v2, _migrate_v3)
 
 
 class Database:

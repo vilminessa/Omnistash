@@ -12,10 +12,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import time
 
 import yt_dlp
 
+from . import google_auth
 from . import metadata
 from .metadata import flat_entry, normalize_playlist
 
@@ -47,14 +49,18 @@ def _opts(settings: dict | None) -> dict:
     }
 
 
-def _extract(request_url: str, items: str, settings: dict | None = None) -> dict | None:
+def _extract(request_url: str, items: str, settings: dict | None = None,
+             cookiefile=None) -> dict | None:
     """Один запрос к площадке: плоский список записей указанным диапазоном.
 
     Отдельная функция (а не замыкание), чтобы тесты могли подменить сеть
-    и проверить сборку чанков без интернета.
+    и проверить сборку чанков без интернета. cookiefile - куки аккаунта
+    источника на время запроса (если привязаны).
     """
     opts = _opts(settings)
     opts["playlist_items"] = items
+    if cookiefile:
+        opts["cookiefile"] = str(cookiefile)
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.extract_info(request_url, download=False)
@@ -71,14 +77,35 @@ def classify(url: str) -> dict:
     return info
 
 
+@contextlib.contextmanager
+def _account_cookiefile(account_id):
+    """Куки аккаунта источника на время снапшота (см. google_auth).
+
+    Копия на диске живёт ровно столько, сколько идёт запрос.
+    """
+    path = None
+    if account_id:
+        try:
+            path = google_auth.temporary_cookiefile(account_id)
+        except OSError:
+            path = None
+    try:
+        yield path
+    finally:
+        google_auth.release_temp(path)
+
+
 def fetch_snapshot(url: str, *, settings: dict | None = None,
-                   on_progress=None, stop=None) -> dict:
+                   on_progress=None, stop=None,
+                   account_id: str | None = None) -> dict:
     """Снять снапшот источника: метаданные + все записи. Ничего не пишет.
 
     on_progress(got, total) - сколько записей уже получено (total может быть
         0, пока площадка не назвала размер списка);
     stop - threading.Event: проверяется между чанками, при срабатывании
-        бросает Aborted (частично собранный снапшот выбрасывается).
+        бросает Aborted (частично собранный снапшот выбрасывается);
+    account_id - аккаунт Google источника: «подтвердите, что не бот»
+        проходится от имени привязанной учётки.
     """
     kind = classify(url).get("kind")
     if kind not in SUPPORTED:
@@ -86,10 +113,18 @@ def fetch_snapshot(url: str, *, settings: dict | None = None,
             "Поддерживаются ссылки на плейлист и на канал; "
             "одиночное видео появится вместе с загрузчиком.")
 
+    with _account_cookiefile(account_id) as cookiefile:
+        return _snapshot(url, kind, settings=settings,
+                         on_progress=on_progress, stop=stop,
+                         cookiefile=cookiefile)
+
+
+def _snapshot(url: str, kind: str, *, settings: dict | None,
+              on_progress, stop, cookiefile) -> dict:
     delay = max(int((settings or {}).get("delay_ms") or 0), 0) / 1000.0
 
     # Первый чанк приносит и метаданные плейлиста, и первые записи.
-    head = _extract(url, f"1-{CHUNK}", settings)
+    head = _extract(url, f"1-{CHUNK}", settings, cookiefile)
     if not isinstance(head, dict) or head.get("_type") not in ("playlist", None):
         raise FetchError("Ссылка не оказалась плейлистом или каналом")
 
@@ -123,7 +158,8 @@ def fetch_snapshot(url: str, *, settings: dict | None = None,
             break
         if delay:
             time.sleep(delay)
-        chunk = _extract(request_url, f"{start}-{start + CHUNK - 1}", settings)
+        chunk = _extract(request_url, f"{start}-{start + CHUNK - 1}", settings,
+                         cookiefile)
         chunk_entries = _collect(chunk.get("entries") if isinstance(chunk, dict) else None,
                                  playlist_channel, start=start)
         chunks += 1

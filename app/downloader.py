@@ -374,18 +374,18 @@ def _paths_after_download(info: dict) -> list[tuple[str, str]]:
 
 
 @contextlib.contextmanager
-def _account_cookies(settings: dict):
-    """Куки аккаунта Google на время одной загрузки.
+def _account_cookies(account_id):
+    """Куки аккаунта источника на время одной операции (загрузка/запрос).
 
     Расшифровываем копию во временный файл, отдаём качалке, убираем сразу
-    после: сессия на диске живёт ровно столько, сколько идёт загрузка.
-    Если копия не расшифровалась (чужая учётка/повреждение) - качаем без
-    аккаунта, а площадка сама скажет, если без входа не обойтись.
+    после: сессия на диске живёт ровно столько, сколько идёт операция.
+    Если копия не расшифровалась (чужая учётка/повреждение) - работаем
+    без аккаунта, а площадка сама скажет, если без входа не обойтись.
     """
     path = None
-    if settings.get("use_google_cookies", True):
+    if account_id:
         try:
-            path = google_auth.temporary_cookiefile()
+            path = google_auth.temporary_cookiefile(account_id)
         except OSError:
             path = None
     try:
@@ -396,7 +396,7 @@ def _account_cookies(settings: dict):
 
 def download(video: dict, settings: dict, *, stop: threading.Event,
              on_progress=None, dest: str | None = None,
-             overwrite: bool = False) -> dict:
+             overwrite: bool = False, account_id: str | None = None) -> dict:
     """Скачать одно видео и подготовить всё для записи в индекс.
 
     video - строка videos (нужны key/title/webpage_url/remote_id);
@@ -406,12 +406,12 @@ def download(video: dict, settings: dict, *, stop: threading.Event,
     overwrite=True - перезаписать существующий файл: так качается файл,
     который проверка целостности признала битым (иначе yt-dlp счёл бы его
     уже скачанным и пропустил);
-    аккаунт Google (если сохранён и включён) передаётся качалке как
-    cookiefile - на время одной загрузки, см. _account_cookies.
+    account_id - аккаунт Google источника: его куки уходят в качалку на
+    время загрузки (см. _account_cookies).
     возвращает {"cancelled": bool, "files": [(путь, kind)], "info": {...},
     "error": str|None}. Ничего в БД не пишет - это делает очередь.
     """
-    with _account_cookies(settings) as cookiefile:
+    with _account_cookies(account_id) as cookiefile:
         return _download(video, settings, stop=stop, on_progress=on_progress,
                          dest=dest, overwrite=overwrite,
                          cookiefile=cookiefile)

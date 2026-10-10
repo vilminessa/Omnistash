@@ -1,4 +1,4 @@
-"""Аккаунт Google: шифрование кук, окно входа с авто-поимкой, подсказка.
+"""Аккаунты Google: реестр копий кук, привязка к источникам, диагностика.
 
 Ни один тест не ходит в сеть: окно входа - фикстура, куки - объекты
 http.cookiejar. Проверяем и то, что секреты не утекают в журнал.
@@ -7,7 +7,6 @@ http.cookiejar. Проверяем и то, что секреты не утек�
 import http.cookiejar
 import os
 import tempfile
-import threading
 import time
 import unittest
 from pathlib import Path
@@ -16,7 +15,8 @@ from unittest import mock
 from app import downloader
 from app import google_auth
 from app import repo
-from tests.test_gui import GuiCase, wait_until
+from app import settings as settings_mod
+from tests.test_gui import GuiCase
 
 
 def make_cookie(name, domain, value=None):
@@ -26,16 +26,19 @@ def make_cookie(name, domain, value=None):
         int(time.time()) + 86400, False, None, None, {})
 
 
+def session_cookies():
+    return [make_cookie("SID", ".google.com"),
+            make_cookie("HSID", ".google.com"),
+            make_cookie("SAPISID", ".google.com"),
+            make_cookie("VISITOR_INFO1_LIVE", ".youtube.com")]
+
+
 def netscape_fixture():
-    return google_auth.export_netscape([
-        make_cookie("SID", ".google.com"),
-        make_cookie("HSID", ".google.com"),
-        make_cookie("VISITOR_INFO1_LIVE", ".youtube.com"),
-    ])
+    return google_auth.export_netscape(session_cookies())
 
 
 class ProfileCase(unittest.TestCase):
-    """Изолированный профиль: куки не должны трогать настоящий."""
+    """Изолированный профиль: копии кук не трогают настоящий."""
 
     def setUp(self):
         patcher = mock.patch.dict(os.environ, {"LOCALAPPDATA":
@@ -53,60 +56,105 @@ class TestCryptoAndStorage(ProfileCase):
         with self.assertRaises(OSError):
             google_auth.decrypt("это не dpapi".encode())
 
-    def test_save_text_cookies_and_temporary_file(self):
-        count = google_auth.save_text_cookies(netscape_fixture())
-        self.assertEqual(count, 3)
-        self.assertTrue(google_auth.has_cookies())
-        back = google_auth.decrypted_cookies_text()
+    def test_create_account_stores_encrypted_copy_and_label(self):
+        account = google_auth.create_account(session_cookies(), label="мой")
+        path = google_auth.account_cookies_path(account["id"])
+        raw = path.read_bytes()
+        self.assertNotIn(b"secret-", raw, "на диске должен лежать шифротекст")
+        back = google_auth.decrypted_cookies_text(account["id"])
         self.assertIn("SID", back)
-        self.assertIn("VISITOR_INFO1_LIVE", back)
-        # Файл на диске - шифротекст, а не текст.
-        raw = (self.profile / "google_cookies.bin").read_bytes()
-        self.assertNotIn(b"SID", raw)
-
-        temp = google_auth.temporary_cookiefile()
+        # Временный файл для качалки - честный текст и удаляемый.
+        temp = google_auth.temporary_cookiefile(account["id"])
         self.assertIn("SID", temp.read_text(encoding="utf-8"))
         google_auth.release_temp(temp)
-        self.assertFalse(temp.exists(), "временный файл обязан уйти")
+        self.assertFalse(temp.exists())
+        # Реестр - только метки.
+        registry = google_auth.load_registry()
+        self.assertEqual(registry[0]["label"], "мой")
+        self.assertNotIn("secret-", str(registry))
 
-    def test_broken_copy_is_not_silently_used(self):
-        (self.profile).mkdir(parents=True, exist_ok=True)
-        (self.profile / "google_cookies.bin").write_bytes("мусор".encode())
+    def test_foreign_copy_is_not_silently_used(self):
+        account = google_auth.create_account(session_cookies())
+        google_auth.account_cookies_path(account["id"]).write_bytes("мусор".encode())
         with self.assertRaises(OSError):
-            google_auth.temporary_cookiefile()
+            google_auth.temporary_cookiefile(account["id"])
 
-    def test_forget_removes_files(self):
-        google_auth.save_text_cookies(netscape_fixture())
-        removed = google_auth.forget()["removed"]
-        self.assertIn("google_cookies.bin", removed)
-        self.assertFalse(google_auth.has_cookies())
-        self.assertEqual(google_auth.forget()["removed"], [], "повтор - пусто")
-
-    def test_domains_are_filtered_and_tiny_sets_rejected(self):
-        # Куки чужого домена не должны попасть в копию «сессии Google».
-        cookies = [make_cookie("a", ".google.com"),
-                   make_cookie("b", "example.org")]
+    def test_google_cookies_required(self):
         with self.assertRaises(RuntimeError):
-            google_auth.save_cookies([make_cookie("b", "example.org")])
-        count = google_auth.save_cookies(cookies)
-        self.assertEqual(count, 1)
-        self.assertNotIn("example.org", google_auth.decrypted_cookies_text())
+            google_auth.create_account([make_cookie("x", "example.org")])
 
-    def test_crippled_netscape_rejected(self):
+    def test_remove_account_clears_everything(self):
+        account = google_auth.create_account(session_cookies())
+        removed = google_auth.remove_account(account["id"])
+        self.assertTrue(removed["removed"])
+        self.assertFalse(google_auth.has_account_cookies(account["id"]))
+        self.assertEqual(google_auth.load_registry(), [])
+        self.assertIsNone(google_auth.temporary_cookiefile(account["id"]))
+
+    def test_netscape_garbage_rejected(self):
         with self.assertRaises(RuntimeError):
-            google_auth.save_text_cookies("просто текст без кук")
+            google_auth.parse_netscape("просто текст")
         with self.assertRaises(RuntimeError):
-            google_auth.save_text_cookies("# Netscape HTTP Cookie File\n")
+            google_auth.parse_netscape("# Netscape HTTP Cookie File\n")
+
+    def test_cookies_facts_hide_values(self):
+        facts = google_auth.cookies_facts(session_cookies()
+                                          + [make_cookie("x", "example.org")])
+        self.assertEqual(facts["total"], 5)
+        self.assertEqual(facts["google"], 4)
+        self.assertIn("google.com", facts["domains"])
+        self.assertNotIn("example.org", facts["domains"])
+        self.assertNotIn("secret-", str(facts))
 
 
-class TestDownloaderUsesCookies(ProfileCase):
+class TestMigrateLegacy(ProfileCase):
+    def _settings(self, label="старый аккаунт", since="2026-01-02T03:04:05"):
+        return {"google_account_label": label,
+                "google_account_since": since}
+
+    def test_legacy_file_becomes_first_account(self):
+        legacy = self.profile / "google_cookies.bin"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_bytes(google_auth.encrypt(netscape_fixture().encode()))
+
+        account_id = google_auth.migrate_legacy(self._settings())
+
+        self.assertIsNotNone(account_id)
+        self.assertFalse(legacy.exists(), "легаси-файл должен уйти")
+        self.assertEqual(google_auth.load_registry()[0]["label"],
+                         "старый аккаунт")
+        self.assertEqual(google_auth.load_registry()[0]["since"],
+                         "2026-01-02T03:04:05", "дата бережётся из старых "
+                         "настроек")
+        self.assertTrue(google_auth.has_account_cookies(account_id))
+
+    def test_migration_is_idempotent(self):
+        legacy = self.profile / "google_cookies.bin"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_bytes(google_auth.encrypt(netscape_fixture().encode()))
+        self.assertIsNotNone(google_auth.migrate_legacy(self._settings()))
+        self.assertIsNone(google_auth.migrate_legacy(self._settings()),
+                          "повторять нечего")
+        self.assertEqual(len(google_auth.load_registry()), 1)
+
+    def test_broken_legacy_is_removed_not_fatal(self):
+        legacy = self.profile / "google_cookies.bin"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_bytes("не dpapi".encode())
+        self.assertIsNone(google_auth.migrate_legacy(self._settings()))
+        self.assertFalse(legacy.exists())
+
+
+class TestDownloaderUsesAccount(ProfileCase):
+    """Качалка получает cookiefile привязанного аккаунта и чистит его."""
+
     def setUp(self):
         super().setUp()
-        created = self.created = {}
+        self.created = {}
+        created = self.created
 
         class FakeYDL:
             def __init__(self, opts):
-                self.opts = opts
                 created["opts"] = opts
 
             def __enter__(self):
@@ -122,27 +170,25 @@ class TestDownloaderUsesCookies(ProfileCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def _download(self, settings):
-        return downloader.download(
+    def _download(self, account_id):
+        import threading as _t
+        dest = tempfile.mkdtemp(prefix="dl_")
+        downloader.download(
             {"remote_id": "abcdefghijk",
              "webpage_url": "https://example.invalid/v"},
-            settings, stop=threading.Event(),
-            dest=tempfile.mkdtemp(prefix="dl_"))
+            {"dest_dir": dest}, stop=_t.Event(), dest=dest,
+            account_id=account_id)
 
     def test_cookiefile_present_and_removed_after(self):
-        google_auth.save_text_cookies(netscape_fixture())
-        self._download({"use_google_cookies": True})
+        account = google_auth.create_account(session_cookies())
+        self._download(account["id"])
         cookiefile = self.created["opts"].get("cookiefile")
-        self.assertTrue(cookiefile, "куки должны были попасть в опции")
+        self.assertTrue(cookiefile, "куки аккаунта должны попасть в опции")
         self.assertFalse(Path(cookiefile).exists(),
                          "копия обязана уйти после загрузки")
 
-    def test_disabled_and_missing_account_leave_opts_clean(self):
-        google_auth.save_text_cookies(netscape_fixture())
-        self._download({"use_google_cookies": False})
-        self.assertNotIn("cookiefile", self.created["opts"])
-        google_auth.forget()
-        self._download({"use_google_cookies": True})
+    def test_unknown_account_leaves_opts_clean(self):
+        self._download("нет-такого")
         self.assertNotIn("cookiefile", self.created["opts"])
 
 
@@ -159,7 +205,7 @@ class TestBotHint(GuiCase):
         repo.enqueue(api.db.conn, [vid])
 
         def fake(video, settings, *, stop, on_progress=None, dest=None,
-                 overwrite=False, **kwargs):
+                 overwrite=False, account_id=None, **kwargs):
             return {"cancelled": False, "files": [], "info": {},
                     "error": "площадка требует вход в аккаунт", "hash": None}
 
@@ -168,22 +214,31 @@ class TestBotHint(GuiCase):
             row = repo.next_queued(api.db.conn)
             api.dl._download_one(api.db.conn, row, api._current_settings())
 
-        state = api.dl.state
-        self.assertTrue(state.get("bot_hint"),
+        self.assertTrue(api.dl.state.get("bot_hint"),
                         "ошибка входа должна подсказать про аккаунт")
 
 
 class FakeLoginWindow:
-    """Фикстура окна входа: куки появляются «после входа»."""
+    """Фикстура окна входа: сессия появляется не мгновенно.
 
-    def __init__(self, cookies, email="человек@example.com"):
+    warmup - сколько первых опросов вернут «до входа» куки (без
+    маркеров): имитирует реальный вход, иначе воркер успевает закрыть
+    окно раньше, чем тест успеет его потрогать.
+    """
+
+    def __init__(self, cookies, email="человек@example.com", warmup=0):
         self._cookies = cookies
         self._email = email
+        self._warmup = warmup
         self.destroyed = False
+        self.polls = 0
 
     def get_cookies(self):
         if self.destroyed:
             raise RuntimeError("окно закрыто")
+        self.polls += 1
+        if self.polls <= self._warmup:
+            return [make_cookie("NID", ".google.com")]
         return list(self._cookies)
 
     def evaluate_js(self, script):
@@ -196,69 +251,80 @@ class FakeLoginWindow:
 class TestAccountApi(GuiCase):
     def setUp(self):
         super().setUp()
-        # Профиль изолируем сами: секреты не должны трогать настоящий
-        # %LOCALAPPDATA% пользователя (GuiCase изолирует только БД/настройки).
+        # Профиль изолируем сами: копии кук не должны трогать настоящий
+        # %LOCALAPPDATA% (GuiCase изолирует только БД/настройки).
         patcher = mock.patch.dict(os.environ, {"LOCALAPPDATA":
                                                tempfile.mkdtemp(prefix="ga_")})
         patcher.start()
         self.addCleanup(patcher.stop)
         self.api = self.make_api()
 
-    def test_poll_reports_account_without_secrets(self):
+    def test_poll_reports_accounts_without_secrets(self):
         account = self.api.poll(0)["account"]
-        for key in ("has_cookies", "use_cookies", "label", "since",
-                    "note", "logging_in"):
+        for key in ("accounts", "labels", "logging_in", "note", "visible"):
             self.assertIn(key, account)
-        # В журнале и в poll не должно быть значений кук.
-        google_auth.save_text_cookies(netscape_fixture())
+        google_auth.create_account(session_cookies(), label="мой")
         account = self.api.poll(0)["account"]
-        self.assertTrue(account["has_cookies"])
+        self.assertEqual(account["accounts"][0]["label"], "мой")
         blob = str(account) + "\n".join(self.api._logs)
         self.assertNotIn("secret-", blob)
 
-    def test_login_captures_cookies_and_closes_window(self):
-        window = FakeLoginWindow([
-            make_cookie("SID", ".google.com"),
-            make_cookie("HSID", ".google.com"),
-            make_cookie("SAPISID", ".google.com"),
-            make_cookie("VISITOR_INFO1_LIVE", ".youtube.com"),
-        ])
+    def test_login_creates_account_and_closes_window(self):
+        window = FakeLoginWindow(session_cookies())
         with mock.patch("webview.create_window", return_value=window):
             self.assertTrue(self.api.account_login_start()["ok"])
-        self.assertTrue(self.api._login_thread.join(10) or True, "ждём воркер")
-        deadline = time.time() + 10
-        while time.time() < deadline and self.api._login_window is not None:
-            time.sleep(0.02)
+        # Ждём полного завершения воркера: окно закрывается раньше, чем
+        # создаётся запись реестра.
+        self.api._login_thread.join(10)
         self.assertIsNone(self.api._login_window, "окно должно закрыться само")
         self.assertTrue(window.destroyed)
-        self.assertTrue(google_auth.has_cookies())
-        account = self.api.poll(0)["account"]
-        self.assertEqual(account["label"], "человек@example.com")
-        self.assertIn("Аккаунт сохранён", account["note"])
+        registry = google_auth.load_registry()
+        self.assertEqual(len(registry), 1)
+        self.assertEqual(registry[0]["label"], "человек@example.com")
+        self.assertTrue(google_auth.has_account_cookies(registry[0]["id"]))
+        self.assertIn("Аккаунт добавлен", self.api.poll(0)["account"]["note"])
 
-    def test_login_without_session_reports_failure(self):
-        window = FakeLoginWindow([make_cookie("NID", ".google.com")])  # без сессии
+    def test_login_without_session_reports_diagnosis(self):
+        # Визитёрская кука - не сессия: аккаунт не создаётся, но в статусе
+        # остаётся диагностика «что видела поимка».
+        window = FakeLoginWindow([make_cookie("NID", ".google.com")])
         with mock.patch("webview.create_window", return_value=window), \
                 mock.patch.object(type(self.api), "LOGIN_TIMEOUT", 0.3):
             self.assertTrue(self.api.account_login_start()["ok"])
-        deadline = time.time() + 10
-        while time.time() < deadline and self.api._login_window is not None:
-            time.sleep(0.02)
-        self.assertIsNone(self.api._login_window)
-        self.assertFalse(google_auth.has_cookies(),
-                         "визитёрские куки не должны считаться сессией")
-        self.assertIn("куки не получены", self.api.poll(0)["account"]["note"])
+            self.api._login_thread.join(10)
+        self.assertEqual(google_auth.load_registry(), [])
+        account = self.api.poll(0)["account"]
+        self.assertIn("куки не получены", account["note"])
+        self.assertIn("увидено кук", account["note"],
+                      "диагностика должна попасть в статус")
+        facts = account["visible"]
+        self.assertEqual(facts["total"], 1)
+        self.assertEqual(facts["markers"], 0)
 
-    def test_import_file_dialog(self):
+    def test_visible_reports_what_window_sees(self):
+        # warmup держит окно «до входа» - воркер спит между опросами.
+        window = FakeLoginWindow(session_cookies(), warmup=10)
+        with mock.patch("webview.create_window", return_value=window):
+            self.assertTrue(self.api.account_login_start()["ok"])
+        result = self.api.account_visible()
+        self.assertNotIn("error", result, result)
+        self.assertEqual(result["total"], 1, "пока до входа - визитёрская")
+        self.assertEqual(result["markers"], 0)
+        self.assertNotIn("secret-", str(result))
+        # Закрыли окно - диагностика говорит, что окна нет.
+        self.api.account_login_stop()
+        self.api._login_thread.join(10)
+        self.assertIn("error", self.api.account_visible())
+
+    def test_import_dialog_creates_account(self):
         fixture = Path(tempfile.mkdtemp(prefix="ga_")) / "cookies.txt"
         fixture.write_text(netscape_fixture(), encoding="utf-8")
-        # Диалог живёт на ОКНЕ (как pick_folder) - мокаем список окон.
         fake_win = mock.Mock()
         fake_win.create_file_dialog.return_value = [str(fixture)]
         with mock.patch("webview.windows", [fake_win]):
             result = self.api.account_import()
-        self.assertEqual(result.get("count"), 3)
-        self.assertTrue(google_auth.has_cookies())
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(len(google_auth.load_registry()), 1)
 
     def test_import_garbage_rejected(self):
         fixture = Path(tempfile.mkdtemp(prefix="ga_")) / "bad.txt"
@@ -268,18 +334,15 @@ class TestAccountApi(GuiCase):
         with mock.patch("webview.windows", [fake_win]):
             result = self.api.account_import()
         self.assertIn("error", result)
-        self.assertFalse(google_auth.has_cookies())
+        self.assertEqual(google_auth.load_registry(), [])
 
-    def test_forget_clears_everything(self):
-        google_auth.save_text_cookies(netscape_fixture())
-        self.api.save_setting({"key": "google_account_label",
-                               "value": "кто-то"})
-        result = self.api.account_forget()
+    def test_forget_removes_account(self):
+        account = google_auth.create_account(session_cookies())
+        result = self.api.account_forget({"id": account["id"]})
         self.assertTrue(result["ok"])
-        self.assertFalse(google_auth.has_cookies())
-        account = self.api.poll(0)["account"]
-        self.assertFalse(account["has_cookies"])
-        self.assertEqual(account["label"], "")
+        self.assertFalse(google_auth.has_account_cookies(account["id"]))
+        self.assertEqual(google_auth.load_registry(), [])
+        self.assertIn("error", self.api.account_forget({}))
 
 
 class TestSchema(unittest.TestCase):
@@ -288,9 +351,77 @@ class TestSchema(unittest.TestCase):
         widget = schema.field("_google_account")
         self.assertEqual(widget["type"], "account")
         self.assertTrue(widget.get("transient"))
-        toggle = schema.field("use_google_cookies")
-        self.assertEqual(toggle["default"], True)
-        self.assertIn("use_google_cookies", schema.defaults())
+        # Служебные метки - скрытые, но валидные ключи (set_value их пишет).
+        for key in ("google_account_label", "google_account_since"):
+            self.assertIsNotNone(schema.field(key))
+            self.assertTrue(schema.field(key).get("hidden"))
+        self.assertNotIn("use_google_cookies", schema.defaults(),
+                         "глобальной галки больше нет - только привязки")
+
+
+class TestSourceBinding(GuiCase):
+    """Сквозная привязка: аккаунт -> плейлист -> синк и качалка."""
+
+    def setUp(self):
+        super().setUp()
+        # Профиль изолируем сами (реестр аккаунтов - файлы, не БД).
+        patcher = mock.patch.dict(os.environ, {"LOCALAPPDATA":
+                                               tempfile.mkdtemp(prefix="ga_")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.api = self.make_api()
+        self.account = google_auth.create_account(session_cookies(),
+                                                  label="привязанный")
+
+    def _snapshot(self):
+        channel = {"platform": "youtube", "remote_id": "UCfixtur000000000000000000000001",
+                   "title": "Автор", "handle": None, "url": None,
+                   "fallback": False}
+        entries = [{"position": i, "remote_id": f"vid{i:09d}",
+                    "title": f"Видео {i}", "duration_s": 60, "uploaded_at": None,
+                    "view_count": None, "unavailable": False,
+                    "webpage_url": f"https://youtu.be/vid{i:09d}",
+                    "channel": channel} for i in (1, 2)]
+        return {"playlist": {"platform": "youtube",
+                             "remote_id": "PLfixtur0000000000000000000001",
+                             "title": "Плейлист", "description": None,
+                             "kind": "remote", "url": "u", "item_count": 2,
+                             "raw_json": "{}", "channel": channel},
+                "entries": entries, "total": 2, "url": "u"}
+
+    def test_commit_plan_writes_account(self):
+        snap = self._snapshot()
+        stats = repo.commit_plan(self.api.db.conn, snap,
+                                 repo.plan_diff(self.api.db.conn, snap),
+                                 account_id=self.account["id"])
+        row = self.api.db.conn.execute(
+            "SELECT account_id FROM playlists WHERE id=?",
+            (stats["playlist_id"],)).fetchone()
+        self.assertEqual(row["account_id"], self.account["id"])
+
+    def test_video_account_follows_source(self):
+        snap = self._snapshot()
+        stats = repo.commit_plan(self.api.db.conn, snap,
+                                 repo.plan_diff(self.api.db.conn, snap),
+                                 account_id=self.account["id"])
+        self.assertTrue(stats["playlist_id"])
+        vid = self.api.db.conn.execute(
+            "SELECT id FROM videos").fetchone()["id"]
+        self.assertEqual(repo.video_account_id(self.api.db.conn, vid),
+                         self.account["id"])
+
+    def test_sources_carry_account_id(self):
+        snap = self._snapshot()
+        repo.commit_plan(self.api.db.conn, snap,
+                         repo.plan_diff(self.api.db.conn, snap),
+                         account_id=self.account["id"])
+        sources = self.api.poll(0)["account"]  # реестр отдельно
+        source = repo.sources(self.api.db.conn)[0]
+        self.assertEqual(source["account_id"], self.account["id"])
+        # Подпись подмешивается gui-хелпером для списка источников.
+        labeled = self.api.poll(0)
+        self.assertEqual(labeled["account"]["accounts"][0]["id"],
+                         self.account["id"])
 
 
 if __name__ == "__main__":

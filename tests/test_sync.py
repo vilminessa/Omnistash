@@ -31,7 +31,8 @@ class SyncCase(GuiCase):
         self.fetch_error = None
         self.fetch_delay = 0.0
 
-        def fake_fetch(url, settings=None, on_progress=None, stop=None):
+        def fake_fetch(url, settings=None, on_progress=None, stop=None,
+                       account_id=None):
             if self.fetch_delay:
                 # Блокируемся до «Стоп» - так тест гарантированно успевает
                 # нажать кнопку раньше площадки.

@@ -1,17 +1,17 @@
-"""Аккаунт Google: куки для загрузки, токены для API (G1b).
+"""Аккаунты Google: копии кук для доступа к контенту конкретных источников.
 
-Почему куки, а не «просто токен»: yt-dlp качает потоки как браузер, и
-площадка спрашивает именно сессию браузера (возрастной контент, «подтвердите,
-что вы не бот»). OAuth-токен нужен для API метаданных и файлы не качает -
-поэтому это две независимые штуки, живущие рядом.
+Почему копии, а не «токен»: yt-dlp качает и метаданные как браузер, и
+площадка спрашивает сессию браузера (возраст, «подтвердите, что не бот»).
+Аккаунт здесь - это ПРИВЯЗКА к источнику: у плейлиста может быть своя
+учётка, и её куки используются при синке этого источника и загрузке его
+видео. Глобального аккаунта нет - только явные привязки.
 
-Секреты (куки, токены) шифруются DPAPI в пределах текущей Windows-учётки:
-копия бесполезна на другой машине и для другого пользователя. Никогда не
-попадают в settings.json и в журнал.
+Секреты шифруются DPAPI в пределах текущей Windows-учётки: копия
+бесполезна на другой машине и для другого пользователя. Ни куки, ни их
+значения не попадают в settings.json и в журнал - только имена доменов
+и счётчики (диагностика).
 
-Экспорт - Netscape txt (тот формат, что понимает yt-dlp); сам файл
-отдаётся качалке расшифрованным во временный путь на время загрузки и
-удаляется сразу после.
+Реестр (метки/даты) - accounts.json в профиле; копии кук - accounts/<id>.bin.
 """
 
 from __future__ import annotations
@@ -19,11 +19,13 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes as wintypes
 import http.cookiejar
+import json
 import os
 import tempfile
+import uuid
 from pathlib import Path
 
-from .paths import google_cookies_path, google_tokens_path
+from .paths import profile_dir
 
 # Крипто через ctypes: зачем-то тащить dependency, если Windows даёт API.
 _CRYPTPROTECT_UI_FORBIDDEN = 0x1
@@ -49,8 +51,8 @@ def _crypt32():
         ctypes.POINTER(_DataBlob)]
     module.CryptProtectData.restype = wintypes.BOOL
     # Внимание: расшифровка - ДРУГАЯ функция. Ловушка, в которую я уже
-    # попал: вызов CryptProtectData вместо CryptUnprotectData «успешно»
-    # шифрует второй раз и раундтрип выдаёт мусор.
+    # попал: CryptProtectData вместо CryptUnprotectData «успешно» шифрует
+    # второй раз и раундтрип выдаёт мусор.
     module.CryptUnprotectData.argtypes = [
         ctypes.POINTER(_DataBlob), ctypes.c_void_p, ctypes.POINTER(_DataBlob),
         ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD,
@@ -96,8 +98,8 @@ def decrypt(data: bytes) -> bytes:
         _kernel32().LocalFree(out.pbData)
 
 
-# Домены, которые несёт сессия Google для youtube-загрузок: аккаунтские
-# куки живут на .google.com и покрывают youtube.com.
+# Домены, которые несёт сессия Google для youtube: аккаунтские куки живут
+# на .google.com и покрывают youtube.com.
 _GOOGLE_SUFFIXES = (".google.com", ".youtube.com", ".googlevideo.com",
                     ".youtu.be")
 
@@ -109,10 +111,9 @@ def is_google_cookie(cookie) -> bool:
 
 
 def export_netscape(cookies) -> str:
-    """Куки (http.cookiejar.Cookie из pywebview) -> Netscape txt для yt-dlp.
+    """Куки (http.cookiejar.Cookie) -> Netscape txt для yt-dlp.
 
-    Через временный файл: с3.14 MozillaCookieJar работает только с путями
-    (пишет с правами600) и file-object больше не принимает.
+    Через временный файл: с3.14 MozillaCookieJar работает только с путями.
     """
     jar = http.cookiejar.MozillaCookieJar()
     for cookie in cookies:
@@ -127,29 +128,8 @@ def export_netscape(cookies) -> str:
         Path(handle.name).unlink(missing_ok=True)
 
 
-def save_cookies(cookies, *, min_count: int = 1) -> int:
-    """Зашифровать и сохранить копию кук. Возвращает, сколько сохранилось.
-
-    min_count - страховка от «поймали пустую страницу»: не пишем пустой
-    или подозрительно маленький набор поверх настоящего.
-    """
-    picked = [c for c in cookies if is_google_cookie(c)]
-    if len(picked) < min_count:
-        raise RuntimeError(f"подозрительно мало кук Google: {len(picked)}")
-    # Сначала честный экспорт (через временный файл - см. export_netscape),
-    # потом шифрование и атомарная подмена.
-    text = export_netscape(picked)
-    target = google_cookies_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    # Атомарно: буфер рядом с целью, затем подмена.
-    tmp = target.with_suffix(".tmp")
-    tmp.write_bytes(encrypt(text.encode("utf-8")))
-    os.replace(tmp, target)
-    return len(picked)
-
-
-def save_text_cookies(text: str) -> int:
-    """Сохранить куки из импортированного Netscape-файла (проверка формата)."""
+def parse_netscape(text: str) -> list:
+    """Netscape txt -> куки (с проверкой формата)."""
     if "# Netscape HTTP Cookie File" not in text and "\t" not in text:
         raise RuntimeError("это не похоже на cookies.txt (нет заголовка "
                            "Netscape и табуляций)")
@@ -167,28 +147,114 @@ def save_text_cookies(text: str) -> int:
         Path(handle.name).unlink(missing_ok=True)
     if not cookies:
         raise RuntimeError("в файле нет ни одной куки")
-    return save_cookies(cookies)
+    return cookies
 
 
-def has_cookies() -> bool:
-    return google_cookies_path().is_file()
+# --------------------------------------------------------------------------- #
+#  Реестр аккаунтов: accounts.json (метки) + accounts/<id>.bin (DPAPI-куки)
+# --------------------------------------------------------------------------- #
+
+def accounts_dir() -> Path:
+    return profile_dir() / "accounts"
 
 
-def decrypted_cookies_text() -> str | None:
+def account_cookies_path(account_id: str) -> Path:
+    return accounts_dir() / f"{account_id}.bin"
+
+
+def _registry_path() -> Path:
+    return profile_dir() / "accounts.json"
+
+
+def load_registry() -> list[dict]:
+    """[{id, label, since}] - никаких секретов, только метки."""
+    try:
+        data = json.loads(_registry_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    items = data.get("accounts") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return []
+    return [item for item in items
+            if isinstance(item, dict) and item.get("id")]
+
+
+def _save_registry(items: list[dict]) -> None:
+    path = _registry_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"accounts": items}, ensure_ascii=False,
+                              indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def account_labels() -> dict:
+    """{id: label} для подписи привязок."""
+    return {item["id"]: str(item.get("label") or "") for item in load_registry()}
+
+
+def _store_cookies(account_id: str, cookies) -> int:
+    """Шифруем и кладём копию кук аккаунта (атомарно)."""
+    text = export_netscape(cookies)
+    target = account_cookies_path(account_id)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(".tmp")
+    tmp.write_bytes(encrypt(text.encode("utf-8")))
+    os.replace(tmp, target)
+    return len(cookies)
+
+
+def create_account(cookies, *, label: str = "") -> dict:
+    """Новый аккаунт из кук. Возвращает запись реестра."""
+    picked = [c for c in cookies if is_google_cookie(c)]
+    if not picked:
+        raise RuntimeError("среди кук нет ни одного Google/YouTube - "
+                           "похоже, окно не вошло в аккаунт")
+    account_id = uuid.uuid4().hex[:8]
+    count = _store_cookies(account_id, picked)
+    from .util import now_iso
+    record = {"id": account_id, "label": label or f"аккаунт ({count} кук)",
+              "since": now_iso()}
+    _save_registry(load_registry() + [record])
+    return record
+
+
+def create_account_from_text(text: str, *, label: str = "импорт cookies.txt") -> dict:
+    return create_account(parse_netscape(text), label=label)
+
+
+def remove_account(account_id: str) -> dict:
+    """Удалить аккаунт: копию кук и запись реестра."""
+    removed = False
+    try:
+        account_cookies_path(account_id).unlink()
+        removed = True
+    except FileNotFoundError:
+        pass
+    items = [item for item in load_registry() if item["id"] != account_id]
+    _save_registry(items)
+    return {"removed": removed}
+
+
+def has_account_cookies(account_id: str) -> bool:
+    return account_cookies_path(account_id).is_file()
+
+
+def decrypted_cookies_text(account_id: str) -> str | None:
     """Расшифрованная копия (None - аккаунта нет). Текст - секрет."""
-    path = google_cookies_path()
+    path = account_cookies_path(account_id)
     if not path.is_file():
         return None
     return decrypt(path.read_bytes()).decode("utf-8")
 
 
-def temporary_cookiefile() -> Path | None:
-    """Расшифровать куки во временный файл для yt-dlp.
+def temporary_cookiefile(account_id: str) -> Path | None:
+    """Расшифровать куки аккаунта во временный файл для yt-dlp.
 
     Путь обязан пройти через release_temp(): куки на диске живут ровно
-    столько, сколько идёт загрузка.
+    столько, сколько идёт загрузка/запрос.
     """
-    text = decrypted_cookies_text()
+    text = decrypted_cookies_text(account_id)
     if text is None:
         return None
     handle = tempfile.NamedTemporaryFile(
@@ -207,25 +273,55 @@ def release_temp(path: Path | None) -> None:
             pass
 
 
-def forget() -> dict:
-    """«Забыть аккаунт»: удалить зашифрованные копии. Токены тоже."""
-    removed = []
-    for path in (google_cookies_path(), google_tokens_path()):
+def cookies_facts(cookies) -> dict:
+    """Диагностика поимки без единого значения: только счётчики и домены."""
+    google = [c for c in cookies if is_google_cookie(c)]
+    return {
+        "total": len(cookies),
+        "google": len(google),
+        "domains": sorted({(c.domain or "").lstrip(".") for c in google})[:8],
+        "names": sorted({c.name for c in google})[:12],
+    }
+
+
+def migrate_legacy(settings) -> str | None:
+    """Старый одиночный google_cookies.bin -> первый аккаунт реестра.
+
+    G1 хранил копию одним файлом + метки в settings; при переходе на
+    привязки файл перекидывается в accounts/, метки уходят в реестр.
+    Возвращает id мигрированного аккаунта (None - мигрировать нечего).
+    """
+    from .paths import google_cookies_path
+    legacy = google_cookies_path()
+    if load_registry():
+        return None            # реестр уже есть - легаси не трогаем
+    if not legacy.is_file():
+        return None
+    try:
+        cookies = parse_netscape(decrypt_legacy_text(legacy))
+    except (OSError, RuntimeError):
+        # Неразборчивая копия - удаляем, чтобы не висела мёртвым грузом.
         try:
-            path.unlink()
-            removed.append(path.name)
-        except FileNotFoundError:
-            pass
+            legacy.unlink()
         except OSError:
             pass
-    return {"removed": removed}
+        return None
+    label = str(settings.get("google_account_label") or "") or None
+    account = create_account(cookies, label=label or "вход выполнен (куки)")
+    from .util import now_iso
+    if settings.get("google_account_since"):
+        # Дату бережём из старых настроек - она честнее «сегодня».
+        items = load_registry()
+        for item in items:
+            if item["id"] == account["id"]:
+                item["since"] = str(settings["google_account_since"])
+        _save_registry(items)
+    try:
+        legacy.unlink()
+    except OSError:
+        pass
+    return account["id"]
 
 
-def account_state(settings: dict) -> dict:
-    """Состояние аккаунта для окна. Никаких секретов - только факты."""
-    return {
-        "has_cookies": has_cookies(),
-        "use_cookies": bool(settings.get("use_google_cookies", True)),
-        "label": str(settings.get("google_account_label") or ""),
-        "since": str(settings.get("google_account_since") or ""),
-    }
+def decrypt_legacy_text(path: Path) -> str:
+    return decrypt(Path(path).read_bytes()).decode("utf-8")

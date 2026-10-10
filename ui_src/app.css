@@ -855,6 +855,11 @@ body[data-theme="light"] .row { border-bottom-color: rgba(0, 0, 0, .05); }
 
 .mark-grid { display: flex; flex-direction: column; gap: 12px; }
 .mark-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+/* Аккаунты Google: список привязок в настройках */
+.account-list { display: flex; flex-direction: column; gap: 4px; width: 100%; }
+.account-row { display: flex; gap: 8px; align-items: center; font-size: 12px; }
+.account-row .spacer { flex: 1 1 auto; }
 .mark-row > .field-label { min-width: 78px; }
 
 /* ---------------------------- низ окна ---------------------------- */

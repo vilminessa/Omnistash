@@ -50,7 +50,7 @@ class QueueCase(GuiCase):
         """Подмена downloader.download: пишет файл и сайдкар в хранилище."""
 
         def download(video, settings, *, stop, on_progress=None, dest=None,
-                     overwrite=False):
+                     overwrite=False, account_id=None):
             if behaviour:
                 return behaviour(video, settings, stop=stop,
                                  on_progress=on_progress, dest=dest,

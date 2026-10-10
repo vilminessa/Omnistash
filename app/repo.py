@@ -406,7 +406,8 @@ def plan_diff(conn: sqlite3.Connection, snapshot: dict) -> dict:
 
 
 def commit_plan(conn: sqlite3.Connection, snapshot: dict, plan: dict,
-                on_stage=None, storage_id: str | None = None) -> dict:
+                on_stage=None, storage_id: str | None = None,
+                account_id: str | None = None) -> dict:
     """Принять план: плейлист -> авторы -> видео -> связи. Одна транзакция.
 
     on_stage(stage, state, current, total) вызывается по ходу - отсюда UI
@@ -414,9 +415,10 @@ def commit_plan(conn: sqlite3.Connection, snapshot: dict, plan: dict,
     до последней строки: частичных состояний не остаётся.
 
     storage_id - куда качать этот источник (выбор пользователя в диалоге
-    добавления). Пишется на плейлист в ТОЙ ЖЕ транзакции: цепочку
-    «источник -> канал -> глобальное» читает очередь при каждой загрузке,
-    отмена не должна оставить выбор за собой.
+    добавления), account_id - чьи куки использовать при синке и загрузке
+    (привязка аккаунта к источнику). Оба пишутся на плейлист В ТОЙ ЖЕ
+    транзакции, что и само добавление: отмена не должна оставить за собой
+    ни выбора папки, ни привязки аккаунта.
     """
     def stage(name, state, current=0, total=0):
         if on_stage:
@@ -440,6 +442,12 @@ def commit_plan(conn: sqlite3.Connection, snapshot: dict, plan: dict,
             conn.execute(
                 "UPDATE playlists SET storage_id=?, updated_at=? WHERE id=?",
                 (storage_id, now_iso(), playlist_id))
+        if account_id:
+            # «Чьи куки у этого источника»: синк и качалка читают аккаунт
+            # через цепочку playlist_items -> playlists.account_id.
+            conn.execute(
+                "UPDATE playlists SET account_id=?, updated_at=? WHERE id=?",
+                (account_id, now_iso(), playlist_id))
         stage("playlist", "done", 1, 1)
 
         # --- стадия 2: авторы ---------------------------------------------
@@ -813,7 +821,7 @@ def sources(conn: sqlite3.Connection) -> list[dict]:
     """
     rows = conn.execute(
         """SELECT p.id, p.title, p.kind, p.sync_mode, p.url, p.last_synced_at,
-                  p.item_count, p.remote_id, p.storage_id,
+                  p.item_count, p.remote_id, p.storage_id, p.account_id,
                   s.label AS storage_label,
                   SUM(CASE WHEN pi.removed_at IS NULL THEN 1 ELSE 0 END) total,
                   SUM(CASE WHEN pi.removed_at IS NULL AND v.status='downloaded'
@@ -1060,6 +1068,20 @@ def status_breakdown(conn: sqlite3.Connection) -> list[tuple[str, int]]:
 def video_id_by_key(conn: sqlite3.Connection, key: str) -> int | None:
     row = conn.execute("SELECT id FROM videos WHERE key=?", (key,)).fetchone()
     return int(row["id"]) if row else None
+
+
+def video_account_id(conn: sqlite3.Connection, video_id: int) -> str | None:
+    """Аккаунт Google видео - через его плейлист (как resolve_target).
+
+    У видео может быть несколько плейлистов - берём первый привязанный
+    аккаунт по порядку связей (честнее, чем «любой»).
+    """
+    row = conn.execute(
+        """SELECT p.account_id FROM playlist_items pi
+             JOIN playlists p ON p.id = pi.playlist_id
+            WHERE pi.video_id=? AND p.account_id IS NOT NULL
+            ORDER BY pi.id LIMIT 1""", (int(video_id),)).fetchone()
+    return row["account_id"] if row else None
 
 
 def insert_local_video(conn: sqlite3.Connection, *, title: str, path: str,

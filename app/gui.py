@@ -69,6 +69,22 @@ def _log_line(text: str) -> str:
     return f"[{time.strftime('%H:%M:%S')}] {text}"
 
 
+def _sources_with_accounts(conn) -> list[dict]:
+    """Источники + подписи их аккаунтов.
+
+    Метки аккаунтов живут в accounts.json (не в БД), поэтому JOIN тут
+    невозможен - подмешиваем из реестра, как «куда качать» из хранилищ.
+    """
+    labels = google_auth.account_labels()
+    out = []
+    for source in repo.sources(conn):
+        item = dict(source)
+        account_id = item.get("account_id")
+        item["account_label"] = labels.get(account_id, "") if account_id else ""
+        out.append(item)
+    return out
+
+
 class Api:
     """Методы, которые вызывает JavaScript (js_api)."""
 
@@ -81,6 +97,14 @@ class Api:
         # строго до первого save(), иначе эти ключи уйдут из файла вместе с
         # убранными из схемы полями и переносить станет нечего.
         self._boot = storages_mod.bootstrap(self.db, settings.read_raw())
+        # Легаси G1: одиночный google_cookies.bin -> первый аккаунт реестра.
+        try:
+            migrated = google_auth.migrate_legacy(settings.read_raw())
+        except Exception:  # noqa: BLE001 - миграция не должна ронять старт
+            migrated = None
+        if migrated:
+            print(f"[аккаунт] старая копия кук перенесена в реестр "
+                  f"(id {migrated})")
         if self._boot.get("default") and not settings.read_raw().get(
                 "default_storage_id"):
             settings.set_value("default_storage_id", self._boot["default"])
@@ -144,7 +168,9 @@ class Api:
         # Аккаунт Google: окно входа живёт отдельно от главного.
         self._login_window = None
         self._login_cancel = threading.Event()
+        self._login_thread: threading.Thread | None = None
         self._account_note = ""
+        self._login_facts: dict = {}   # диагностика поимки (без значений)
         # Качалка: очередь живёт в таблице videos, воркер - фоновый поток.
         self.dl = DownloadWorker(self.db, self._current_settings, log=self._log)
         settings.reload_if_changed(self._settings_cache)
@@ -276,7 +302,7 @@ class Api:
                 self._heavy = {
                     "stats": repo.stats(conn),
                     "tree": repo.tree(conn),
-                    "sources": repo.sources(conn),
+                    "sources": _sources_with_accounts(conn),
                     "runs": repo.runs(conn),
                     "queue": repo.queue_rows(conn),
                     "storages": storages_mod.all_storages(conn,
@@ -350,11 +376,19 @@ class Api:
         # настройка «Перекодировка» гасит недоступные варианты честно.
         ffmpeg_state["encoders"] = (downloader_mod.available_transcoders(ff_path)
                                     if ff_path else [])
-        # Аккаунт Google: только факты, никаких секретов (см. google_auth).
-        account_state = google_auth.account_state(self._current_settings())
+        # Аккаунты Google: реестр меток (accounts.json), никаких секретов.
+        account_state = {
+            "accounts": google_auth.load_registry(),
+            "labels": google_auth.account_labels(),
+            "logging_in": False,
+            "note": "",
+            "visible": None,        # диагностика поимки (счётчики, домены)
+        }
         with self._lock:
-            account_state["note"] = self._account_note
             account_state["logging_in"] = self._login_window is not None
+            account_state["note"] = self._account_note
+            if self._login_facts:
+                account_state["visible"] = dict(self._login_facts)
         config = settings.as_public(self._current_settings())
         heavy = self._heavy_snapshot()
         return {
@@ -708,6 +742,11 @@ class Api:
             _storage, error = self._storage_or_error(storage_id)
             if error:
                 return {"error": error}
+        # Чьи куки использовать: аккаунт привязывается к источнику.
+        account_id = str(request.get("account_id") or "").strip() or None
+        if account_id and not any(item["id"] == account_id
+                                  for item in google_auth.load_registry()):
+            return {"error": "Аккаунт не найден - войдите заново"}
         try:
             kind = sources.classify(url)["kind"]
         except Exception as exc:  # noqa: BLE001 - кривая ссылка не должна ронять окно
@@ -720,7 +759,8 @@ class Api:
             if self._add.get("phase") in ("fetching", "committing"):
                 return {"error": "Добавление уже идёт"}
             self._add = {"phase": "fetching", "mode": mode,
-                         "storage_id": storage_id, "url": url,
+                         "storage_id": storage_id, "account_id": account_id,
+                         "url": url,
                          "fetch": {"got": 0, "total": 0}, "plan": None,
                          "stages": self._stages(), "result": None, "error": None}
             self._add_snapshot = None
@@ -754,6 +794,12 @@ class Api:
                     if error:
                         return {"error": error}
                 self._add["storage_id"] = storage_id
+            if "account_id" in request:
+                account_id = str(request.get("account_id") or "").strip() or None
+                if account_id and not any(item["id"] == account_id
+                                          for item in google_auth.load_registry()):
+                    return {"error": "Аккаунт не найден - войдите заново"}
+                self._add["account_id"] = account_id
             self._add["phase"] = "committing"
             self._add["stages"] = self._stages()
             self._add["error"] = None
@@ -825,9 +871,12 @@ class Api:
                                 else f"Получаем записи {got}")
 
         try:
+            with self._lock:
+                account_id = self._add.get("account_id")
             snapshot = sources.fetch_snapshot(url, settings=config,
                                               on_progress=progress,
-                                              stop=self._add_stop)
+                                              stop=self._add_stop,
+                                              account_id=account_id)
         except sources.Aborted:
             self._finish_fetch(None, None, error=None, aborted=True)
             return
@@ -890,6 +939,7 @@ class Api:
         with self._lock:
             mode = self._add.get("mode", "partial")
             storage_id = self._add.get("storage_id")
+            account_id = self._add.get("account_id")
         if snapshot is None or plan is None:
             with self._lock:
                 self._add.update(phase="error",
@@ -912,7 +962,8 @@ class Api:
         run_id = repo.start_run(conn, "add")
         try:
             stats = repo.commit_plan(conn, snapshot, plan, on_stage=on_stage,
-                                     storage_id=storage_id)
+                                     storage_id=storage_id,
+                                     account_id=account_id)
         except sources.Aborted:
             repo.finish_run(conn, run_id, {"cancelled": True})
             with self._lock:
@@ -962,6 +1013,9 @@ class Api:
                         "picker": picker, "picker_total": picker_total,
                         "storage_id": storage_id,
                         "storage_label": storage_label,
+                        "account_id": account_id,
+                        "account_label": (google_auth.account_labels()
+                                          .get(account_id or "", "")),
                         "title": (snapshot["playlist"].get("title")
                                   or snapshot["playlist"].get("remote_id")),
                         "url": snapshot.get("url")})
@@ -1690,7 +1744,7 @@ class Api:
             self._log(f"ffmpeg готов: {path}")
 
     # ------------------------------------------------------------------ #
-    #  Аккаунт Google: куки для загрузки (см. google_auth)
+    #  Аккаунты Google: копии кук, привязанные к источникам (google_auth)
     # ------------------------------------------------------------------ #
 
     LOGIN_TIMEOUT = 15 * 60     # секунд жизни окна входа
@@ -1701,11 +1755,10 @@ class Api:
                       "__Secure-1PSID", "__Secure-3PSID")
 
     def account_login_start(self, request=None) -> dict:
-        """Открыть окно входа в Google; куки снимаем сами.
+        """Открыть окно входа; после входа куки становятся НОВЫМ аккаунтом.
 
         Окно живёт само: как только площадка выдаст сессию (аккаунтские
-        куки на google/youtube), куки шифруются и сохраняются, окно
-        закрывается. Пользователю достаточно войти.
+        куки на google/youtube), создаётся аккаунт, окно закрывается.
         """
         with self._lock:
             if self._login_window is not None:
@@ -1726,7 +1779,9 @@ class Api:
         self._login_cancel.clear()
         with self._lock:
             self._login_window = window
-            self._account_note = "Идёт вход: войдите в аккаунт в открытом окне"
+            self._login_facts = {}
+            self._account_note = ("Идёт вход: войдите в аккаунт в открытом "
+                                  "окне")
         thread = threading.Thread(target=self._login_worker, args=(window,),
                                   daemon=True, name="omnistash-glogin")
         self._login_thread = thread
@@ -1736,7 +1791,7 @@ class Api:
         return {"ok": True}
 
     def account_login_stop(self) -> dict:
-        """Закрыть окно входа вручную (куки в этот момент не сняты)."""
+        """Закрыть окно входа вручную (аккаунт не создаётся)."""
         with self._lock:
             window = self._login_window
         if not window:
@@ -1747,6 +1802,28 @@ class Api:
         except Exception:  # noqa: BLE001 - окно могло закрыться само
             pass
         return {"ok": True}
+
+    def account_visible(self, request=None) -> dict:
+        """Диагностика поимки: что окно входа ВИДИТ сейчас (без значений).
+
+        Если поимка не срабатывает, эта кнопка сразу говорит почему: кук
+        нет вовсе (окно/страница не отдаёт) или они есть, но не аккаунтские.
+        """
+        with self._lock:
+            window = self._login_window
+        if not window:
+            return {"error": "Окно входа не открыто"}
+        try:
+            cookies = window.get_cookies() or []
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"Окно не отдало куки: {exc}"}
+        facts = google_auth.cookies_facts(cookies)
+        markers = sum(1 for c in cookies
+                      if c.name in self._LOGIN_MARKERS)
+        facts["markers"] = markers
+        with self._lock:
+            self._login_facts = dict(facts)
+        return facts
 
     def _guess_account_label(self, window) -> str:
         """Email со страницы входа - если страница его показывает."""
@@ -1760,10 +1837,11 @@ class Api:
             return ""
 
     def _login_worker(self, window) -> None:
-        """Опрос окна до поимки сессии; дальше - шифрование и сохранение."""
+        """Опрос окна до поимки сессии -> новый аккаунт в реестре."""
         deadline = time.time() + self.LOGIN_TIMEOUT
         picked: list = []
         label = ""
+        last_log = 0.0
         try:
             while time.time() < deadline:
                 if self._login_cancel.is_set():
@@ -1772,12 +1850,25 @@ class Api:
                     cookies = window.get_cookies() or []
                 except Exception:  # noqa: BLE001 - окно могли закрыть
                     cookies = []
+                facts = google_auth.cookies_facts(cookies)
+                facts["markers"] = sum(1 for c in cookies
+                                       if c.name in self._LOGIN_MARKERS)
+                with self._lock:
+                    self._login_facts = dict(facts)
+                # Диагностика в журнал - раз в30 секунд, без значений кук:
+                # если поимка не работает, причина читается по журналу.
+                if time.time() - last_log > 30:
+                    last_log = time.time()
+                    self._log("Вход в Google: увидено кук {} (google {}), "
+                              "аккаунтских {}, домены: {}".format(
+                                  facts["total"], facts["google"],
+                                  facts["markers"],
+                                  ", ".join(facts["domains"]) or "нет"))
                 google = [c for c in cookies
                           if google_auth.is_google_cookie(c)]
                 if (len(google) >= 3 and
                         any(c.name in self._LOGIN_MARKERS for c in google)):
                     picked = google
-                    # Окно ещё живо - вытаскиваем email для подписи статуса.
                     label = self._guess_account_label(window)
                     break
                 time.sleep(2)
@@ -1789,28 +1880,34 @@ class Api:
         with self._lock:
             self._login_window = None
         if not picked:
+            facts = dict(self._login_facts)
             with self._lock:
-                self._account_note = ("Вход не завершён - куки не получены "
-                                      "(закрыли окно или площадка не пустила)")
+                self._account_note = (
+                    "Вход не завершён: куки не получены (закрыли окно или "
+                    "площадка не пустила). Диагностика: увидено кук "
+                    f"{facts.get('total', 0)}, аккаунтских "
+                    f"{facts.get('markers', 0)}")
             self._log("Вход в Google: куки не получены")
             return
         try:
-            count = google_auth.save_cookies(picked)
+            account = google_auth.create_account(
+                picked, label=label or "вход выполнен (окно)")
         except (OSError, RuntimeError) as exc:
             with self._lock:
-                self._account_note = f"Не удалось сохранить куки: {exc}"
-            self._log(f"Вход в Google: куки не сохранены - {exc}")
+                self._account_note = f"Не удалось сохранить аккаунт: {exc}"
+            self._log(f"Вход в Google: аккаунт не сохранён - {exc}")
             return
-        settings.set_value("google_account_label",
-                           label or "вход выполнен (куки)")
-        settings.set_value("google_account_since", now_iso())
+        settings.set_value("google_account_label", "")   # легаси-ключи чистим
+        settings.set_value("google_account_since", "")
         with self._lock:
-            self._account_note = f"Аккаунт сохранён ({count} кук)"
+            self._account_note = (f"Аккаунт добавлен: {account['label']} - "
+                                  "привяжите его к источнику")
             self._heavy_at = 0.0
-        self._log(f"Аккаунт Google: куки сохранены ({count} шт)")
+        self._log(f"Аккаунт Google добавлен: {account['label']} "
+                  f"(id {account['id']})")
 
     def account_import(self, request=None) -> dict:
-        """Импорт cookies.txt (Netscape) через системный диалог файла."""
+        """Импорт cookies.txt (Netscape) -> новый аккаунт."""
         try:
             import webview
         except Exception as exc:  # noqa: BLE001
@@ -1834,30 +1931,32 @@ class Api:
         path = chosen[0] if isinstance(chosen, (list, tuple)) else chosen
         try:
             text = Path(path).read_text(encoding="utf-8", errors="replace")
-            count = google_auth.save_text_cookies(text)
+            account = google_auth.create_account_from_text(text)
         except (OSError, RuntimeError, ValueError) as exc:
             with self._lock:
                 self._account_note = f"Импорт не удался: {exc}"
             self._log(f"Импорт cookies.txt: {exc}")
             return {"error": str(exc)}
-        settings.set_value("google_account_label", "импорт cookies.txt")
-        settings.set_value("google_account_since", now_iso())
-        with self._lock:
-            self._account_note = f"Импортировано кук: {count}"
-        self._log(f"Аккаунт Google: импортировано {count} кук из файла")
-        return {"ok": True, "count": count}
-
-    def account_forget(self, request=None) -> dict:
-        """«Забыть аккаунт»: удалить зашифрованные копии и метки."""
-        removed = google_auth.forget().get("removed") or []
         settings.set_value("google_account_label", "")
         settings.set_value("google_account_since", "")
         with self._lock:
-            self._account_note = ("Аккаунт забыт" if removed
-                                  else "Аккаунт и так не был задан")
-        self._log("Аккаунт Google забыт" + (f" (удалено: {', '.join(removed)})"
-                                            if removed else ""))
-        return {"ok": True, "removed": removed}
+            self._account_note = (f"Аккаунт добавлен: {account['label']} - "
+                                  "привяжите его к источнику")
+        self._log(f"Аккаунт Google добавлен из файла: {account['label']} "
+                  f"(id {account['id']})")
+        return {"ok": True, "account": account}
+
+    def account_forget(self, request=None) -> dict:
+        """Забыть аккаунт: удалить копию кук и запись реестра."""
+        account_id = str((request or {}).get("id") or "")
+        if not account_id:
+            return {"error": "Не указан аккаунт"}
+        result = google_auth.remove_account(account_id)
+        with self._lock:
+            self._account_note = ("Аккаунт забыт" if result.get("removed")
+                                  else "Аккаунт забыт (копии и так не было)")
+        self._log(f"Аккаунт Google забыт: {account_id}")
+        return {"ok": True, "removed": bool(result.get("removed"))}
 
     # ------------------------------------------------------------------ #
     #  Расписание
@@ -1982,6 +2081,9 @@ class Api:
                 try:
                     snapshot = sources.fetch_snapshot(
                         source["url"], settings=config, stop=stop,
+                        # Куки аккаунта источника: «не бот» проходится
+                        # от имени привязанной учётки.
+                        account_id=source.get("account_id"),
                         on_progress=lambda got, want: self._sync_fetch(got, want))
                 except sources.Aborted:
                     break

@@ -196,7 +196,11 @@ class DownloadWorker:
         result = downloader.download(row, settings, stop=self._stop,
                                      on_progress=progress,
                                      dest=target["path"],
-                                     overwrite=overwrite)
+                                     overwrite=overwrite,
+                                     # Куки аккаунта источника: цепочка
+                                     # playlist_items -> playlists.account_id.
+                                     account_id=repo.video_account_id(
+                                         conn, row["id"]))
 
         if result.get("cancelled"):
             # Стоп - не ошибка: файл остаётся к докачке (.part), статус
