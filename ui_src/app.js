@@ -48,6 +48,7 @@
     dedupeResolved: null,   // Set путей: разобранные «возможные переезды»
     ffmpeg: null,           // установка ffmpeg из poll (найден/качается/ошибка)
     ffmpegNoteDismissed: false, // «Скрыть» у заметки в очереди (до конца сессии)
+    ffmpegOfferDismissed: false, // «Отмена» у стартового предложения (до перезапуска)
     viewMode: "list",       // «list»/«grid» - из настройки view_mode
     tileSize: "medium",     // «small»/«medium»/«large» - из tile_size
     account: null,          // состояние аккаунта Google из poll (без секретов)
@@ -481,7 +482,16 @@
       note.hidden = !(ff.degraded && !ff.found && !ff.running) ||
         !!state.ffmpegNoteDismissed;
     }
-    if (!$("ffmpeg-overlay").hidden) renderFfmpegBody();
+    if (!$("ffmpeg-overlay").hidden) {
+      if (ff.found && ff.phase === "done") {
+        // Установка завершилась - оверлей закрывается сам (как в Synfronia).
+        $("ffmpeg-overlay").hidden = true;
+        toast("FFmpeg установлен");
+      } else {
+        renderFfmpegBody();
+      }
+    }
+    updateFfmpegOffer();
   }
 
   function refreshTranscodeField() {
@@ -513,6 +523,19 @@
   function openFfmpegOverlay() {
     $("ffmpeg-overlay").hidden = false;
     renderFfmpegBody();
+  }
+
+  function updateFfmpegOffer() {
+    // Предложение поставить ffmpeg (как в Synfronia): при каждом запуске,
+    // пока его нет, - но сначала стартовый диалог «Где хранить видео?».
+    // «Отмена» гасит предложение до перезапуска; сам отказ не мешает
+    // работе: качаются готовые потоки, просто без склейки и метаданных.
+    if (state.ffmpegOfferDismissed) return;
+    var ff = state.ffmpeg;
+    if (!ff || ff.found || ff.running) return;
+    if (!$("storage-overlay").hidden) return;   // диалог хранилища важнее
+    if (!$("ffmpeg-overlay").hidden) return;    // уже открыт (в т.ч. вручную)
+    openFfmpegOverlay();
   }
 
   function renderFfmpegBody() {
@@ -1386,6 +1409,8 @@
     // Первый запуск (и пока хранилищ нет): спрашиваем, где хранить.
     var need = (state.storages || []).length === 0 && !state.wizardDismissed;
     $("storage-overlay").hidden = !need;
+    // Закрыли диалог хранилища - следом идёт предложение ffmpeg.
+    updateFfmpegOffer();
   }
 
   function enqueueSelection() {
@@ -2927,15 +2952,19 @@
     });
 
     // Установка ffmpeg: overlay живёт по снимку, кнопки - делегированием.
-    $("ffmpeg-close").addEventListener("click", function () {
+    // Закрытие в любом виде (✕, «Отмена», «Закрыть») гасит стартовое
+    // предложение до перезапуска - не навязываемся в одной сессии.
+    function dismissFfmpegOffer() {
+      state.ffmpegOfferDismissed = true;
       $("ffmpeg-overlay").hidden = true;
-    });
+    }
+    $("ffmpeg-close").addEventListener("click", dismissFfmpegOffer);
     $("ffmpeg-body").addEventListener("click", function (event) {
       var btn = event.target && event.target.closest
         ? event.target.closest("[data-ffmpeg]") : null;
       if (!btn) return;
       var action = btn.dataset.ffmpeg;
-      if (action === "close") { $("ffmpeg-overlay").hidden = true; return; }
+      if (action === "close") { dismissFfmpegOffer(); return; }
       if (action === "install") {
         call("ffmpeg_start").then(function (res) {
           if (res && res.error) toast(res.error, true);
@@ -3183,10 +3212,26 @@
                        error: null };
     var mockVerifyTimer = null;
     // Установка ffmpeg: в превью её имитируем, чтобы оверлей было видно.
+    // По умолчанию «найден» - тогда превью не блокируется автопредложением
+    // (как у пользователя с установленным ffmpeg). «?ff=1» показывает
+    // машину без ffmpeg: стартовое предложение, заметку в очереди и
+    // поле настроек «не установлен».
     var mockFfmpeg = { running: false, phase: "", pct: 0, error: null,
-                       found: false, path: null, degraded: true,
+                       found: true,
+                       path: "C:\\превью\\AppData\\Local\\Omnistash\\bin\\ffmpeg.exe",
+                       degraded: false,
                        // в превью - сборка без QSV, чтобы была видна пометка
                        encoders: ["libx265", "nvenc", "amf"] };
+    if (/[?&]ff=1\b/.test(location.search)) {
+      mockFfmpeg.found = false;
+      mockFfmpeg.path = null;
+      mockFfmpeg.degraded = true;
+    }
+    // ?wizard=1 - «новая машина»: хранилищ нет, поэтому сначала стартовый
+    // диалог «Где хранить видео?», и только после него предложение ffmpeg.
+    if (/[?&]wizard=1/.test(location.search)) {
+      mockStorages.length = 0;
+    }
     var mockFfmpegTimer = null;
     // Data-URI «обложки» для превью: настоящая картинка моку не нужна.
     function mockThumbUri() {
