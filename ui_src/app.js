@@ -1713,6 +1713,8 @@
         "<td>" + esc(src.title || src.remote_id) + "</td>" +
         "<td>" + esc(src.kind_label) + "</td>" +
         "<td>" + modeLabel(src.sync_mode) + "</td>" +
+        // Назначение источника: куда уйдут «Полная» и будущие синки.
+        '<td class="muted">' + esc(src.storage_label || "по умолчанию") + "</td>" +
         '<td class="num">' + (src.total || 0) + "</td>" +
         '<td class="num">' + (src.downloaded || 0) + "</td>" +
         '<td class="num">' + (src.pending || 0) + "</td>" +
@@ -2205,13 +2207,26 @@
 
   var addOpen = false;       // окно открыл пользователь
   var lastAddFlow = null;
-  var addForm = { url: "", mode: "partial", picked: {} };
+  var addForm = { url: "", mode: "partial", storageId: "", picked: {} };
 
   var ADD_MODES = [
     ["partial", "Частичная", "Новые видео попадают в индекс, контент выбираете вручную"],
     ["full", "Полная", "Новые видео сразу встают в очередь загрузки"],
     ["manual", "Ручная", "Источник обновляется только по вашей кнопке"]
   ];
+
+  function storageRowHtml() {
+    // «Куда качать» видно и до индексации, и при подтверждении: выбор
+    // запоминается у источника, его читают синк и режим «Полная».
+    var preferred = addForm.storageId || defaultStorageId();
+    return '<div class="field-label">Куда качать</div>' +
+      '<select id="add-storage" data-storage-select data-prefer="' +
+        esc(preferred) + '" ' +
+        'aria-label="Хранилище для загрузок этого источника">' +
+        storageOptionsHtml(preferred) + "</select>" +
+      '<div class="muted">Выбор запоминается у источника: синхронизация ' +
+      "и режим «Полная» будут качать именно сюда.</div>";
+  }
 
   function modeRadios(current, name) {
     return '<div class="mode-list">' + ADD_MODES.map(function (mode) {
@@ -2288,6 +2303,7 @@
         '<table class="table add-counts"><tbody>' + rows + "</tbody></table>" + warn +
         '<div class="field-label">Режим синхронизации</div>' +
         modeRadios(addForm.mode, "add-mode") +
+        storageRowHtml() +
         '<div class="card-actions">' +
         '<button class="btn" data-act="close">Отмена</button>' +
         '<button class="btn primary" data-act="confirm">Добавить</button></div>';
@@ -2322,6 +2338,7 @@
         "Новых видео: " + (stats.new_videos || 0),
         "Уже было в библиотеке: " + (stats.known_videos || 0),
         "Связей создано: " + (stats.links_to_create || 0),
+        "Куда качать: " + (result.storage_label || "по умолчанию"),
         (stats.removed ? "Убрано из плейлиста: " + stats.removed : "")
       ].filter(Boolean).map(function (line) {
         return "<li>" + esc(line) + "</li>";
@@ -2331,7 +2348,9 @@
 
       if (result.mode === "full") {
         html += '<div class="notice ok">В очередь загрузки поставлено: <b>' +
-          (result.queued || 0) + "</b></div>" +
+          (result.queued || 0) + "</b>" +
+          (result.storage_label ? " → " + esc(result.storage_label) : "") +
+          "</div>" +
           '<div class="card-actions">' +
           '<button class="btn" data-act="close">Закрыть</button>' +
           '<button class="btn primary" data-act="queue">К очереди</button></div>';
@@ -2348,9 +2367,11 @@
           }).join("") + "</div>" +
           '<div class="card-actions">' +
           '<button class="btn ghost" data-act="pick-all">Выбрать все</button>' +
-          '<select data-storage-select data-prefer="' + esc(defaultStorageId()) +
+          '<select data-storage-select data-prefer="' +
+            esc(addForm.storageId || defaultStorageId()) +
             '" id="pick-storage" aria-label="Хранилище">' +
-            storageOptionsHtml(defaultStorageId()) + "</select>" +
+            storageOptionsHtml(addForm.storageId || defaultStorageId()) +
+          "</select>" +
           '<button class="btn" data-act="close">Позже</button>' +
           '<button class="btn primary" data-act="download" id="pick-go" disabled>Загрузить выбранные</button>' +
           "</div>";
@@ -2376,6 +2397,7 @@
         "Метаданные снимаются до записи в базу, поэтому «Отмена» ничего не стоит.</div>" +
         '<div class="field-label">Режим синхронизации</div>' +
         modeRadios(addForm.mode, "add-mode") +
+        storageRowHtml() +
         '<div class="card-actions"><button class="btn primary" data-act="run">Индексировать</button></div>';
     }
 
@@ -2394,10 +2416,18 @@
       if (addOpen && !addForm.url) setTimeout(function () { urlInput.focus(); }, 50);
     }
 
-    Array.prototype.forEach.call(body.querySelectorAll('input[name="add-mode"]'),
+    Array.prototype.forEach.call(
+      body.querySelectorAll('input[name="add-mode"]'),
       function (radio) {
         radio.addEventListener("change", function () { addForm.mode = radio.value; });
       });
+
+    var addStorage = document.getElementById("add-storage");
+    if (addStorage) {
+      addStorage.addEventListener("change", function () {
+        addForm.storageId = addStorage.value;
+      });
+    }
 
     Array.prototype.forEach.call(body.querySelectorAll("[data-act]"), function (btn) {
       btn.addEventListener("click", function () { addAction(btn.dataset.act); });
@@ -2425,9 +2455,19 @@
     }
   }
 
+  function currentAddStorage() {
+    // Значение берём с экрана, а не из addForm: селект всегда показывает
+    // конкретную папку, и «не трогал» не должен молча означать «по
+    // умолчанию» - что видно, то и сохраняется.
+    var sel = document.getElementById("add-storage");
+    return sel ? sel.value : addForm.storageId;
+  }
+
   function runAdd() {
     if (!addForm.url.trim()) { toast("Вставьте ссылку", true); return; }
-    call("add_start", { url: addForm.url.trim(), mode: addForm.mode })
+    addForm.storageId = currentAddStorage();
+    call("add_start", { url: addForm.url.trim(), mode: addForm.mode,
+                        storage_id: addForm.storageId })
       .then(function (res) {
         if (res && res.error) toast(res.error, true);
         else addOpen = true;
@@ -2438,7 +2478,9 @@
     if (action === "close" || action === "cancel") { closeAdd(); return; }
     if (action === "run") { runAdd(); return; }
     if (action === "confirm") {
-      call("add_confirm", { mode: addForm.mode }).then(function (res) {
+      addForm.storageId = currentAddStorage();
+      call("add_confirm", { mode: addForm.mode,
+                            storage_id: addForm.storageId }).then(function (res) {
         if (res && res.error) toast(res.error, true);
       });
       return;
@@ -2801,6 +2843,17 @@
     var mockSync = { running: false, index: 0, total: 0, current: null,
                      fetch: null, stage: null, results: [], new_ids: [],
                      new_total: 0, queued: 0, error: null };
+    // Симуляция добавления источника: индексация -> подтверждение -> итог.
+    // В превью нет сети, но экраны (селект «Куда качать», итог с меткой,
+    // пикер) должны быть проверяемы.
+    var mockAdd = { phase: "idle", mode: "partial", storage_id: null, url: "",
+                    fetch: null, plan: null, stages: [], result: null,
+                    error: null };
+    var mockAddTimer = null;
+    function mockStorageLabel(id) {
+      var hit = mockStorages.filter(function (s) { return s.id === id; })[0];
+      return hit ? hit.label : null;
+    }
     // Хранилища в превью: одно активное, одно отвязанное - чтобы видеть
     // оба состояния списка в настройках.
     var mockStorages = [
@@ -2948,7 +3001,12 @@
           scan: JSON.parse(JSON.stringify(mockScan)),
           sources: [{ id: 1, title: "Тестовый плейлист", kind_label: "плейлист",
                       sync_mode: "partial", total: 3, downloaded: 1, pending: 2,
-                      last_synced_at: "2026-10-06T16:38:45" }],
+                      storage_label: "библиотека",
+                      last_synced_at: "2026-10-06T16:38:45" },
+                    { id: 2, title: "Старый канал", kind_label: "загрузки канала",
+                      sync_mode: "full", total: 9, downloaded: 0, pending: 9,
+                      storage_label: null,
+                      last_synced_at: null }],
           runs: [{ id: 1, kind: "add", started_at: "2026-10-06T16:38:45",
                    finished_at: "2026-10-06T16:38:46",
                    stats: { new_videos: 3, links_to_create: 3 } }],
@@ -3002,8 +3060,7 @@
                               last: "2026-10-07T15:04:00" } },
           repack: JSON.parse(JSON.stringify(mockRepack)),
           migrate: JSON.parse(JSON.stringify(mockMigrate)),
-          add_flow: { phase: "idle", mode: "partial", url: "", fetch: null,
-                      plan: null, stages: [], result: null, error: null },
+          add_flow: JSON.parse(JSON.stringify(mockAdd)),
           storages: JSON.parse(JSON.stringify(mockStorages)),
           settings: settings, settings_rev: settingsRev
         });
@@ -3351,7 +3408,72 @@
         mockSync.queued = mockSync.new_total;
         return Promise.resolve({ queued: mockSync.new_total });
       },
-      add_start: function () { return Promise.resolve({ error: "в превью недоступно" }); }
+      add_start: function (req) {
+        req = req || {};
+        if (!(req.url || "").trim()) {
+          return Promise.resolve(
+            { error: "Вставьте ссылку на плейлист или канал" });
+        }
+        if (mockAddTimer) clearInterval(mockAddTimer);
+        mockAdd = { phase: "fetching", mode: req.mode || "partial",
+                    storage_id: req.storage_id || null, url: req.url,
+                    fetch: { got: 0, total: 40 }, plan: null, stages: [],
+                    result: null, error: null };
+        var got = 0;
+        mockAddTimer = setInterval(function () {
+          got += 8;
+          mockAdd.fetch.got = Math.min(got, 40);
+          if (got >= 40) {
+            clearInterval(mockAddTimer);
+            mockAddTimer = null;
+            mockAdd.phase = "confirm";
+            mockAdd.plan = { title: "(превью) Плейлист", channel: "Автор А",
+                             kind: "remote", item_count: 40, exists: false,
+                             is_mix: false,
+                             counts: { new_channels: 2, known_channels: 0,
+                                       new_videos: 12, known_videos: 3,
+                                       links_to_create: 12, links_existing: 0,
+                                       skipped: 1, dupes: 0 } };
+          }
+        }, 200);
+        return Promise.resolve({ ok: true });
+      },
+      add_confirm: function (req) {
+        req = req || {};
+        if (req.storage_id !== undefined) {
+          mockAdd.storage_id = req.storage_id || null;
+        }
+        if (req.mode) mockAdd.mode = req.mode;
+        mockAdd.phase = "committing";
+        setTimeout(function () {
+          var full = mockAdd.mode === "full";
+          mockAdd.phase = "done";
+          mockAdd.result = {
+            stats: { new_videos: 12, known_videos: 3, links_to_create: 12,
+                     removed: 0 },
+            mode: mockAdd.mode,
+            queued: full ? 12 : 0,
+            picker: full ? [] : [{ id: 71, title: "(превью) ролик 1",
+                                   duration_s: 610 },
+                                 { id: 72, title: "(превью) ролик 2",
+                                   duration_s: 130 }],
+            picker_total: full ? 0 : 12,
+            storage_id: mockAdd.storage_id,
+            storage_label: mockStorageLabel(mockAdd.storage_id),
+            title: mockAdd.plan ? mockAdd.plan.title : "(превью) Плейлист",
+            url: mockAdd.url
+          };
+        }, 700);
+        return Promise.resolve({ ok: true });
+      },
+      add_close: function () {
+        if (mockAddTimer) { clearInterval(mockAddTimer); mockAddTimer = null; }
+        mockAdd = { phase: "idle", mode: mockAdd.mode,
+                    storage_id: mockAdd.storage_id, url: mockAdd.url,
+                    fetch: null, plan: null, stages: [], result: null,
+                    error: null };
+        return Promise.resolve({ ok: true });
+      }
     };
     $("preview-badge").hidden = false;
     bootOnce();

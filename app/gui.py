@@ -689,6 +689,13 @@ class Api:
         mode = request.get("mode") or config.get("default_sync_mode") or "partial"
         if mode not in SYNC_MODES:
             mode = "partial"
+        # Куда качать этот источник: выбор пользователя, а не фоновое
+        # решение - валидируем сразу, чтобы не узнать об ошибке при загрузке.
+        storage_id = str(request.get("storage_id") or "").strip() or None
+        if storage_id:
+            _storage, error = self._storage_or_error(storage_id)
+            if error:
+                return {"error": error}
         try:
             kind = sources.classify(url)["kind"]
         except Exception as exc:  # noqa: BLE001 - кривая ссылка не должна ронять окно
@@ -700,7 +707,8 @@ class Api:
         with self._lock:
             if self._add.get("phase") in ("fetching", "committing"):
                 return {"error": "Добавление уже идёт"}
-            self._add = {"phase": "fetching", "mode": mode, "url": url,
+            self._add = {"phase": "fetching", "mode": mode,
+                         "storage_id": storage_id, "url": url,
                          "fetch": {"got": 0, "total": 0}, "plan": None,
                          "stages": self._stages(), "result": None, "error": None}
             self._add_snapshot = None
@@ -725,6 +733,15 @@ class Api:
                 return {"error": "План не готов - нажмите «Индексировать»"}
             if request.get("mode") in SYNC_MODES:
                 self._add["mode"] = request["mode"]
+            if "storage_id" in request:
+                # Выбор «куда качать» можно поменять прямо в диалоге
+                # подтверждения - фиксируем его к моменту записи.
+                storage_id = str(request.get("storage_id") or "").strip() or None
+                if storage_id:
+                    _storage, error = self._storage_or_error(storage_id)
+                    if error:
+                        return {"error": error}
+                self._add["storage_id"] = storage_id
             self._add["phase"] = "committing"
             self._add["stages"] = self._stages()
             self._add["error"] = None
@@ -860,6 +877,7 @@ class Api:
         plan = self._add_plan
         with self._lock:
             mode = self._add.get("mode", "partial")
+            storage_id = self._add.get("storage_id")
         if snapshot is None or plan is None:
             with self._lock:
                 self._add.update(phase="error",
@@ -881,7 +899,8 @@ class Api:
 
         run_id = repo.start_run(conn, "add")
         try:
-            stats = repo.commit_plan(conn, snapshot, plan, on_stage=on_stage)
+            stats = repo.commit_plan(conn, snapshot, plan, on_stage=on_stage,
+                                     storage_id=storage_id)
         except sources.Aborted:
             repo.finish_run(conn, run_id, {"cancelled": True})
             with self._lock:
@@ -901,11 +920,17 @@ class Api:
             return
 
         playlist_id = stats.get("playlist_id")
+        storage_label = None
+        if storage_id:
+            storage = storages_mod.get(conn, storage_id)
+            storage_label = (storage or {}).get("label") or storage_id
         queued = 0
         picker, picker_total = [], 0
         if mode == "full" and playlist_id:
-            # «Полная»: всё ожидающее в этом источнике встаёт в очередь.
-            queued = repo.enqueue_playlist(conn, playlist_id)
+            # «Полная»: всё ожидающее в этом источнике встаёт в очередь -
+            # в выбранную пользователем папку, а не в глобальную.
+            queued = repo.enqueue_playlist(conn, playlist_id,
+                                           storage_id=storage_id)
         elif mode == "partial" and playlist_id:
             # «Частичная»: вместо очереди - пикер, контент выбирают руками.
             # «Ручная» вообще ничего не готовит: источник просто занесён.
@@ -923,15 +948,18 @@ class Api:
                 phase="done", error=None,
                 result={"stats": stats, "mode": mode, "queued": queued,
                         "picker": picker, "picker_total": picker_total,
+                        "storage_id": storage_id,
+                        "storage_label": storage_label,
                         "title": (snapshot["playlist"].get("title")
                                   or snapshot["playlist"].get("remote_id")),
                         "url": snapshot.get("url")})
             self._busy = False
             self._heavy_at = 0.0
             self._status = "Готово"
-        self._log("Добавлено: плейлист {}, новых {}, связей {}{}".format(
+        self._log("Добавлено: плейлист {}, новых {}, связей {}{}{}".format(
             1, stats["new_videos"], stats["links_to_create"],
-            f", в очередь {queued}" if queued else ""))
+            f", в очередь {queued}" if queued else "",
+            f", качать в «{storage_label}»" if storage_label else ""))
 
     # ------------------------------------------------------------------ #
     #  Хранилища
@@ -1812,8 +1840,12 @@ class Api:
                              known=stats["known_videos"],
                              removed=stats.get("removed") or 0)
                 if source.get("sync_mode") == "full" and stats["playlist_id"]:
-                    entry["queued"] = repo.enqueue_playlist(conn,
-                                                            stats["playlist_id"])
+                    # «Полная»: в очередь встаёт выбранное источником
+                    # хранилище (playlists.storage_id), а не глобальное -
+                    # выбор делал пользователь при добавлении.
+                    entry["queued"] = repo.enqueue_playlist(
+                        conn, stats["playlist_id"],
+                        storage_id=source.get("storage_id"))
                     queued_total += entry["queued"]
 
                 with self._lock:

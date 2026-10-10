@@ -406,12 +406,17 @@ def plan_diff(conn: sqlite3.Connection, snapshot: dict) -> dict:
 
 
 def commit_plan(conn: sqlite3.Connection, snapshot: dict, plan: dict,
-                on_stage=None) -> dict:
+                on_stage=None, storage_id: str | None = None) -> dict:
     """Принять план: плейлист -> авторы -> видео -> связи. Одна транзакция.
 
     on_stage(stage, state, current, total) вызывается по ходу - отсюда UI
     берёт чек-лист стадий. Исключение (в том числе отмена) откатывает всё
     до последней строки: частичных состояний не остаётся.
+
+    storage_id - куда качать этот источник (выбор пользователя в диалоге
+    добавления). Пишется на плейлист в ТОЙ ЖЕ транзакции: цепочку
+    «источник -> канал -> глобальное» читает очередь при каждой загрузке,
+    отмена не должна оставить выбор за собой.
     """
     def stage(name, state, current=0, total=0):
         if on_stage:
@@ -429,6 +434,12 @@ def commit_plan(conn: sqlite3.Connection, snapshot: dict, plan: dict,
         # --- стадия 1: плейлист -------------------------------------------
         stage("playlist", "active", 0, 1)
         playlist_id = ensure_playlist(conn, snapshot["playlist"])
+        if storage_id:
+            # «Куда качать этот источник»: resolve_target в очереди читает
+            # playlists.storage_id первым (см. storages.resolve_target).
+            conn.execute(
+                "UPDATE playlists SET storage_id=?, updated_at=? WHERE id=?",
+                (storage_id, now_iso(), playlist_id))
         stage("playlist", "done", 1, 1)
 
         # --- стадия 2: авторы ---------------------------------------------
@@ -794,16 +805,23 @@ def runs(conn: sqlite3.Connection, limit: int = 30) -> list[dict]:
 
 
 def sources(conn: sqlite3.Connection) -> list[dict]:
-    """Источники для вкладки «Синхронизация»: счётчики по каждому плейлисту."""
+    """Источники для вкладки «Синхронизация»: счётчики по каждому плейлисту.
+
+    Плюс назначение (storage_id/storage_label): что выбрано «куда качать»,
+    чтобы было видно, куда уйдёт режим «Полная». Пустое - честное
+    «по умолчанию» (resolve_target допьёт глобальное хранилище).
+    """
     rows = conn.execute(
         """SELECT p.id, p.title, p.kind, p.sync_mode, p.url, p.last_synced_at,
-                  p.item_count, p.remote_id,
+                  p.item_count, p.remote_id, p.storage_id,
+                  s.label AS storage_label,
                   SUM(CASE WHEN pi.removed_at IS NULL THEN 1 ELSE 0 END) total,
                   SUM(CASE WHEN pi.removed_at IS NULL AND v.status='downloaded'
                            THEN 1 ELSE 0 END) downloaded,
                   SUM(CASE WHEN pi.removed_at IS NULL AND v.status IN ('known','queued')
                            THEN 1 ELSE 0 END) pending
              FROM playlists p
+             LEFT JOIN storages s ON s.id = p.storage_id
              LEFT JOIN playlist_items pi ON pi.playlist_id=p.id
              LEFT JOIN videos v ON v.id=pi.video_id
             GROUP BY p.id

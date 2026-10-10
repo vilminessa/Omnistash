@@ -196,7 +196,8 @@ class TestCancelAndErrors(AddFlowCase):
         # Рвём транзакцию на середине: стадия videos должна откатиться.
         real_commit = repo_mod.commit_plan
 
-        def commit_with_cancel(conn, snapshot, plan, on_stage=None):
+        def commit_with_cancel(conn, snapshot, plan, on_stage=None,
+                               storage_id=None):
             def hook(name, state, current, total):
                 # Рвём на первой записи, дошедшей до стадии видео: у маленького
                 # списка промежуточного active может и не быть (сразу done).
@@ -204,7 +205,8 @@ class TestCancelAndErrors(AddFlowCase):
                     api.add_close()          # имитация клика «Отмена»
                 if on_stage:
                     on_stage(name, state, current, total)
-            return real_commit(conn, snapshot, plan, on_stage=hook)
+            return real_commit(conn, snapshot, plan, on_stage=hook,
+                               storage_id=storage_id)
 
         import unittest.mock as mock
         with mock.patch("app.gui.repo.commit_plan", side_effect=commit_with_cancel):
