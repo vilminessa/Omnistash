@@ -669,6 +669,7 @@
       }
       box.innerHTML = '<div class="notice">Окно видит кук: <b>' +
         (res.total || 0) + "</b> (Google/YouTube: " + (res.google || 0) +
+        (res.format ? ", формат: " + esc(res.format) : "") +
         "), аккаунтских (SID и пр.): <b>" + (res.markers || 0) + "</b>.<br>" +
         '<span class="muted">Домены: ' +
         esc((res.domains || []).join(", ") || "нет") + "</span></div>" +

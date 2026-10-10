@@ -141,6 +141,49 @@ class TestBrowserOptionInTransports(ProfileCase):
                          ("firefox",))
 
 
+class TestSimpleCookieFormat(ProfileCase):
+    """pywebview отдаёт и Cookie, и list[SimpleCookie] - принимаем оба."""
+
+    @staticmethod
+    def _simple_cookie(*names):
+        from http.cookies import SimpleCookie
+        sample = SimpleCookie()
+        for name in names:
+            sample[name] = f"value-{name}"
+            sample[name]["path"] = "/"
+        return sample
+
+    def test_morsel_becomes_cookie_with_domain(self):
+        cookies = google_auth.as_cookie_list(
+            self._simple_cookie("SID", "HSID"), default_domain="youtube.com")
+        self.assertEqual(len(cookies), 2)
+        for cookie in cookies:
+            self.assertIsInstance(cookie, http.cookiejar.Cookie)
+            self.assertEqual(cookie.domain, "youtube.com")
+            self.assertTrue(google_auth.is_google_cookie(cookie))
+        # Маркеры сессии опознаются - воркер поимки не упадёт.
+        self.assertTrue(any(c.name == "SID" for c in cookies))
+        facts = google_auth.cookies_facts(cookies)
+        self.assertEqual(facts["google"], 2)
+
+    def test_explicit_domain_in_morsel_wins(self):
+        sample = self._simple_cookie("SID")
+        sample["SID"]["domain"] = ".google.com"
+        cookies = google_auth.as_cookie_list(sample,
+                                             default_domain="youtube.com")
+        self.assertEqual(cookies[0].domain, ".google.com")
+
+    def test_garbage_and_passthrough(self):
+        self.assertEqual(google_auth.as_cookie_list(None), [])
+        self.assertEqual(google_auth.as_cookie_list("строка"), [])
+
+        cookie = http.cookiejar.Cookie(
+            0, "SID", "v", None, False, ".google.com", True, True, "/",
+            True, False, int(time.time()) + 86400, False, None, None, {})
+        self.assertEqual(google_auth.as_cookie_list([cookie]), [cookie],
+                         "готовые Cookie проходят без изменений")
+
+
 class TestManualCapture(GuiCase):
     """«Я вошёл - забрать куки»: разовая поимка по кнопке."""
 

@@ -110,6 +110,62 @@ def is_google_cookie(cookie) -> bool:
                domain.endswith(suffix) for suffix in _GOOGLE_SUFFIXES)
 
 
+def _morsel_field(morsel, name, default=""):
+    """Поле morsel: зарезервированные ключи ('domain', 'path'...) живут как
+    ПАРЫ DICT, а не как атрибуты - читаем через get с фолбэком на getattr."""
+    getter = getattr(morsel, "get", None)
+    if callable(getter):
+        value = getter(name, None)
+        if value not in (None, ""):
+            return value
+    return getattr(morsel, name, default)
+
+
+def as_cookie_list(raw, default_domain: str = "") -> list:
+    """window.get_cookies() -> список http.cookiejar.Cookie.
+
+    pywebview отдаёт РАЗНЫЕ форматы в зависимости от состояния окна: и
+    готовые Cookie, и list[SimpleCookie] (morsel: value/path/httponly, но
+    домен пустой). Воркер падал на втором формате - поэтому здесь вся
+    нормализация. Для morsel без домена берём default_domain (хост текущей
+    страницы окна): куки честно сняты для этой страницы, в Netscape-файл
+    домен обязан попасть.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, http.cookiejar.Cookie):
+        return [raw]
+    if isinstance(raw, (list, tuple)):
+        out = []
+        for item in raw:
+            out.extend(as_cookie_list(item, default_domain))
+        return out
+    items = getattr(raw, "items", None)      # SimpleCookie и прочие мапы
+    if callable(items):
+        out = []
+        for name, morsel in list(items())[:200]:
+            domain = str(_morsel_field(morsel, "domain") or
+                         default_domain or "").strip()
+            path = str(_morsel_field(morsel, "path") or "/") or "/"
+            try:
+                out.append(http.cookiejar.Cookie(
+                    version=0, name=str(name),
+                    value=str(getattr(morsel, "value", "")),
+                    port=None, port_specified=False,
+                    domain=domain, domain_specified=bool(domain),
+                    domain_initial_dot=domain.startswith("."),
+                    path=path, path_specified=True,
+                    secure=bool(_morsel_field(morsel, "secure", False)),
+                    expires=None, discard=True, comment=None,
+                    comment_url=None, rest={"httponly":
+                                            _morsel_field(morsel, "httponly", "")},
+                    rfc2109=False))
+            except Exception:  # noqa: BLE001 - кривая кука не должна ронять
+                continue
+        return out
+    return []
+
+
 def export_netscape(cookies) -> str:
     """Куки (http.cookiejar.Cookie) -> Netscape txt для yt-dlp.
 

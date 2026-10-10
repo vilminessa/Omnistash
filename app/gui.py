@@ -1812,19 +1812,20 @@ class Api:
         if not window:
             return {"error": "Окно входа не открыто"}
         try:
-            cookies = window.get_cookies() or []
+            cookies, kind = self._window_cookies(window)
         except Exception as exc:  # noqa: BLE001
             return {"error": f"Окно не отдало куки: {exc}"}
         facts = google_auth.cookies_facts(cookies)
-        markers = [c for c in cookies
-                   if c.name in self._LOGIN_MARKERS]
-        facts["markers"] = len(markers)
+        markers = sum(1 for c in cookies
+                      if c.name in self._LOGIN_MARKERS)
+        facts["markers"] = markers
+        facts["format"] = kind
         with self._lock:
             self._login_facts = dict(facts)
-        self._log("Ручная поимка: увидено кук {} (google {}), аккаунтских {}, "
-                  "домены: {}".format(facts["total"], facts["google"],
-                                      facts["markers"],
-                                      ", ".join(facts["domains"]) or "нет"))
+        self._log("Ручная поимка: увидено кук {} (google {}, формат {}), "
+                  "аккаунтских {}, домены: {}".format(
+                      facts["total"], facts["google"], kind, facts["markers"],
+                      ", ".join(facts["domains"]) or "нет"))
         google = [c for c in cookies if google_auth.is_google_cookie(c)]
         if len(google) < 3 or not markers:
             return {"error":
@@ -1869,13 +1870,14 @@ class Api:
         if not window:
             return {"error": "Окно входа не открыто"}
         try:
-            cookies = window.get_cookies() or []
+            cookies, kind = self._window_cookies(window)
         except Exception as exc:  # noqa: BLE001
             return {"error": f"Окно не отдало куки: {exc}"}
         facts = google_auth.cookies_facts(cookies)
         markers = sum(1 for c in cookies
                       if c.name in self._LOGIN_MARKERS)
         facts["markers"] = markers
+        facts["format"] = kind
         with self._lock:
             self._login_facts = dict(facts)
         return facts
@@ -1891,6 +1893,28 @@ class Api:
         except Exception:  # noqa: BLE001 - без email тоже проживём
             return ""
 
+    def _window_host(self, window) -> str:
+        """Хост текущей страницы окна - домен по умолчанию для morsel-кук."""
+        try:
+            from urllib.parse import urlparse
+            return (urlparse(window.get_current_url() or "").hostname or "")
+        except Exception:  # noqa: BLE001 - окно могло закрыться
+            return ""
+
+    def _window_cookies(self, window) -> tuple:
+        """Куки окна в нормализованном виде: (список Cookie, формат).
+
+        pywebview отдаёт и Cookie, и list[SimpleCookie] - формат пишем в
+        журнал, чтобы смена поведения библиотеки была видна сразу.
+        """
+        raw = window.get_cookies() or []
+        if isinstance(raw, (list, tuple)) and raw:
+            kind = type(raw[0]).__name__
+        else:
+            kind = type(raw).__name__
+        return (google_auth.as_cookie_list(
+            raw, default_domain=self._window_host(window)), kind)
+
     def _login_worker(self, window) -> None:
         """Опрос окна до поимки сессии -> новый аккаунт в реестре."""
         deadline = time.time() + self.LOGIN_TIMEOUT
@@ -1902,9 +1926,9 @@ class Api:
                 if self._login_cancel.is_set():
                     break
                 try:
-                    cookies = window.get_cookies() or []
+                    cookies, kind = self._window_cookies(window)
                 except Exception:  # noqa: BLE001 - окно могли закрыть
-                    cookies = []
+                    cookies, kind = [], "?"
                 facts = google_auth.cookies_facts(cookies)
                 facts["markers"] = sum(1 for c in cookies
                                        if c.name in self._LOGIN_MARKERS)
@@ -1915,9 +1939,9 @@ class Api:
                 # по журналу сразу, а не через полчаса.
                 if facts != last_facts:
                     last_facts = dict(facts)
-                    self._log("Вход в Google: увидено кук {} (google {}), "
-                              "аккаунтских {}, домены: {}".format(
-                                  facts["total"], facts["google"],
+                    self._log("Вход в Google: увидено кук {} (google {}, "
+                              "формат {}), аккаунтских {}, домены: {}".format(
+                                  facts["total"], facts["google"], kind,
                                   facts["markers"],
                                   ", ".join(facts["domains"]) or "нет"))
                 google = [c for c in cookies
