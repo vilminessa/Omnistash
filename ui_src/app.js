@@ -591,8 +591,16 @@
         "применяются только у источников, к которым аккаунт привязан.</div>";
     }
     Array.prototype.forEach.call(
-      document.querySelectorAll('#settings-body [data-act-account="login"]'),
-      function (btn) { btn.disabled = !!acc.logging_in; });
+      document.querySelectorAll("#settings-body [data-act-account]"),
+      function (btn) {
+        var act = btn.dataset.actAccount;
+        if (act !== "login" && act !== "abort") return;
+        // В момент входа кнопка «Войти» превращается в «Прервать»:
+        // закрыли окно сами или передумали - состояние снимается сразу,
+        // а не через таймаут ожидания.
+        btn.dataset.actAccount = acc.logging_in ? "abort" : "login";
+        btn.textContent = acc.logging_in ? "Прервать вход" : "Войти в окне…";
+      });
   }
 
   function updateBotNote() {
@@ -630,16 +638,26 @@
       "Внимание: из свежих Chrome/Edge экспорт кук сломан (шифрование " +
       "v127+), для экспорта работает Firefox.</p>" +
       '<div data-account-facts></div>' +
-      '<div class="card-actions">' +
-      '<button class="btn ghost" data-account-act="facts">' +
-      "Проверить, что видит программа</button>" +
-      '<button class="btn ghost" data-account-act="capture">' +
-      "Я вошёл - забрать куки</button>" +
-      '<button class="btn" data-account-act="import">' +
-      "Импортировать cookies.txt…</button>" +
-      '<button class="btn" data-account-act="close">Отмена</button>' +
-      '<button class="btn primary" data-account-act="login">' +
-      "Открыть окно входа</button></div>";
+      (acc.logging_in
+        ? '<div class="notice">Идёт вход: войдите в аккаунте в открытом ' +
+          "окне. Если окно закрыли или передумали - прервите и начните " +
+          "заново.</div>" +
+          '<div class="card-actions">' +
+          '<button class="btn ghost" data-account-act="facts">' +
+          "Проверить, что видит программа</button>" +
+          '<button class="btn" data-account-act="close">Отмена</button>' +
+          '<button class="btn primary" data-account-act="abort">' +
+          "Прервать вход</button></div>"
+        : '<div class="card-actions">' +
+          '<button class="btn ghost" data-account-act="facts">' +
+          "Проверить, что видит программа</button>" +
+          '<button class="btn ghost" data-account-act="capture">' +
+          "Я вошёл - забрать куки</button>" +
+          '<button class="btn" data-account-act="import">' +
+          "Импортировать cookies.txt…</button>" +
+          '<button class="btn" data-account-act="close">Отмена</button>' +
+          '<button class="btn primary" data-account-act="login">' +
+          "Открыть окно входа</button></div>");
   }
 
   function importCookies() {
@@ -2174,6 +2192,13 @@
           var act = btn.dataset.actAccount;
           if (act === "login") openAccountOverlay();
           else if (act === "import") importCookies();
+          else if (act === "abort") {
+            // Прерывание: закрывает окно (если оно ещё живо) и немедленно
+            // снимает состояние входа - кнопка снова становится «Войти».
+            call("account_login_stop").then(function () {
+              toast("Вход прерван");
+            });
+          }
         });
       });
     // Удаление аккаунта - делегированием: список перерисовывается целиком
@@ -2937,6 +2962,13 @@
       if (action === "close") { $("account-overlay").hidden = true; return; }
       if (action === "import") { importCookies(); return; }
       if (action === "facts") { checkAccountVisible(); return; }
+      if (action === "abort") {
+        call("account_login_stop").then(function () {
+          toast("Вход прерван");
+          $("account-overlay").hidden = true;
+        });
+        return;
+      }
       if (action === "capture") {
         // Ручная поимка: окно могли закрыть, а могли и войти молча.
         call("account_capture_now").then(function (res) {

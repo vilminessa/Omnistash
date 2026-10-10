@@ -1921,13 +1921,26 @@ class Api:
         picked: list = []
         label = ""
         last_facts: dict = {}
+        closed_by_user = threading.Event()
+
+        def on_closed(*_args):
+            # Пользователь закрыл окно сам: воркер обязан заметить сразу,
+            # а не ждать таймаута - иначе «Войти» заблокирован минутами.
+            closed_by_user.set()
+
+        try:
+            window.events.closed += on_closed
+        except Exception:  # noqa: BLE001 - подписка возможна не везде
+            on_closed = None
         try:
             while time.time() < deadline:
-                if self._login_cancel.is_set():
+                if self._login_cancel.is_set() or closed_by_user.is_set():
                     break
                 try:
                     cookies, kind = self._window_cookies(window)
                 except Exception:  # noqa: BLE001 - окно могли закрыть
+                    if closed_by_user.is_set():
+                        break       # окно мертво - не крутим до таймаута
                     cookies, kind = [], "?"
                 facts = google_auth.cookies_facts(cookies)
                 facts["markers"] = sum(1 for c in cookies
@@ -1953,6 +1966,13 @@ class Api:
                     break
                 time.sleep(2)
         finally:
+            if on_closed is not None:
+                try:
+                    # Отписка ДО destroy: иначе наш же destroy выставил бы
+                    # флаг и статус соврал бы «закрыл пользователь».
+                    window.events.closed -= on_closed
+                except Exception:  # noqa: BLE001
+                    pass
             try:
                 window.destroy()
             except Exception:  # noqa: BLE001
@@ -1962,12 +1982,24 @@ class Api:
         if not picked:
             facts = dict(self._login_facts)
             with self._lock:
-                self._account_note = (
-                    "Вход не завершён: куки не получены (закрыли окно или "
-                    "площадка не пустила). Диагностика: увидено кук "
-                    f"{facts.get('total', 0)}, аккаунтских "
-                    f"{facts.get('markers', 0)}")
-            self._log("Вход в Google: куки не получены")
+                if self._login_cancel.is_set():
+                    # Прерывание нашей кнопкой (destroy тоже шлёт closed,
+                    # поэтому приоритет у флага остановки).
+                    self._account_note = ("Вход прерван по кнопке - можно "
+                                          "открыть заново")
+                elif closed_by_user.is_set():
+                    self._account_note = ("Вход прерван: окно закрыли до "
+                                          "поимки куки - можно открыть заново")
+                else:
+                    self._account_note = (
+                        "Вход не завершён: куки не получены (площадка не "
+                        "пустила). Диагностика: увидено кук "
+                        f"{facts.get('total', 0)}, аккаунтских "
+                        f"{facts.get('markers', 0)}")
+            self._log("Вход в Google: куки не получены" + (
+                " (прервано по кнопке)" if self._login_cancel.is_set()
+                else " (окно закрыли до поимки)" if closed_by_user.is_set()
+                else ""))
             return
         try:
             account = google_auth.create_account(

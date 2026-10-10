@@ -245,5 +245,107 @@ class TestSchema(unittest.TestCase):
         self.assertIn("browser_cookies", schema.defaults())
 
 
+class FakeEvent:
+    """Мини-аналог webview.event.Event: подписка +=/-= и оповещение."""
+
+    def __init__(self):
+        self._subs = []
+
+    def __iadd__(self, handler):
+        self._subs.append(handler)
+        return self
+
+    def __isub__(self, handler):
+        if handler in self._subs:
+            self._subs.remove(handler)
+        return self
+
+    def fire(self, *args):
+        for handler in list(self._subs):
+            handler(*args)
+
+
+class ClosingWindow(FakeLoginWindow):
+    """Окно с событиями: destroy шлёт closed, как настоящий pywebview."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        from types import SimpleNamespace
+        self.events = SimpleNamespace(closed=FakeEvent())
+
+    def destroy(self):
+        self.destroyed = True
+        self.events.closed.fire()
+
+
+class TestClosedWindow(GuiCase):
+    """Случайно закрытое окно входа не должно блокировать «Войти»."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.dict(os.environ, {"LOCALAPPDATA":
+                                               tempfile.mkdtemp(prefix="ga_")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.api = self.make_api()
+
+    def test_user_close_ends_capture_immediately(self):
+        # warmup без конца: сессии не будет, воркер ждал бы таймаута (15 мин),
+        # но закрытие окна должно оборвать ожидание сразу.
+        window = ClosingWindow([], warmup=10 ** 6)
+        with mock.patch("webview.create_window", return_value=window):
+            self.assertTrue(self.api.account_login_start()["ok"])
+        deadline = time.time() + 5
+        while time.time() < deadline and not self.api._login_facts:
+            time.sleep(0.02)
+        self.assertTrue(self.api._login_facts, "воркер должен был опросить окно")
+
+        window.events.closed.fire()          # пользователь закрыл окно
+        self.api._login_thread.join(5)
+        self.assertFalse(self.api._login_thread.is_alive(),
+                         "воркер обязан выйти сразу, а не через таймаут")
+        self.assertIsNone(self.api._login_window)
+        account = self.api.poll(0)["account"]
+        self.assertFalse(account["logging_in"], "«Войти» снова доступна")
+        self.assertIn("прерван", account["note"])
+        self.assertEqual(google_auth.load_registry(), [])
+
+    def test_our_own_destroy_is_not_user_close(self):
+        # account_login_stop закрывает окно само: destroy шлёт closed, но
+        # воркер уже отписался - статус не должен врать «закрыл пользователь».
+        window = ClosingWindow([], warmup=10 ** 6)
+        with mock.patch("webview.create_window", return_value=window):
+            self.assertTrue(self.api.account_login_start()["ok"])
+        deadline = time.time() + 5
+        while time.time() < deadline and not self.api._login_facts:
+            time.sleep(0.02)
+        self.assertTrue(self.api.account_login_stop()["ok"])
+        self.api._login_thread.join(5)
+        account = self.api.poll(0)["account"]
+        self.assertFalse(account["logging_in"])
+        self.assertIn("по кнопке", account["note"])
+        self.assertNotIn("окно закрыли", account["note"],
+                         "наше собственное закрытие не выдаётся за закрытие "
+                         "пользователем")
+
+    def test_restart_after_close_opens_new_window(self):
+        window = ClosingWindow([], warmup=10 ** 6)
+        with mock.patch("webview.create_window", return_value=window):
+            self.assertTrue(self.api.account_login_start()["ok"])
+            deadline = time.time() + 5
+            while time.time() < deadline and not self.api._login_facts:
+                time.sleep(0.02)
+            window.events.closed.fire()
+            self.api._login_thread.join(5)
+            # Кнопка снова работает: новое окно открывается без ошибок.
+            second = ClosingWindow([], warmup=10 ** 6)
+            with mock.patch("webview.create_window", return_value=second):
+                result = self.api.account_login_start()
+            self.assertTrue(result.get("ok"), result)
+            self.assertTrue(self.api.poll(0)["account"]["logging_in"])
+            self.api.account_login_stop()
+            self.api._login_thread.join(5)
+
+
 if __name__ == "__main__":
     unittest.main()
