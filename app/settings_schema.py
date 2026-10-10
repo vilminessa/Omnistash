@@ -168,6 +168,23 @@ FIELDS: tuple[dict, ...] = (
     # Глобальной галки больше нет: куки применяются только там, где
     # аккаунт явно привязан к источнику (playlists.account_id).
     {
+        "key": "browser_cookies",
+        "type": "choice",
+        "section": "Аккаунт Google",
+        "label": "Куки из браузера (без копий)",
+        "hint": "yt-dlp читает куки вашего браузера напрямую - копий у нас "
+                "не появляется. Firefox работает; Chrome/Edge v127+ шифруют "
+                "куки (App-Bound Encryption) и прочитать их нельзя - для "
+                "них используйте импорт cookies.txt. Привязанный аккаунт "
+                "имеет приоритет над этим режимом.",
+        "choices": [["none", "Не использовать"],
+                    ["firefox", "Firefox"],
+                    ["edge", "Edge (не работает в v127+)"],
+                    ["chrome", "Chrome (не работает в v127+)"],
+                    ["brave", "Brave (не работает в v127+)"]],
+        "default": "none",
+    },
+    {
         "key": "_google_account",
         "type": "account",
         "section": "Аккаунт Google",

@@ -582,6 +582,11 @@
       if (acc.note) {
         rows += '<div class="muted">' + esc(acc.note) + "</div>";
       }
+      if (acc.browser_warning) {
+        // Честное предупреждение: браузеры с App-Bound Encryption.
+        rows += '<div class="notice warn">' + esc(acc.browser_warning) +
+          "</div>";
+      }
       box.innerHTML = rows || '<div class="muted">Аккаунтов нет: куки ' +
         "применяются только у источников, к которым аккаунт привязан.</div>";
     }
@@ -620,13 +625,16 @@
       "запросы, и хранение - только на этом компьютере. Войдя, вы " +
       "соглашаетесь с правилами площадки; аккаунт можно забыть в любой " +
       "момент.</p>" +
-      '<p class="muted">Если Google откажет во входе из окна - другой путь: ' +
-      "экспортируйте куки из своего браузера расширением (cookies.txt) и " +
-      "воспользуйтесь импортом.</p>" +
+      '<p class="muted">Если Google откажет во входе из окна («This ' +
+      "browser might not be secure») - путь через импорт cookies.txt. " +
+      "Внимание: из свежих Chrome/Edge экспорт кук сломан (шифрование " +
+      "v127+), для экспорта работает Firefox.</p>" +
       '<div data-account-facts></div>' +
       '<div class="card-actions">' +
       '<button class="btn ghost" data-account-act="facts">' +
       "Проверить, что видит программа</button>" +
+      '<button class="btn ghost" data-account-act="capture">' +
+      "Я вошёл - забрать куки</button>" +
       '<button class="btn" data-account-act="import">' +
       "Импортировать cookies.txt…</button>" +
       '<button class="btn" data-account-act="close">Отмена</button>' +
@@ -2928,6 +2936,24 @@
       if (action === "close") { $("account-overlay").hidden = true; return; }
       if (action === "import") { importCookies(); return; }
       if (action === "facts") { checkAccountVisible(); return; }
+      if (action === "capture") {
+        // Ручная поимка: окно могли закрыть, а могли и войти молча.
+        call("account_capture_now").then(function (res) {
+          var box = document.querySelector("#account-body [data-account-facts]");
+          if (res && res.error) {
+            if (box) {
+              box.innerHTML = '<div class="notice err">' + esc(res.error) +
+                "</div>";
+            }
+            toast(res.error, true);
+            return;
+          }
+          toast("Аккаунт добавлен: " +
+            ((res.account && res.account.label) || ""));
+          $("account-overlay").hidden = true;
+        });
+        return;
+      }
       if (action === "login") {
         $("account-overlay").hidden = true;
         startAccountLogin();
@@ -3084,7 +3110,7 @@
     var mockAddTimer = null;
     // Симуляция аккаунтов Google: реестр + вход «сам снимает куки».
     var mockAccount = { accounts: [], labels: {}, logging_in: false,
-                        note: "", visible: null };
+                        note: "", visible: null, browser_warning: "" };
     function mockStorageLabel(id) {
       var hit = mockStorages.filter(function (s) { return s.id === id; })[0];
       return hit ? hit.label : null;
@@ -3362,6 +3388,21 @@
             "привяжите его к источнику";
         }, 1800);
         return Promise.resolve({ ok: true });
+      },
+      account_capture_now: function () {
+        // Ручная поимка в моке: если «окно входа» не открывали - честная
+        // ошибка, иначе - аккаунт.
+        if (!mockAccount.logging_in) {
+          return Promise.resolve({ error: "Окно входа не открыто" });
+        }
+        mockAccount.accounts = mockAccount.accounts.concat([{
+          id: "acc_capture", label: "человек@example.com",
+          since: "2026-10-10T12:00:00"
+        }]);
+        mockAccount.logging_in = false;
+        mockAccount.note = "Аккаунт добавлен: человек@example.com";
+        return Promise.resolve({ ok: true,
+                                 account: { label: "человек@example.com" } });
       },
       account_login_stop: function () {
         mockAccount.logging_in = false;

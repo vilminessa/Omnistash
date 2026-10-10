@@ -61,6 +61,11 @@ def _extract(request_url: str, items: str, settings: dict | None = None,
     opts["playlist_items"] = items
     if cookiefile:
         opts["cookiefile"] = str(cookiefile)
+    else:
+        browser_opt = google_auth.browser_cookie_option(settings or {})
+        if browser_opt:
+            # Режим «куки из браузера»: копий нет, читает сам yt-dlp.
+            opts["cookiesfrombrowser"] = browser_opt
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.extract_info(request_url, download=False)

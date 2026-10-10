@@ -105,6 +105,14 @@ class Api:
         if migrated:
             print(f"[аккаунт] старая копия кук перенесена в реестр "
                   f"(id {migrated})")
+        # Призраки (запись без копии кук) - в реестр не попадают.
+        try:
+            pruned = google_auth.prune_registry().get("removed") or []
+        except Exception:  # noqa: BLE001 - чистка не должна ронять старт
+            pruned = []
+        if pruned:
+            print(f"[аккаунт] убраны записи без копий кук: "
+                  f"{', '.join(pruned)}")
         if self._boot.get("default") and not settings.read_raw().get(
                 "default_storage_id"):
             settings.set_value("default_storage_id", self._boot["default"])
@@ -383,6 +391,8 @@ class Api:
             "logging_in": False,
             "note": "",
             "visible": None,        # диагностика поимки (счётчики, домены)
+            "browser_warning": google_auth.browser_warning(
+                self._current_settings()),
         }
         with self._lock:
             account_state["logging_in"] = self._login_window is not None
@@ -1790,6 +1800,51 @@ class Api:
                   "окно закроется само")
         return {"ok": True}
 
+    def account_capture_now(self, request=None) -> dict:
+        """«Я вошёл — забрать куки»: разовая поимка по кнопке.
+
+        Авто-поимка сама закрывает окно, но если окно закрыли руками или
+        воркер пропустил момент - куки снимаются здесь, с понятным итогом:
+        либо аккаунт, либо «увидел кук N, аккаунтских M».
+        """
+        with self._lock:
+            window = self._login_window
+        if not window:
+            return {"error": "Окно входа не открыто"}
+        try:
+            cookies = window.get_cookies() or []
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"Окно не отдало куки: {exc}"}
+        facts = google_auth.cookies_facts(cookies)
+        markers = [c for c in cookies
+                   if c.name in self._LOGIN_MARKERS]
+        facts["markers"] = len(markers)
+        with self._lock:
+            self._login_facts = dict(facts)
+        self._log("Ручная поимка: увидено кук {} (google {}), аккаунтских {}, "
+                  "домены: {}".format(facts["total"], facts["google"],
+                                      facts["markers"],
+                                      ", ".join(facts["domains"]) or "нет"))
+        google = [c for c in cookies if google_auth.is_google_cookie(c)]
+        if len(google) < 3 or not markers:
+            return {"error":
+                    f"Сессии нет: увидено кук {facts['total']} "
+                    f"(Google/YouTube: {facts['google']}), аккаунтских "
+                    f"{facts['markers']}. Дождитесь полного входа на "
+                    "странице YouTube и повторите."}
+        try:
+            account = google_auth.create_account(
+                google, label=self._guess_account_label(window)
+                or "вход выполнен (окно)")
+        except (OSError, RuntimeError) as exc:
+            return {"error": f"Не удалось сохранить аккаунт: {exc}"}
+        with self._lock:
+            self._account_note = (f"Аккаунт добавлен: {account['label']} - "
+                                  "привяжите его к источнику")
+        self._log(f"Аккаунт Google добавлен (ручная поимка): "
+                  f"{account['label']} (id {account['id']})")
+        return {"ok": True, "account": account}
+
     def account_login_stop(self) -> dict:
         """Закрыть окно входа вручную (аккаунт не создаётся)."""
         with self._lock:
@@ -1841,7 +1896,7 @@ class Api:
         deadline = time.time() + self.LOGIN_TIMEOUT
         picked: list = []
         label = ""
-        last_log = 0.0
+        last_facts: dict = {}
         try:
             while time.time() < deadline:
                 if self._login_cancel.is_set():
@@ -1855,10 +1910,11 @@ class Api:
                                        if c.name in self._LOGIN_MARKERS)
                 with self._lock:
                     self._login_facts = dict(facts)
-                # Диагностика в журнал - раз в30 секунд, без значений кук:
-                # если поимка не работает, причина читается по журналу.
-                if time.time() - last_log > 30:
-                    last_log = time.time()
+                # Диагностика в журнал - при КАЖДОМ изменении картины, без
+                # значений кук: если поимка не работает, причина читается
+                # по журналу сразу, а не через полчаса.
+                if facts != last_facts:
+                    last_facts = dict(facts)
                     self._log("Вход в Google: увидено кук {} (google {}), "
                               "аккаунтских {}, домены: {}".format(
                                   facts["total"], facts["google"],

@@ -428,7 +428,12 @@ def _download(video: dict, settings: dict, *, stop: threading.Event,
     opts = build_opts(settings, dest_dir, stop=stop, on_progress=on_progress,
                       overwrite=overwrite)
     if cookiefile:
+        # Копия привязанного аккаунта важнее браузерного режима.
         opts["cookiefile"] = str(cookiefile)
+    else:
+        browser_opt = google_auth.browser_cookie_option(settings)
+        if browser_opt:
+            opts["cookiesfrombrowser"] = browser_opt
     encoder = str(settings.get("transcode") or "none")
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:

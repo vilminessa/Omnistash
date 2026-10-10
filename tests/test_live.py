@@ -235,5 +235,60 @@ class TestLiveSync(LiveCase):
                          "Новых для загрузки нет")
 
 
+class TestLiveAccountPlaylist(LiveCase):
+    """Плейлист тестового аккаунта: добавление и пробное скачивание.
+
+    Плейлист unlisted - метаданные видны без входа (проверено), но сама
+    цель теста - увидеть, упирается ли СКАЧИВАНИЕ в «подтвердите, что не
+    бот» без привязанного аккаунта. Если упадёт - причина будет в статусе.
+    """
+
+    PLAYLIST_URL = ("https://youtube.com/playlist?list="
+                    "PLK9-A291zlJAa0wsWL3ew_AJnJQc6sgYz")
+
+    def test_add_and_download_shortest(self):
+        api = self.make_api()
+        (self.dir / "lib").mkdir()
+        storage = self.add_storage(api, self.dir / "lib")
+        api.save_setting({"key": "default_storage_id",
+                          "value": storage["id"]})
+
+        # Фазы A/B/C: добавляем источник без аккаунта (он unlisted).
+        self.assertTrue(api.add_start({"url": self.PLAYLIST_URL,
+                                       "mode": "manual"})["ok"])
+        flow = self.wait(api, "confirm")
+        counts = flow["plan"]["counts"]
+        self.assertGreaterEqual(counts["new_videos"], 5,
+                                "плейлист должен отдаваться целиком")
+        self.assertTrue(api.add_confirm()["ok"])
+        self.wait(api, "done")
+        self.assertEqual(api.poll(0)["stats"]["playlists"], 1)
+
+        # Пробное скачание самой короткой записи - реальной качалкой.
+        row = api.db.conn.execute(
+            "SELECT id, duration_s FROM videos WHERE duration_s > 0 "
+            "ORDER BY duration_s LIMIT 1").fetchone()
+        self.assertIsNotNone(row, "нет записей с длительностью")
+        result = api.enqueue({"ids": [row["id"]]})
+        self.assertEqual(result.get("queued"), 1, result)
+        started = api.queue_start()
+        self.assertTrue(started.get("ok"), started)
+        self.assertTrue(api.dl.wait(timeout=420), "воркер не завершился")
+
+        state = api.db.conn.execute(
+            "SELECT status, last_error FROM videos WHERE id=?",
+            (row["id"],)).fetchone()
+        files = [dict(item) for item in api.db.conn.execute(
+            "SELECT path, size FROM files WHERE video_id=? AND kind='video'",
+            (row["id"],))]
+        self.assertEqual(
+            state["status"], "downloaded",
+            f"статус {state['status']}, причина: {state['last_error']}")
+        self.assertTrue(files and files[0]["size"] > 0,
+                        f"файл должен лежать на диске: {files}")
+        self.assertGreater(files[0]["size"], 100_000,
+                           "похоже, скачался не файл, а заглушка")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -179,6 +179,24 @@ def load_registry() -> list[dict]:
             if isinstance(item, dict) and item.get("id")]
 
 
+def prune_registry() -> dict:
+    """Выкинуть призраков: запись без копии кук - не аккаунт.
+
+    Бывает после ручных правок или сбоя: UI показывал аккаунт, которого
+    нечем скачать, а «забыть» не работал. Записи без файла удаляются и из
+    реестра, и из памяти; сама копия, разумеется, не создаётся.
+    """
+    items = load_registry()
+    keep = [item for item in items
+            if has_account_cookies(str(item["id"]))]
+    if len(keep) == len(items):
+        return {"removed": []}
+    removed = [str(item["id"]) for item in items
+               if item not in keep]
+    _save_registry(keep)
+    return {"removed": removed}
+
+
 def _save_registry(items: list[dict]) -> None:
     path = _registry_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -282,6 +300,32 @@ def cookies_facts(cookies) -> dict:
         "domains": sorted({(c.domain or "").lstrip(".") for c in google})[:8],
         "names": sorted({c.name for c in google})[:12],
     }
+
+
+# Копии не создаём: yt-dlp читает куки браузера напрямую (DPAPI внутри).
+BROWSER_CHOICES = ("firefox", "edge", "chrome", "brave")
+# Свежие Chrome/Edge (v127+) шифруют куки App-Bound Encryption: расшифровать
+# их сторонним инструментам нельзя - yt-dlp получает DPAPI-ошибку.
+# https://github.com/yt-dlp/yt-dlp/issues/10927
+BROKEN_BROWSERS = ("edge", "chrome", "brave")
+
+
+def browser_cookie_option(settings: dict):
+    """Опция yt-dlp cookiesfrombrowser или None (режим не задан/пусто)."""
+    name = str(settings.get("browser_cookies") or "none").strip().lower()
+    if name not in BROWSER_CHOICES:
+        return None
+    return (name,)
+
+
+def browser_warning(settings: dict) -> str:
+    """Честное предупреждение для браузеров с ABE (пусто - всё в порядке)."""
+    name = str(settings.get("browser_cookies") or "none").strip().lower()
+    if name in BROKEN_BROWSERS:
+        return (f"{name.capitalize()} v127+ шифрует куки (App-Bound "
+                "Encryption) - прочитать их напрямую невозможно. Рабочие "
+                "пути: Firefox или импорт cookies.txt.")
+    return ""
 
 
 def migrate_legacy(settings) -> str | None:
