@@ -199,9 +199,10 @@ class TestAccountColumnV3(unittest.TestCase):
             "SELECT sql FROM sqlite_master WHERE name='playlists'"
         ).fetchone()["sql"]
         self.assertIn("account_id", sql, "колонка аккаунта должна появиться")
-        # База поехала дальше: v4 (счётчики площадки) добавилась поверх v3.
+        # База поехала дальше: v4 (счётчики площадки) и v5 (стоп-лист mesh)
+        # добавились поверх v3.
         self.assertEqual(
-            int(database.conn.execute("PRAGMA user_version").fetchone()[0]), 4)
+            int(database.conn.execute("PRAGMA user_version").fetchone()[0]), 5)
         row = database.conn.execute("SELECT remote_id FROM playlists").fetchone()
         self.assertEqual(row["remote_id"], "PLv2", "данные должны пережить")
 
@@ -220,7 +221,7 @@ class TestAccountColumnV3(unittest.TestCase):
         database = db_mod.Database(self.path)
         self.addCleanup(database.close)
         self.assertEqual(
-            int(database.conn.execute("PRAGMA user_version").fetchone()[0]), 4)
+            int(database.conn.execute("PRAGMA user_version").fetchone()[0]), 5)
         count = database.conn.execute(
             "SELECT COUNT(*) n FROM playlists").fetchone()["n"]
         self.assertEqual(count, 1, "повторный запуск не должен дублировать")

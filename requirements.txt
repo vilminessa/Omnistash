@@ -3,3 +3,5 @@
 yt-dlp>=2026.8.19
 pywebview>=6.2,<7
 pyinstaller>=6.11
+# Mesh: подписи манифестов и идентичность узла (Ed25519).
+cryptography>=46

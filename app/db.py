@@ -420,8 +420,27 @@ def _migrate_v4(conn: sqlite3.Connection) -> None:
     _add_column(conn, "videos", "synced_at TEXT")
 
 
+def _migrate_v5(conn: sqlite3.Connection) -> None:
+    """Стоп-лист mesh: хеш, принесённый с узла и признанный негодным.
+
+    В БД, а не в настройках: стоп-лист живёт рядом с индексом, переживает
+    перенос базы и опрашивается при каждом обходе манифестов.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mesh_bans (
+            hash       TEXT PRIMARY KEY,   -- "sha256:<hex>"
+            peer       TEXT NOT NULL DEFAULT '',  -- pubkey-носитель
+            note       TEXT,               -- что сказал человек
+            created_at TEXT NOT NULL
+        );
+        """
+    )
+
+
 # Порядок важен: номер версии = индекс + 1.
-MIGRATIONS = (_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4)
+MIGRATIONS = (_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4,
+               _migrate_v5)
 
 
 class Database:
