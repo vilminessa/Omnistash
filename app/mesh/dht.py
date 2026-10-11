@@ -1,15 +1,23 @@
 """Узел mesh-DHT: обнаружение участников без своих серверов (BEP5).
 
-Вход в сеть - публичные bootstrap-роутеры BitTorrent (не наши
-серверы, ничего не хостим: BEP5 = совместимость bencode и 1000 байт)
-+ LAN-multicast приветствие для машин в одной локальной сети.
+Вход в сеть - публичные bootstrap-роутеры BitTorrent (не наши серверы,
+ничего не хостим: BEP5 = совместимость bencode) + LAN-multicast
+приветствие для машин в одной локальной сети.
 
-Ключ: sha1("omnistash:" + remote_id). Значение: {addr, pubkey, hash,
-size, synced_at, ts, sig} с подписью Ed25519 (bencode-кодирование).
-Проверка - на месте: parse_value.
+Доставка АДРЕСОВ (каталог имён и файлов) - через ЯДРО протокола:
+get_peers / announce_peer (то, что умеет каждый торрент-клиент).
+Значения произвольными ключами (расширение dht_store) в живой сети
+НЕ работают: там get с «target», immutable-ключ = sha1(самого значения),
+поиск по произвольному нику невозможен - проверено пробами на реальной
+сети. Наш ключ (имя/видео) = info_hash в get_peers; хранится компактный
+адрес (ip+port) держателя, а подпись/хеш/дата приходят С ТЕРМИНАЛА уже
+по TLS-каналу (манифест) - это и честнее, и совместимо со всем DHT.
 
-Известное ограничение: addr объявляется локальным (проброс за NAT -
-стадия M4); maintenance спасает: ping мёртвых узлов и продление своих значений.
+Записи принимаются только с КОМПЛИАНТНЫМ node id (BEP42: id выводится
+из внешнего IP через crc32c - сеть молча отбрасывает «чужие» анонсы,
+как показали пробы). Внешний IP выучиваем из поля ip в ответах узлов
+(стандартный механизм BEP42); LAN-адреса от проверки освобождены.
+Объявление своё же: узел обязан отдавать и локальные значения.
 """
 
 from __future__ import annotations
@@ -29,6 +37,7 @@ K = 8
 ALPHA = 3
 LOOKUP_ROUNDS = 8
 BOOTSTRAP = (
+    ("dht.libtorrent.org", 25401),   # живой (проверено пробами)
     ("router.bittorrent.com", 6881),
     ("dht.transmissionbt.com", 6881),
     ("router.utorrent.com", 6881),
@@ -36,12 +45,17 @@ BOOTSTRAP = (
 MULTICAST_GROUP = "239.255.77.77"
 MULTICAST_PORT = 38575
 HELLO_INTERVAL = 60.0
-MAX_VALUES_PER_KEY = 20
-VALUE_TTL = 24 * 3600
 REANNOUNCE = 20 * 60
 MAINTENANCE = 60.0
 QUERY_TIMEOUT = 4.0
 MAX_QUERY_RETRIES = 2
+
+# Живость адресов в get_peers: объявление идёт каждые REANNOUNCE,
+# запас - полтора интервала; просроченные записи выкидываются на лету.
+PEER_TTL = 45 * 60
+PEERS_PER_KEY = 10
+PEER_KEYS_LIMIT = 4096
+REBOOTSTRAP_INTERVAL = 300.0     # не чаще раза в 5 минут
 
 
 def node_id() -> bytes:
@@ -52,6 +66,77 @@ def key_for(remote_id: str) -> bytes:
     """Ключ по адресу remote_id? (20 байт, как infohash в BEP5)."""
     return hashlib.sha1(
         ("omnistash:" + str(remote_id)).encode("utf-8")).digest()
+
+
+# ---- BEP42: node id от внешнего IP (иначе сеть не принимает анонсы) ---
+
+_CRC32C_TABLE: list = []
+
+
+def _crc32c(data: bytes) -> int:
+    """CRC32C (Castagnoli) на stdlib-таблице: данные 4 байта, вызов редкий."""
+    global _CRC32C_TABLE
+    if not _CRC32C_TABLE:
+        table = []
+        for index in range(256):
+            crc = index
+            for _ in range(8):
+                crc = (crc >> 1) ^ (0x82F63B78 if crc & 1 else 0)
+            table.append(crc)
+        _CRC32C_TABLE = table
+    crc = 0xFFFFFFFF
+    for byte in data:
+        crc = _CRC32C_TABLE[(crc ^ byte) & 0xFF] ^ (crc >> 8)
+    return crc ^ 0xFFFFFFFF
+
+
+def bep42_id(ip: str, rand_byte: int | None = None) -> bytes:
+    """Валидный node id для внешнего IP (BEP42).
+
+    Алгоритм из спецификации: маскированный ip + r (3 бита) -> crc32c ->
+    первые 21 бит в префикс id, последний байт = r<<5|… (полный rand).
+    Против векторов из спеки (5 штук) покрыто тестами; младшие 3 бита
+    третьего байта и хвост - случайные, как в спецификации.
+    """
+    rand_byte = os.urandom(1)[0] if rand_byte is None else rand_byte
+    octets = [int(part) for part in str(ip).split(".")[:4]]
+    if len(octets) != 4:
+        raise ValueError(f"не IPv4: {ip!r}")
+    mask = (0x03, 0x0F, 0x3F, 0xFF)
+    masked = [octet & m for octet, m in zip(octets, mask)]
+    masked[0] |= (rand_byte & 0x07) << 5
+    crc = _crc32c(bytes(masked))
+    node = bytearray(20)
+    node[0] = (crc >> 24) & 0xFF
+    node[1] = (crc >> 16) & 0xFF
+    node[2] = ((crc >> 8) & 0xF8) | (os.urandom(1)[0] & 0x07)
+    node[3:19] = os.urandom(16)
+    node[19] = rand_byte & 0xFF
+    return bytes(node)
+
+
+def bep42_ok(ip: str, node: bytes) -> bool:
+    """Совпадает ли id с префиксом BEP42 для этого IP (21 бит)."""
+    if len(node) != NODE_ID_LEN:
+        return False
+    try:
+        expected = bep42_id(ip, node[19])
+    except ValueError:
+        return False
+    return (node[0] == expected[0] and node[1] == expected[1]
+            and (node[2] & 0xF8) == (expected[2] & 0xF8))
+
+
+def is_private_ip(ip: str) -> bool:
+    """LAN/loopback-адреса от проверки BEP42 освобождены (по спеке)."""
+    try:
+        first, second = (int(part) for part in str(ip).split(".")[:2])
+    except (ValueError, TypeError):
+        return True          # не разобрано - считаем локальным (не вредим)
+    return (first == 10 or first == 127
+            or (first == 172 and 16 <= second <= 31)
+            or (first == 192 and second == 168)
+            or (first == 169 and second == 254))
 
 
 # Хранение «своих» значений: ключ -> (значение, срок переобъявления).
@@ -141,55 +226,15 @@ def parse_compact_nodes(blob: bytes) -> list:
     return out
 
 
-def make_value(addr: str, digest20: bytes, size: int, synced_at: str) -> bytes:
-    """bencode-словарь с подписью Ed25519 (для значений файлов)."""
-    pub = identity.get_identity()[1]
-    payload = {
-        "addr": str(addr).encode("utf-8"),
-        "pubkey": pub,
-        "hash": digest20,
-        "size": int(size),
-        "synced_at": str(synced_at or "").encode("utf-8"),
-        "ts": int(time.time()),
-    }
-    sig = identity.sign(bencode.encode(payload))
-    return bencode.encode(dict(payload, sig=sig))
-
-
-def parse_value(data: bytes) -> dict | None:
-    """Разбор значения; None - нет ключа или битая подпись."""
-    try:
-        raw = bencode.decode_dict(data)
-    except bencode.BencodeError:
-        return None
-    required = (b"addr", b"pubkey", b"hash", b"size", b"synced_at", b"ts",
-                b"sig")
-    if any(key not in raw for key in required):
-        return None
-    try:
-        payload = {key: raw[key] for key in required if key != b"sig"}
-        if not identity.verify(raw[b"pubkey"], bencode.encode(payload),
-                               raw[b"sig"]):
-            return None
-        return {
-            "addr": raw[b"addr"].decode("utf-8"),
-            "pubkey": raw[b"pubkey"].hex(),
-            "hash": raw[b"hash"],
-            "size": int(raw[b"size"]),
-            "synced_at": raw[b"synced_at"].decode("utf-8"),
-            "ts": int(raw[b"ts"]),
-            "raw": data,
-        }
-    except Exception:  # noqa: BLE001 - чужой формат не наш
-        return None
-
-
 # ---- каталог имён: ник -> адрес (B1) ---------------------------------
-# Запись НЕ содержит списка видео - только ник, адрес и ключ. Ключ
-# имени живёт в отдельном пространстве (свой префикс): DHT ищет по
+# Ключ имени живёт в отдельном пространстве (свой префикс): DHT ищет по
 # точному ключу, частичных запросов протокол не умеет - UI об этом
-# честно пишет. Коллизии (один ник у разных ключей) отдаются списком:
-# истина в отпечатке ключа, а не в нике.
+# честно пишет. «Запись имени» - это адрес держателя в get_peers/
+# announce_peer (ядро BEP5); личность (ключ, отпечаток) приходит с
+# терминала по TLS: подписывать адрес бессмысленно - его выдаёт сеть,
+# а подпись подтверждала бы только само себя. Коллизии (один ник у
+# разных ключей) отдаются списком адресов: истину устанавливает
+# отпечаток ключа, а не написание ника.
 
 NICK_MIN = 2
 NICK_MAX = 32
@@ -213,45 +258,6 @@ def name_key(nick: str) -> bytes:
     """Ключ каталога имён: регистр не важен (Nick == nick)."""
     clean = clean_nick(nick).casefold()
     return hashlib.sha1(("omnistash:name:" + clean).encode("utf-8")).digest()
-
-
-def make_name_value(nick: str, addr: str) -> bytes:
-    """Подписанная запись «ник -> адрес» (для каталога имён)."""
-    pub = identity.get_identity()[1]
-    payload = {
-        "nick": clean_nick(nick).encode("utf-8"),
-        "addr": str(addr).encode("utf-8"),
-        "pubkey": pub,
-        "ts": int(time.time()),
-    }
-    sig = identity.sign(bencode.encode(payload))
-    return bencode.encode(dict(payload, sig=sig))
-
-
-def parse_name_value(data: bytes) -> dict | None:
-    """Разбор записи имени; None - битая/неподписанная/непригодная."""
-    try:
-        raw = bencode.decode_dict(data)
-    except bencode.BencodeError:
-        return None
-    required = (b"nick", b"addr", b"pubkey", b"ts", b"sig")
-    if any(key not in raw for key in required):
-        return None
-    try:
-        payload = {key: raw[key] for key in required if key != b"sig"}
-        if not identity.verify(raw[b"pubkey"], bencode.encode(payload),
-                               raw[b"sig"]):
-            return None
-        nick = raw[b"nick"].decode("utf-8")
-        if not nick_ok(nick):
-            return None          # мусорный/пустой ник в каталог не идёт
-        return {"nick": clean_nick(nick),
-                "addr": raw[b"addr"].decode("utf-8"),
-                "pubkey": raw[b"pubkey"].hex(),
-                "ts": int(raw[b"ts"]),
-                "raw": data}
-    except Exception:  # noqa: BLE001 - чужой формат не наш
-        return None
 
 
 class Contact:
@@ -298,7 +304,14 @@ class RoutingTable:
                 return True
         if len(bucket) >= K:
             oldest = min(bucket, key=lambda c: c.last_seen)
-            if time.time() - oldest.last_seen < 900:
+            fresh = time.time() - oldest.last_seen < 900
+            closer = (xor_distance(self._own, contact.node)
+                      < xor_distance(self._own, oldest.node))
+            # Переполненный бакет: свежих не вытесняем, НО ближающийся
+            # к себе узел берём всегда - иначе поиск застревает (замечено
+            # трассировкой: переполненные бакеты отбрасывали узлы, ведущие
+            # к ключу, и расстояние не убывало).
+            if fresh and not closer:
                 return False
             bucket.remove(oldest)
         bucket.append(contact)
@@ -342,7 +355,7 @@ class DHTNode:
     def __init__(self, log=None, port: int = 0,
                  multicast: bool = True,
                  persist: str | None = None):
-        self.own = node_id()
+        self.own = node_id()          # до выученного внешнего IP - временное
         self.table = RoutingTable(self.own)
         self._log = log or (lambda message: None)
         self._port = int(port)
@@ -350,8 +363,8 @@ class DHTNode:
         self._persist = persist
         self._transport = None
         self._pending = {}
-        self._store = {}      # key -> [(ts, raw)]
-        self._mine = {}       # key -> (value, срок переобъявления)
+        self._peers = {}      # info_hash -> [(ip, port, ts)] - наши пиры
+        self._mine = {}       # key -> (tcp-порт, срок переобъявления)
         self._seq = 0
         self._tasks = []
         self._loop = None
@@ -359,6 +372,10 @@ class DHTNode:
         self._started = threading.Event()
         self._stopping = threading.Event()
         self._failure = None
+        self._lock = threading.Lock()   # own/table/_peers из разных потоков
+        self._external_ip: str | None = None
+        self._ip_learned = threading.Event()
+        self._last_bootstrap = 0.0
 
     @property
     def running(self) -> bool:
@@ -463,62 +480,107 @@ class DHTNode:
         except Exception:
             return None
 
-    def lookup_sync(self, remote_id: str, want: int = 4,
-                    timeout: float = 30.0) -> list:
-        """Поиск значений: только подписанные parse_value (без мусора)."""
+    def learn_external_ip(self, ip: str) -> bool:
+        """Выучить внешний IP (поле ip в ответах, BEP42) и уточнить id.
+
+        Принимаем ПЕРВЫЙ выученный адрес (дальше не метаемся - ответы
+        подделываются UDP-спуфом). Если id не комплиантен для этого IP -
+        пересчитываем (BEP42): сеть молча отбрасывает анонсы «чужих» id,
+        что и было причиной неработающего поиска через интернет.
+        Приватный адрес тоже считается выученным (LAN от проверки
+        освобождена) - ensure_ready не должен висеть в локальной сети.
+        """
+        ip = str(ip or "").strip()
+        try:
+            octets = [int(part) for part in ip.split(".")[:4]]
+            if len(octets) != 4 or any(not 0 <= o <= 255 for o in octets):
+                return False
+        except (ValueError, TypeError):
+            return False
+        with self._lock:
+            if self._external_ip is not None:
+                return False          # первый выученный - главный
+            self._external_ip = ip
+            self._ip_learned.set()
+            if is_private_ip(ip) or bep42_ok(ip, self.own):
+                return False
+            new_id = bep42_id(ip)
+            contacts = self.table.all()
+            self.own = new_id
+            self.table = RoutingTable(new_id)
+            for contact in contacts:
+                self.table.add(contact)
+        self._log(f"DHT: id уточнён по внешнему IP {ip} (BEP42)")
+        return True
+
+    def ensure_ready(self, timeout: float = 15.0) -> bool:
+        """Дождаться выученного внешнего IP (перед анонсом); True = выучен."""
+        return self._ip_learned.wait(timeout)
+
+    @property
+    def external_ip(self) -> str | None:
+        with self._lock:
+            return self._external_ip
+
+    def lookup_sync(self, remote_id: str, want: int = 8,
+                    timeout: float = 60.0) -> list:
+        """Адреса держателей файла: [{"addr": "ip:port"}].
+
+        DHT отдаёт только адреса (ядро BEP5); подпись, хеш и дата синка
+        приходят с терминала по TLS-каналу в манифесте. Локальные
+        значения берутся СИНХРОННО - сеть не должна на них влиять.
+        """
         if not self.running:
             return []
-        values = self._call(self.get_values(key_for(remote_id), want),
-                            timeout)
-        out = []
-        for raw in (values or []):
-            parsed = parse_value(raw)
-            if parsed is not None:
-                out.append(parsed)
-        return out
+        key = key_for(remote_id)
+        pairs = list(self._peers_for(key))
+        for entry in (self._call(self.find_peers(key, want,
+                                                 budget=timeout - 10),
+                                 timeout) or []):
+            if entry not in pairs:
+                pairs.append(entry)
+        return [{"addr": f"{ip}:{port}"} for ip, port in pairs[:want]]
 
-    def announce_sync(self, remote_id: str, digest_hex: str, size: int,
-                      synced_at: str, addr: str,
-                      timeout: float = 60.0) -> int:
-        """Объявить значение по ключу от remote_id; число принявших."""
+    def announce_sync(self, remote_id: str, tcp_port: int,
+                      timeout: float = 90.0) -> int:
+        """Объявить адрес файла (announce_peer); число принявших узлов."""
         if not self.running:
             return 0
-        clean = str(digest_hex).replace("sha256:", "")
-        digest20 = bytes.fromhex(clean[:40])
-        value = make_value(addr, digest20, size, synced_at)
-        result = self._call(self.announce(key_for(remote_id), value),
-                            timeout)
+        result = self._call(self._announce(key_for(remote_id),
+                                           int(tcp_port)), timeout)
         return int(result or 0)
 
     def name_lookup_sync(self, nick: str, want: int = 8,
-                         timeout: float = 30.0) -> list:
-        """Кандидаты по нику: все ПОДПИСАННЫЕ записи имени (B1).
+                         timeout: float = 60.0) -> list:
+        """Адреса по нику: [{"addr": "ip:port"}] (B1).
 
         Коллизии (один ник у разных ключей) отдаются честно списком -
-        пользователь выбирает по отпечатку, а не по написанию ника.
+        пользователь выбирает по отпечатку (его даёт TLS-канал), а не
+        по написанию ника.
         """
         if not self.running:
             return []
-        values = self._call(self.get_values(name_key(nick), want), timeout)
-        out = []
-        for raw in (values or []):
-            parsed = parse_name_value(raw)
-            if parsed is not None:
-                out.append(parsed)
-        return out
+        key = name_key(nick)
+        pairs = list(self._peers_for(key))
+        for entry in (self._call(self.find_peers(key, want,
+                                                 budget=timeout - 10),
+                                 timeout) or []):
+            if entry not in pairs:
+                pairs.append(entry)
+        return [{"addr": f"{ip}:{port}"} for ip, port in pairs[:want]]
 
-    def announce_name_sync(self, nick: str, addr: str,
-                           timeout: float = 60.0) -> int:
-        """Объявить «ник -> адрес» в каталоге; число принявших узлов.
+    def announce_name_sync(self, nick: str, tcp_port: int,
+                           timeout: float = 90.0) -> int:
+        """Объявить «мой ник» в каталоге; число принявших узлов.
 
         Запись попадает в _mine - maintenance переобъявит её сам, как
         и файлы. Смена ника: новое имя объявляется сразу, старое
-        устареет по TTL (VALUE_TTL) - удаления в DHT нет.
+        устареет по TTL (PEER_TTL) - удаления в DHT нет.
         """
         if not self.running or not nick_ok(nick):
             return 0
-        value = make_name_value(nick, addr)
-        result = self._call(self.announce(name_key(nick), value), timeout)
+        result = self._call(self._announce(name_key(nick), int(tcp_port)),
+                            timeout)
         return int(result or 0)
 
     # -- приём/отправка -------------------------------------------------------
@@ -545,6 +607,13 @@ class DHTNode:
         if kind in (b"r", b"e"):
             future = self._pending.get(txid) if isinstance(txid, bytes) else None
             if future is not None and not future.done():
+                # Ответ на НАШ запрос: поле ip (BEP42) = наш адрес, как его
+                # видит сеть. Учим только здесь - спуф-пакет без совпадения
+                # txid id не подменит.
+                ip_field = message.get(b"ip")
+                if isinstance(ip_field, bytes) and len(ip_field) >= 4:
+                    self.learn_external_ip(
+                        ".".join(str(b) for b in ip_field[:4]))
                 future.set_result(message)
             return
         if kind == b"q":
@@ -565,23 +634,39 @@ class DHTNode:
         reply = {b"id": self.own}
         if query == b"ping":
             pass
-        elif query == b"find_node":
-            target = args.get(b"target")
-            if not isinstance(target, bytes):
+        elif query in (b"find_node", b"get_peers"):
+            # get_peers - ядро BEP5: и узлов, и токен, и наши пиры.
+            target = args.get(b"target") or args.get(b"info_hash")
+            if not isinstance(target, bytes) or len(target) != NODE_ID_LEN:
                 target = self.own
             reply[b"nodes"] = b"".join(
                 compact_node(c.node, c.host, c.port)
                 for c in self.table.closest(target, k=K)
                 if _looks_ipv4(c.host))
-        elif query == b"get":
-            key = args.get(b"key")
-            reply[b"token"] = (self._token(key)
-                               if isinstance(key, bytes) else b"")
-            values = self._values_for(key) if isinstance(key, bytes) else []
-            if values:
-                reply[b"values"] = values
-        elif query == b"put":
-            self._accept_put(args)
+            if query == b"get_peers":
+                reply[b"token"] = self._token(target)
+                values = [ip.encode("ascii") + port.to_bytes(2, "big")
+                          for ip, port in self._peers_for(target)]
+                if values:
+                    reply[b"values"] = values
+        elif query == b"announce_peer":
+            info_hash = args.get(b"info_hash")
+            token = args.get(b"token")
+            if (not isinstance(info_hash, bytes)
+                    or len(info_hash) != NODE_ID_LEN
+                    or not isinstance(token, bytes)
+                    or token != self._token(info_hash)):
+                self._send({b"t": txid, b"y": b"e",
+                            b"e": [203, "invalid token"]}, addr)
+                return
+            implied = bool(args.get(b"implied_port"))
+            port = addr[1] if implied else int(args.get(b"port") or 0)
+            # BEP42: анонс чужого (публичного) IP принимаем только с
+            # комплиантным id; LAN освобождена. Ответ сервисный в любом
+            # случае (спека: запросы обслуживаются всегда), но хранение
+            # разрешено только разрешённым - как это делает вся сеть.
+            if 0 < port < 65536 and self._may_store(addr[0], peer):
+                self._store_peer(info_hash, addr[0], port)
         else:
             self._send({b"t": txid, b"y": b"e",
                         b"e": [204, "Method Unknown"]}, addr)
@@ -591,29 +676,48 @@ class DHTNode:
     def _token(self, key: bytes) -> bytes:
         return hashlib.sha1(self.own + (key or b"")).digest()[:8]
 
-    def _values_for(self, lookup_key: bytes) -> list:
-        now = time.time()
-        alive = [(ts, raw) for ts, raw in self._store.get(lookup_key, [])
-                 if now - ts < VALUE_TTL]
-        self._store[lookup_key] = alive
-        return [raw for _ts, raw in alive][:MAX_VALUES_PER_KEY]
+    @staticmethod
+    def _may_store(sender_ip: str, node_id_hex) -> bool:
+        """BEP42: чужой IP обязан иметь комплиантный id; LAN - исключение.
 
-    def _accept_put(self, args: dict) -> None:
-        key = args.get(b"key")
-        value = args.get(b"v")
-        if not isinstance(key, bytes) or len(key) != NODE_ID_LEN:
-            return
-        if not isinstance(value, bytes) or not value or len(value) > 1000:
-            return
-        entries = self._store.setdefault(key, [])
-        if len(entries) >= MAX_VALUES_PER_KEY:
-            entries.pop(0)
-        entries.append((time.time(), value))
-        if len(self._store) > 4096:
-            oldest_key = min(self._store,
-                             key=lambda k: self._store[k][0][0]
-                             if self._store[k] else 0)
-            self._store.pop(oldest_key, None)
+        node_id_hex - bytes id отправителя (20) или None (неизвестен -
+        не храним для публичных адресов).
+        """
+        if is_private_ip(sender_ip):
+            return True
+        if not isinstance(node_id_hex, bytes) or len(node_id_hex) != NODE_ID_LEN:
+            return False
+        return bep42_ok(sender_ip, node_id_hex)
+
+    def _peers_for(self, lookup_key: bytes) -> list:
+        """Живые пиры ключа [(ip, port)] - и отдаём, и сами ищем тут же."""
+        now = time.time()
+        with self._lock:
+            alive = [(ip, port, ts) for ip, port, ts
+                     in self._peers.get(lookup_key, [])
+                     if now - ts < PEER_TTL]
+            alive = alive[:PEERS_PER_KEY]
+            self._peers[lookup_key] = alive
+        return [(ip, port) for ip, port, _ts in alive]
+
+    def _store_peer(self, key: bytes, ip: str, port: int) -> bool:
+        """Положить адрес под ключ (свой анонс и чужой - одна структура:
+        локальное значение обязано отдаваться при прямом запросе)."""
+        if not ip or not (0 < int(port) < 65536):
+            return False
+        now = time.time()
+        with self._lock:
+            entries = [(a, p, ts) for a, p, ts in self._peers.get(key, [])
+                       if now - ts < PEER_TTL
+                       and not (a == ip and p == int(port))]
+            entries.append((ip, int(port), now))
+            if key not in self._peers and len(self._peers) >= PEER_KEYS_LIMIT:
+                oldest = min(self._peers,
+                             key=lambda k: self._peers[k][0][2]
+                             if self._peers[k] else 0)
+                self._peers.pop(oldest, None)
+            self._peers[key] = entries[-PEERS_PER_KEY:]
+        return True
 
     # -- RPC ----------------------------------------------------------------
 
@@ -663,50 +767,58 @@ class DHTNode:
 
     # -- итеративный lookup --------------------------------------------------
 
-    async def find_nodes(self, target: bytes,
-                         rounds: int = LOOKUP_ROUNDS) -> list:
-        known = {c.node: c for c in self.table.all()}
-        queried = set()
-        for _ in range(rounds):
-            candidates = sorted(known.values(),
-                                key=lambda c: xor_distance(c.node, target))
-            frontier = [c for c in candidates if c.node not in queried][:ALPHA]
-            if not frontier:
-                break
-            results = await asyncio.gather(
-                *(self._query(c.host, c.port, "find_node",
-                              {b"target": target}) for c in frontier))
-            moved = False
-            for reply, contact in zip(results, frontier):
-                queried.add(contact.node)
-                if reply is None:
+    @staticmethod
+    def _parse_values(raw_values) -> list:
+        """Ответ values -> [(ip, port)]: компакт 6 байт и текст ip:port."""
+        if isinstance(raw_values, (bytes, bytearray)):
+            raw_values = [raw_values]
+        out = []
+        for item in (raw_values or []):
+            if not isinstance(item, bytes):
+                continue
+            if len(item) == 6:                      # compact v4: ip + port
+                ip = ".".join(str(b) for b in item[:4])
+                port = int.from_bytes(item[4:6], "big")
+            elif b":" in item:                      # текст «ip:port»
+                host, _sep, raw_port = item.partition(b":")
+                try:
+                    ip, port = host.decode("ascii"), int(raw_port)
+                except (UnicodeDecodeError, ValueError):
                     continue
-                contact.last_seen = time.time()
-                self.table.add(contact)
-                self._learn(reply)
-                moved = True
-            if not moved:
-                break
-        known = {c.node: c for c in self.table.all()}
-        return sorted(known.values(),
-                      key=lambda c: xor_distance(c.node, target))[:K]
+            else:
+                continue
+            if port and "." in ip:
+                out.append((ip, port))
+        return out
 
-    async def get_values(self, key: bytes, want: int = 4) -> list:
-        """Итеративный FIND_VALUE: свои хранилища + соседи по XOR."""
-        # Начинаем с того, что уже знаем: близкие узлы спрашиваем первыми,
-        # за несколько кругов сходимся к владельцам ключа.
-        found = list(self._values_for(key))
-        seen = set(found)
+    async def _iterative(self, key: bytes, deadline: float, want: int):
+        """Итеративный обход к ключу: короткий список ВНЕ таблицы.
+
+        Жизненно важный урок трассировки: если опираться только на
+        k-бакеты, переполненные бакеты отбрасывают ближающихся узлов из
+        ответов - поиск стоит на месте (расстояние не убывает). Поэтому
+        узлы из ответов складываются в короткий список (как в Kademlia
+        по RFC-шному паттерну), а таблица пополняется как получится.
+        Возвращает (адреса [(ip, port)], ближайшие контакты).
+        """
+        entries: dict = {}
+        for contact in self.table.closest(key, k=K * 2):
+            entries[contact.node] = contact
         queried = set()
+        found = list(self._peers_for(key))       # и свои значения
+        seen = set(found)
         for _ in range(LOOKUP_ROUNDS):
-            candidates = sorted(self.table.all(),
-                                key=lambda c: xor_distance(c.node, key))
-            frontier = [c for c in candidates if c.node not in queried][:ALPHA]
+            if time.time() >= deadline:
+                break
+            frontier = sorted(entries.values(),
+                              key=lambda c: xor_distance(c.node, key))
+            frontier = [c for c in frontier
+                        if c.node not in queried][:ALPHA]
             if not frontier or len(found) >= want:
                 break
             results = await asyncio.gather(
-                *(self._query(c.host, c.port, "get", {b"key": key})
-                  for c in frontier))
+                *(self._query(c.host, c.port, "get_peers",
+                              {b"info_hash": key}) for c in frontier))
             moved = False
             for reply, contact in zip(results, frontier):
                 queried.add(contact.node)
@@ -715,41 +827,81 @@ class DHTNode:
                 contact.last_seen = time.time()
                 self.table.add(contact)
                 moved = True
-                values = reply.get(b"values") or []
-                if isinstance(values, bytes):
-                    values = [values]
-                for raw in values:
-                    if isinstance(raw, bytes) and raw not in seen:
-                        seen.add(raw)
-                        found.append(raw)
+                for entry in self._parse_values(reply.get(b"values")):
+                    if entry not in seen:
+                        seen.add(entry)
+                        found.append(entry)
+                for node, host, port in parse_compact_nodes(
+                        reply.get(b"nodes") or b""):
+                    if node == self.own or not _looks_ipv4(host):
+                        continue
+                    entries.setdefault(node, Contact(node, host, port))
             if not moved:
                 break
-        return found[:want]
+        closest = sorted(entries.values(),
+                          key=lambda c: xor_distance(c.node, key))[:K]
+        return found[:want], closest
 
-    async def announce(self, key: bytes, value: bytes) -> int:
-        """Положить значение к соседям; возвращает число принявших."""
-        self._mine[key] = (value, time.time() + REANNOUNCE)
+    async def find_peers(self, key: bytes, want: int = 8,
+                         budget: float = 25.0) -> list:
+        """Адреса держателей ключа (свои + сеть); budget - сетевая часть.
+
+        Локальный ответ идёт отдельно в sync-обёртках: он не должен
+        зависеть от здоровья сети (замечено вживую - _call по таймауту
+        возвращал None и уносил найденное).
+        """
+        peers, _closest = await self._iterative(
+            key, time.time() + max(1.0, float(budget)), want)
+        return peers
+
+    async def find_nodes(self, target: bytes,
+                         timeout: float = 25.0) -> list:
+        """Ближайшие к target контакты (тот же обход, что и поиск пиры)."""
+        _peers, closest = await self._iterative(
+            target, time.time() + timeout, 10 ** 9)
+        return closest
+
+    async def _announce(self, key: bytes, tcp_port: int) -> int:
+        """Положить СВОЙ адрес (announce_peer) под ключ; число принявших.
+
+        Локальная запись обязательна: узел обязан отдавать и свои
+        значения (прямой запрос соседа и поиск на той же машине), иначе
+        объявленное «невидимо» для всех, кто спрашивает нас самих.
+        """
+        port = int(tcp_port)
+        self._mine[key] = (port, time.time() + REANNOUNCE)
+        self._store_peer(key, self._announce_ip(), port)
         targets = await self.find_nodes(key)
         accepted = 0
         for contact in targets:
-            reply = await self._query(contact.host, contact.port, "get",
-                                      {b"key": key})
+            reply = await self._query(contact.host, contact.port,
+                                      "get_peers", {b"info_hash": key})
             if reply is None:
                 continue
             token = reply.get(b"token")
             if not isinstance(token, bytes) or not token:
                 continue
-            ok = await self._query(contact.host, contact.port, "put",
-                                   {b"key": key, b"token": token, b"v": value})
+            ok = await self._query(contact.host, contact.port,
+                                   "announce_peer",
+                                   {b"info_hash": key, b"token": token,
+                                    b"port": port, b"implied_port": 0})
             if ok is not None:
                 accepted += 1
                 contact.last_seen = time.time()
         return accepted
 
+    def _announce_ip(self) -> str:
+        """Какой адрес объявляем под собой: внешний (выучен) или локальный."""
+        with self._lock:
+            if self._external_ip:
+                return self._external_ip
+        return local_ip()
+
     # -- фоновые циклы -------------------------------------------------------
 
     async def _bootstrap_once(self) -> None:
         """Первый выход в сеть; сбой - не беда (работаем LAN-only)."""
+        self._last_bootstrap = time.time()
         alive = 0
         for host, port in BOOTSTRAP:
             try:
@@ -775,14 +927,20 @@ class DHTNode:
             await asyncio.sleep(MAINTENANCE)
             try:
                 now = time.time()
-                for key, (value, due) in list(self._mine.items()):
+                for key, (port, due) in list(self._mine.items()):
                     if now >= due:
-                        await self.announce(key, value)
+                        await self._announce(key, port)
                 stale = sorted(self.table.all(),
                                key=lambda c: c.last_seen)[:3]
                 for contact in stale:
                     if not await self.ping(contact):
                         self.table.remove(contact.node)
+                # Сеть дала мало узлов (старт/провал bootstrap) - пробуем
+                # снова: однократного выхода при старте мало, сеть
+                # поднимается не всегда вместе с программой.
+                if (len(self.table) < 12
+                        and now - self._last_bootstrap > REBOOTSTRAP_INTERVAL):
+                    await self._bootstrap_once()
                 if self._persist:
                     save_peers(self._persist, self.table.all())
             except asyncio.CancelledError:

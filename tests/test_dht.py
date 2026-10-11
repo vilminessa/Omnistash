@@ -1,8 +1,13 @@
-"""Mesh-M3: bencode-кодек, k-бакеты, подписанные значения, узел DHT.
+"""Mesh-M3: bencode-кодек, k-бакеты, BEP42, адреса в get_peers, узел DHT.
 
 Сеть локальная: узлы на 127.0.0.1 (системный порт), bootstrap в тестах
 выключен (иначе узлы ходили бы на публичные роутеры). LAN-multicast
 проверяется с малым интервалом и честно skip, если среда его не даёт.
+
+Доставка адресов - get_peers/announce_peer (ядро BEP5): значения
+произвольными ключами в живой сети не работают (проверено пробами на
+реальной сети), поэтому DHT хранит только ip:port держателя, а всё
+подписанное приходит с терминала по TLS.
 """
 
 import os
@@ -56,38 +61,115 @@ class TestBencode(unittest.TestCase):
             bencode.decode_dict(b"li1ee")
 
 
-class TestValues(IdentityCase):
-    def test_sign_roundtrip(self):
-        raw = dht.make_value("192.168.1.5:38574", bytes(20), 1234,
-                             "2026-10-11T09:00:00")
-        parsed = dht.parse_value(raw)
-        self.assertIsNotNone(parsed, "своя подпись должна сходиться")
-        self.assertEqual(parsed["addr"], "192.168.1.5:38574")
-        self.assertEqual(parsed["size"], 1234)
-        self.assertEqual(parsed["synced_at"], "2026-10-11T09:00:00")
-        self.assertEqual(parsed["pubkey"], identity.get_identity()[1].hex())
+class TestBep42(unittest.TestCase):
+    """BEP42: id от внешнего IP - без этого сеть не принимает анонсы.
 
-    def test_tampered_value_rejected(self):
-        raw = dht.make_value("192.168.1.5:38574", bytes(20), 1234, "t")
-        decoded = bencode.decode_dict(raw)
-        decoded[b"size"] = 999                     # подмена поля
-        self.assertIsNone(dht.parse_value(bencode.encode(decoded)))
-        # Чужая подпись: подписываем чужим ключом ПРАВИЛЬНУЮ структуру.
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import \
-            Ed25519PrivateKey
-        foreign = Ed25519PrivateKey.generate()
-        payload = {k: v for k, v in decoded.items() if k != b"sig"}
-        forged = dict(payload)
-        forged[b"sig"] = foreign.sign(bencode.encode(payload))
-        self.assertIsNone(dht.parse_value(bencode.encode(forged)))
+    Проба на живой сети: announce_peer с sha1(pubkey)-id молча
+    отбрасывается («invalid token»/тишина), с комплиантным - принимается.
+    """
 
-    def test_broken_shape_rejected(self):
-        self.assertIsNone(dht.parse_value(bencode.encode({b"a": 1})))
-        self.assertIsNone(dht.parse_value("не bencode".encode("utf-8")))
+    VECTORS = [
+        ("124.31.75.21", 1, "5fbfbf"),
+        ("21.75.31.124", 86, "5a3ce9"),
+        ("65.23.51.170", 22, "a5d432"),
+        ("84.124.73.14", 65, "1b0321"),
+        ("43.213.53.83", 90, "e56f6c"),
+    ]
+
+    def test_vectors_from_spec(self):
+        for ip, rand, prefix in self.VECTORS:
+            node = dht.bep42_id(ip, rand)
+            expected = bytes.fromhex(prefix)
+            self.assertEqual(node[0], expected[0], ip)
+            self.assertEqual(node[1], expected[1], ip)
+            self.assertEqual(node[2] & 0xF8, expected[2] & 0xF8,
+                             "байт2: верхние 5 бит из crc, низ - случайный")
+            self.assertEqual(node[19], rand, "последний байт = rand")
+
+    def test_crc32c_check_value(self):
+        self.assertEqual(dht._crc32c(b"123456789"), 0xE3069283)
+
+    def test_ok_and_mismatch(self):
+        good = dht.bep42_id("8.8.8.8", 5)
+        self.assertTrue(dht.bep42_ok("8.8.8.8", good))
+        self.assertFalse(dht.bep42_ok("9.9.9.9", good),
+                         "id чужого IP не проходит")
+        self.assertFalse(dht.bep42_ok("8.8.8.8", b"x" * 20),
+                         "мусорный id не проходит")
+
+    def test_private_ranges_exempt(self):
+        for ip in ("10.1.2.3", "127.0.0.1", "172.16.5.5", "192.168.0.1",
+                   "169.254.1.1", "не-адрес"):
+            self.assertTrue(dht.is_private_ip(ip), ip)
+        self.assertFalse(dht.is_private_ip("8.8.8.8"))
+        # Правило хранения: LAN освобождена, публичный IP - только id.
+        self.assertTrue(dht.DHTNode._may_store("192.168.1.5", None))
+        self.assertFalse(dht.DHTNode._may_store("8.8.8.8", None))
+        self.assertFalse(dht.DHTNode._may_store("8.8.8.8", b"x" * 20))
+        self.assertTrue(dht.DHTNode._may_store(
+            "8.8.8.8", dht.bep42_id("8.8.8.8", 7)))
+
+
+class TestPeerStore(IdentityCase):
+    """Хранилище адресов: своё значение видно всем, TTL и лимиты."""
+
+    def _node(self) -> dht.DHTNode:
+        node = dht.DHTNode(multicast=False, port=0)
+        node.own = b"\x07" * 20
+        return node
+
+    def test_store_and_serve_own_value(self):
+        node = self._node()
+        key = dht.key_for("vid000000001")
+        self.assertTrue(node._store_peer(key, "1.2.3.4", 38574))
+        self.assertEqual(node._peers_for(key), [("1.2.3.4", 38574)])
+
+    def test_dedupe_and_cap(self):
+        node = self._node()
+        key = dht.key_for("vid000000001")
+        for index in range(dht.PEERS_PER_KEY + 5):
+            node._store_peer(key, f"1.2.3.{index}", 40000 + index)
+        peers = node._peers_for(key)
+        self.assertEqual(len(peers), dht.PEERS_PER_KEY, "потолок на ключ")
+        self.assertEqual(peers[-1],
+                         (f"1.2.3.{dht.PEERS_PER_KEY + 4}",
+                          40000 + dht.PEERS_PER_KEY + 4),
+                         "свежие адреса должны оставаться")
+        node._store_peer(key, "1.2.3.9", 49999)
+        node._store_peer(key, "1.2.3.9", 49999)
+        self.assertEqual(
+            len([p for p in node._peers_for(key)
+                 if p == ("1.2.3.9", 49999)]), 1,
+            "повторная запись одного адреса - не дубль")
+
+    def test_ttl_prunes_old(self):
+        node = self._node()
+        key = dht.key_for("vid000000001")
+        node._store_peer(key, "5.6.7.8", 1111)
+        node._peers[key] = [("5.6.7.8", 1111,
+                             time.time() - dht.PEER_TTL - 1)]
+        self.assertEqual(node._peers_for(key), [],
+                         "просроченный адрес уходит сам")
+
+    def test_parse_values_formats(self):
+        compact = bytes([1, 2, 3, 4]) + (38574).to_bytes(2, "big")
+        self.assertEqual(dht.DHTNode._parse_values([compact]),
+                         [("1.2.3.4", 38574)])
+        self.assertEqual(dht.DHTNode._parse_values(compact),
+                         [("1.2.3.4", 38574)], "одиночный байтовый ответ")
+        self.assertEqual(dht.DHTNode._parse_values([b"9.9.9.9:6881"]),
+                         [("9.9.9.9", 6881)], "текстовый формат тоже читаем")
+        self.assertEqual(dht.DHTNode._parse_values(
+            ["мусор".encode("utf-8"), b"x", None]), [])
+        self.assertEqual(dht.DHTNode._parse_values(None), [])
 
 
 class TestNameRecords(IdentityCase):
-    """Каталог имён (B1): ключ, подпись, разбор, правила ника."""
+    """Каталог имён (B1): ключ и правила ника.
+
+    Записи имени - адреса через get_peers (см. TestBep42/TestPeerStore и
+    сетевые тесты в DHTCase); здесь - то, что чисто вычисляется.
+    """
 
     def test_name_key_casefold_and_separate_space(self):
         self.assertEqual(dht.name_key("Nick"), dht.name_key(" nick "),
@@ -106,57 +188,6 @@ class TestNameRecords(IdentityCase):
         self.assertFalse(dht.nick_ok("ник<script>"), "лишние символы")
         self.assertFalse(dht.nick_ok("  "))
         self.assertEqual(dht.clean_nick("  Иван   Петров  "), "Иван Петров")
-
-    def test_name_value_roundtrip(self):
-        raw = dht.make_name_value("Тест Участник", "127.0.0.1:38574")
-        parsed = dht.parse_name_value(raw)
-        self.assertIsNotNone(parsed)
-        self.assertEqual(parsed["nick"], "Тест Участник")
-        self.assertEqual(parsed["addr"], "127.0.0.1:38574")
-        self.assertEqual(parsed["pubkey"], identity.get_identity()[1].hex())
-        self.assertLess(abs(parsed["ts"] - int(time.time())), 5)
-
-    def test_tampered_name_value_rejected(self):
-        raw = dht.make_name_value("Честный", "127.0.0.1:1")
-        original = bencode.decode_dict(raw)
-        # Подмена адреса после подписи.
-        forged = dict(original)
-        forged[b"addr"] = b"evil.example:666"
-        self.assertIsNone(dht.parse_name_value(bencode.encode(forged)))
-        # Нулевая подпись (дегенерат, который ловит identity.verify).
-        forged = dict(original)
-        forged[b"sig"] = bytes(64)
-        self.assertIsNone(dht.parse_name_value(bencode.encode(forged)))
-        # Не bencode вовсе.
-        self.assertIsNone(dht.parse_name_value("просто строка".encode("utf-8")))
-
-    def test_signed_but_bad_nick_not_parsed(self):
-        # Подпись ВАЛИДНА, но ник мусорный (1 символ) - в каталог не идёт.
-        payload = {"nick": "a", "addr": "127.0.0.1:1",
-                   "pubkey": identity.get_identity()[1],
-                   "ts": int(time.time())}
-        payload_b = {"nick": b"a", "addr": b"127.0.0.1:1",
-                     "pubkey": identity.get_identity()[1],
-                     "ts": payload["ts"]}
-        sig = identity.sign(bencode.encode(payload_b))
-        raw = bencode.encode(dict(payload, sig=sig))
-        self.assertIsNone(dht.parse_name_value(raw))
-
-    def test_missing_fields_rejected(self):
-        payload = {"nick": "Норм Ник", "addr": "127.0.0.1:1",
-                   "pubkey": identity.get_identity()[1],
-                   "ts": int(time.time())}
-        sig = identity.sign(bencode.encode(
-            {"nick": "Норм Ник".encode("utf-8"),
-             "addr": b"127.0.0.1:1",
-             "pubkey": payload["pubkey"], "ts": payload["ts"]}))
-        full = bencode.encode(dict(payload, sig=sig))
-        self.assertIsNotNone(dht.parse_name_value(full))
-        for drop in ("nick", "addr", "pubkey", "ts", "sig"):
-            broken = dict(payload)
-            broken.pop(drop, None)
-            self.assertIsNone(dht.parse_name_value(bencode.encode(broken)),
-                              f"без {drop} - не наш формат")
 
 
 class TestRoutingTable(unittest.TestCase):
@@ -207,6 +238,11 @@ class DHTCase(unittest.TestCase):
         patcher = mock.patch.object(dht, "BOOTSTRAP", ())
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Тесты развёрнуты на loopback: «свой» адрес для самозаписи -
+        # 127.0.0.1, а не настоящий LAN-IP машины.
+        patcher = mock.patch.object(dht, "local_ip", lambda: "127.0.0.1")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
         self.a = dht.DHTNode(multicast=False, port=0)
         self.b = dht.DHTNode(multicast=False, port=0)
@@ -231,75 +267,101 @@ class DHTCase(unittest.TestCase):
         self.assertTrue(any(c.node == self.a.own for c in self.b.table.all()))
 
     def test_announce_then_lookup(self):
+        """АнOUNCE доходит по сети; локальное значение видно и себе же."""
         self._wire()
-        accepted = self.a.announce_sync(
-            "vid000000001", "sha256:" + "ab" * 32, 1234,
-            "2026-10-11T09:00:00", f"127.0.0.1:{self.port_a}")
-        self.assertGreater(accepted, 0, "B обязан принять put")
+        accepted = self.a.announce_sync("vid000000001", 4321)
+        self.assertGreater(accepted, 0, "B обязан принять announce_peer")
         found = self.b.lookup_sync("vid000000001")
         self.assertEqual(len(found), 1)
-        self.assertEqual(found[0]["addr"], f"127.0.0.1:{self.port_a}")
-        self.assertEqual(found[0]["hash"][:4], bytes.fromhex("abababab"))
+        self.assertEqual(found[0]["addr"], "127.0.0.1:4321",
+                         "адрес = вид нами отправителя + объявленный порт")
+        # ЛОКАЛЬНАЯ видимость: объявивший обязан найти своё же (ловушка
+        # «get обязан отдавать и локальные значения»).
+        mine = self.a.lookup_sync("vid000000001")
+        self.assertEqual(len(mine), 1,
+                         "объявивший обязан видеть своё объявление сам")
 
     def test_lookup_empty_for_unknown_key(self):
         self._wire()
         self.assertEqual(self.b.lookup_sync("vid999999999"), [])
 
-    def test_forged_value_filtered_by_client(self):
-        # Кладём в обход подписи: _accept_put не разбирает значения (как
-        # и публичный роутер) - отсекает parse_value на стороне клиента.
+    def test_announce_peer_rejects_bad_token(self):
+        """Анонс с чужим токеном -> ошибка 203 (и ничего не записано)."""
         self._wire()
         key = dht.key_for("vid000000001")
-        junk = bencode.encode({b"addr": b"x:1", b"pubkey": bytes(32),
-                               b"hash": bytes(20), b"size": 1,
-                               b"synced_at": b"t", b"ts": 1,
-                               b"sig": bytes(64)})
-        # Прямая запись в store минуя подпись - как это сделал бы злой пир.
-        self.b._store.setdefault(key, []).append((time.time(), junk))
-        self.assertEqual(self.a.lookup_sync("vid000000001"), [],
-                         "значение без верной подписи не должно доходить")
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(3)
+        try:
+            packet = bencode.encode(
+                {b"t": b"\x01\x02\x03", b"y": b"q",
+                 b"q": b"announce_peer",
+                 b"a": {b"id": os.urandom(20), b"info_hash": key,
+                        b"token": "чужой-токен".encode("utf-8"),
+                        b"port": 9999}})
+            sock.sendto(packet, ("127.0.0.1", self.port_b))
+            data, _ = sock.recvfrom(4096)
+        finally:
+            sock.close()
+        reply = bencode.decode_dict(data)
+        self.assertEqual(reply.get(b"y"), b"e")
+        self.assertEqual(reply.get(b"e"), [203, b"invalid token"])
+        self.assertEqual(self.b._peers_for(key), [],
+                         "с чужим токеном не должно записаться ничего")
 
-    def test_oversized_value_rejected(self):
-        args = {b"key": dht.key_for("vid000000001"),
-                b"v": b"x" * 1001}
-        self.b._accept_put(args)
-        self.assertEqual(self.b._values_for(dht.key_for("vid000000001")),
-                         [], "BEP5: больше 1000 байт не принимаем")
+    def test_implied_port_uses_source_port(self):
+        """implied_port=1 -> берём порт источника UDP (стандарт BEP5)."""
+        self._wire()
+        key = dht.key_for("vid000000001")
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Бинд до getsockname: на Windows несвязанный UDP-сокет
+        # отдаёт WSAEINVAL (10022).
+        sock.bind(("127.0.0.1", 0))
+        sock.settimeout(3)
+        source_port = sock.getsockname()[1]
+
+        def rpc(payload):
+            sock.sendto(bencode.encode(payload), ("127.0.0.1", self.port_b))
+            data, _ = sock.recvfrom(4096)
+            return bencode.decode_dict(data)
+
+        try:
+            reply = rpc({b"t": b"\x0a\x0b\x0c", b"y": b"q",
+                         b"q": b"get_peers", b"a": {b"id": os.urandom(20),
+                                                    b"info_hash": key}})
+            token = (reply.get(b"r") or {}).get(b"token")
+            self.assertTrue(token, "get_peers обязан выдать токен")
+            ack = rpc({b"t": b"\x0d\x0e\x0f", b"y": b"q",
+                       b"q": b"announce_peer",
+                       b"a": {b"id": os.urandom(20), b"info_hash": key,
+                              b"token": token, b"implied_port": 1}})
+            self.assertEqual(ack.get(b"y"), b"r")
+        finally:
+            sock.close()
+        peers = self.b._peers_for(key)
+        self.assertIn(("127.0.0.1", source_port), peers,
+                      "implied_port: порт = источник UDP")
 
     def test_name_announce_and_lookup(self):
-        """Объявление ника живым узлом -> поиск по регистронезависимому ключу."""
+        """Объявление ника живым узлом -> поиск без регистра."""
         self._wire()
-        accepted = self.a.announce_name_sync(
-            "Друг", f"127.0.0.1:{self.port_a}")
-        self.assertGreater(accepted, 0, "B обязан принять запись имени")
+        accepted = self.a.announce_name_sync("Друг", 5551)
+        self.assertGreater(accepted, 0, "B обязан принять анонс имени")
         found = self.b.name_lookup_sync("друг")
         self.assertEqual(len(found), 1)
-        self.assertEqual(found[0]["nick"], "Друг")
-        self.assertEqual(found[0]["addr"], f"127.0.0.1:{self.port_a}")
-        self.assertEqual(found[0]["pubkey"],
-                         identity.get_identity()[1].hex())
+        self.assertEqual(found[0]["addr"], "127.0.0.1:5551")
         self.assertEqual(self.b.name_lookup_sync("никого-нет"), [],
                          "пустой ключ - пусто")
 
-    def test_nick_collision_lists_both_keys(self):
-        """Один ник у разных идентичностей: оба кандидата честно списком."""
+    def test_nick_collision_lists_both_addresses(self):
+        """Один ник у разных узлов: оба адреса честно списком."""
         self._wire()
-        self.a.announce_name_sync("Общий", f"127.0.0.1:{self.port_a}")
-        # Другая идентичность (смена профиля) объявляет ТОТ ЖЕ ник.
-        other = tempfile.TemporaryDirectory()
-        self.addCleanup(other.cleanup)
-        with mock.patch.object(identity, "profile_dir",
-                               lambda: Path(other.name)):
-            identity.reset_cache()
-            self.b.announce_name_sync("Общий", f"127.0.0.1:{self.port_b}")
-        identity.reset_cache()
+        self.a.announce_name_sync("Общий", 5551)
+        self.b.announce_name_sync("Общий", 5552)
         found = self.b.name_lookup_sync("ОБЩИЙ")
         self.assertEqual(len(found), 2, "коллизия обязана показаться списком")
         self.assertEqual({f["addr"] for f in found},
-                         {f"127.0.0.1:{self.port_a}",
-                          f"127.0.0.1:{self.port_b}"})
-        self.assertEqual(len({f["pubkey"] for f in found}), 2,
-                         "разные ключи - разные участники")
+                         {"127.0.0.1:5551", "127.0.0.1:5552"},
+                         "разные адреса - разные участники")
 
     def test_start_stop_idempotent(self):
         self.assertEqual(self.a.port, self.port_a)

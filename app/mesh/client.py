@@ -37,13 +37,15 @@ class MeshCancelled(Exception):
     """Остановлено пользователем (stop-событие очереди/окна)."""
 
 
-def _connect(addr: str, timeout: float, expect: str | None):
+def _connect(addr: str, timeout: float, expect: str | None,
+             pin: bool = True):
     """TLS-соединение к участнику; проверка аттестации В connect().
 
     http.client шлёт запрос только после conn.connect() - значит
     verify_peer внутри переопределённого connect() гарантированно
     выполняется ДО первого байта (в спайке это подтверждено счётчиком
-    обращений сервера: при отказе - ноль).
+    обращений сервера: при отказе - ноль). pin=False - проверить ключ,
+    но НЕ записывать пин (поиск участников так и делает).
     """
     host, _, port = str(addr).partition(":")
     conn = http.client.HTTPSConnection(
@@ -60,7 +62,7 @@ def _connect(addr: str, timeout: float, expect: str | None):
     try:
         conn.mesh_identity = channel_mod.verify_peer(
             conn.sock.getpeercert(binary_form=True), expected=expect,
-            addr=addr)
+            addr=addr if pin else None)
     except channel_mod.ChannelError:
         conn.close()
         raise
@@ -137,14 +139,15 @@ def pick_digest(pairs: list[tuple], banned=frozenset()) -> str | None:
 
 
 def probe(addr: str, expect: str | None = None,
-          timeout: float = CONNECT_TIMEOUT) -> str:
+          timeout: float = CONNECT_TIMEOUT, pin: bool = True) -> str:
     """Открыть канал и тут же закрыть: проверка адреса/ключа без запросов.
 
-    Кнопка «Проверить адрес» в поиске участников: handshake + аттестация
-    (в connect - ДО первого байта), никаких id наружу. Возвращает ключ,
-    открывший канал; отказы - ChannelError/OSError наверх.
+    Кнопка «Проверить адрес» (pin=True - ключ запоминается) и поиск
+    участников (pin=False - только отпечаток): handshake + аттестация
+    в connect, никаких id наружу. Возвращает ключ, открывший канал;
+    отказы - ChannelError/OSError наверх.
     """
-    conn = _connect(addr, timeout, expect)
+    conn = _connect(addr, timeout, expect, pin=pin)
     try:
         return str(getattr(conn, "mesh_identity", ""))
     finally:

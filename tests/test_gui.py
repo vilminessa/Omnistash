@@ -642,12 +642,11 @@ class TestPeerApi(GuiCase):
 
         class FakeNode:
             running = True
+            table = ["узел-в-таблице"]      # len>0: DHT уже набрал узлов
 
             def name_lookup_sync(self, nick, *args, **kwargs):
-                return [{"nick": nick, "addr": "127.0.0.1:38574",
-                         "pubkey": "ab" * 32, "ts": 1760000000},
-                        {"nick": nick, "addr": "10.0.0.9:38574",
-                         "pubkey": "cd" * 32, "ts": 1760000500}]
+                return [{"addr": "127.0.0.1:38574"},
+                        {"addr": "10.0.0.9:38574"}]
 
             def stop_sync(self, *args, **kwargs):
                 # api.close() останавливает узел - заглушка для фейка.
@@ -655,16 +654,45 @@ class TestPeerApi(GuiCase):
 
         api._mesh_dht = FakeNode()
         mesh_channel.pin_set("127.0.0.1:38574", "ab" * 32)
-        res = api.nick_search({"query": "Друг"})
+        # Поиск открывает канал каждому адресату (личность - оттуда);
+        # патчим: живых машин в офлайн-тесте нет.
+        identities = {"127.0.0.1:38574": "ab" * 32,
+                      "10.0.0.9:38574": "cd" * 32}
+        with mock.patch("app.gui.mesh_client.probe",
+                        side_effect=lambda addr, **kw: identities[addr]):
+            res = api.nick_search({"query": "Друг"})
         self.assertTrue(res.get("ok"), res)
         self.assertEqual(res["query"], "Друг")
         self.assertEqual(len(res["results"]), 2, "коллизии - списком")
         first, second = res["results"]
         self.assertEqual(first["nick"], "Друг")
+        self.assertEqual(first["pubkey"], "ab" * 32)
         self.assertEqual(first["fingerprint"],
                          mesh_identity.fingerprint("ab" * 32))
         self.assertTrue(first["pinned"], "запомненный адрес помечается")
+        self.assertEqual(second["fingerprint"],
+                         mesh_identity.fingerprint("cd" * 32))
         self.assertFalse(second["pinned"])
+        # Пин при поиске НЕ пишется (это делает явная кнопка проверки).
+        self.assertEqual(mesh_channel.pin_get("10.0.0.9:38574"), "")
+
+    def test_nick_search_waits_for_dht_table(self):
+        """Пока DHT не набрал узлов - честная просьба подождать."""
+        api = self._api()
+
+        class EmptyNode:
+            running = True
+            table: list = []
+
+            def name_lookup_sync(self, *args, **kwargs):
+                return []
+
+            def stop_sync(self, *args, **kwargs):
+                return None
+
+        api._mesh_dht = EmptyNode()
+        res = api.nick_search({"query": "Друг"})
+        self.assertIn("набирает", res.get("error", ""))
 
     def test_nick_probe_tls_pin_cycle(self):
         api = self._api()

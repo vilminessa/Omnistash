@@ -428,10 +428,7 @@ class TestRestore(MeshNetCase):
             try:
                 announcer.table.add(dht_mod.Contact(listener.own, "127.0.0.1", pl))
                 listener.table.add(dht_mod.Contact(announcer.own, "127.0.0.1", pa))
-                tcp_addr = f"127.0.0.1:{self.port}"
-                accepted = announcer.announce_sync(
-                    "vid000000001", holder["digest"], 100,
-                    "2026-10-11T09:00:00", tcp_addr)
+                accepted = announcer.announce_sync("vid000000001", self.port)
                 self.assertGreater(accepted, 0, "значение должно дойти")
                 dht_mod.set_current(listener)
                 settings = {"mesh_enabled": True}    # БЕЗ ручных адресов!

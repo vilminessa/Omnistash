@@ -53,21 +53,15 @@ def restore(conn, row: dict, settings: dict, dest_dir, *,
         if expect.strip():
             expects[addr] = expect.strip().lower()
     banned = feedback.banned_set(conn)
-    # DHT: участники, заранее объявившие этот файл (плюс ручные адреса).
-    # Значение несёт 20-байтный срез хеша - его и сверяем со стоп-листом;
-    # подписанный ключ из записи становится ожидаемым ключом канала.
+    # DHT: участники, объявившие этот файл (плюс ручные адреса). Сеть
+    # отдаёт только АДРЕСА (ядро BEP5): ключ/подпись/хеш придут с
+    # терминала в манифесте по TLS, а фильтр стоп-листа сработает при
+    # выборе хеша (pick_digest) - предфильтровать по чужому слову нечего.
     node = dht.current()
     if node is not None and node.running:
-        banned_head = {b[len("sha256:"):][:40] for b in banned}
         for found in node.lookup_sync(row["remote_id"]):
             addr = str(found.get("addr") or "")
-            head = bytes(found.get("hash") or b"").hex()
-            if not addr or head in banned_head:
-                continue
-            pubkey = str(found.get("pubkey") or "").strip().lower()
-            if pubkey:
-                expects.setdefault(addr, pubkey)
-            if addr in addrs:
+            if not addr or addr in addrs:
                 continue
             addrs.append(addr)
     if not addrs:
