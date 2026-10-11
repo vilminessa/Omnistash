@@ -53,3 +53,17 @@ def list_bans(conn) -> list[dict]:
     return [dict(row) for row in conn.execute(
         "SELECT hash, peer, note, created_at FROM mesh_bans "
         "ORDER BY created_at DESC")]
+
+
+def peer_offenses(conn, peer: str) -> int:
+    """Сколько раз этот ключ приносил негодные хеши (информация, не барьер).
+
+    Блокирует только стоп-лист - по конкретному хешу, это решение человека.
+    Счётчик нужен, чтобы узел с историей был виден ДО обмена (в review)
+    и в карточке: «этот ключ уже приносил несовпадения: N».
+    """
+    if not peer:
+        return 0
+    row = conn.execute("SELECT COUNT(*) AS n FROM mesh_bans WHERE peer=?",
+                       (str(peer),)).fetchone()
+    return int(row["n"] or 0)

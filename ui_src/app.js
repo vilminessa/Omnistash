@@ -1878,6 +1878,20 @@
         add("Mesh", state.mesh.running ? "идёт запрос к участникам…"
                                        : (state.mesh.summary || ""));
       }
+      // Mesh-копия: провенанс из files[].format_json (подпись происхождения).
+      // Ровно то, что видел человек, пока файл стоял: уровень приёма,
+      // подтверждения, дата синка узла - и пометка о репутации носителя.
+      var meshInfo = meshFileInfo(data);
+      if (meshInfo) {
+        var m = meshInfo.meta;
+        var prov = m.level || "mesh-копия";
+        if (m.consensus) prov += ", подтверждений " + m.consensus;
+        if (m.peer_synced_at) prov += ", синк узла " + shortTime(m.peer_synced_at);
+        if (m.peer_offenses) {
+          prov += " ⚠ носитель уже приносил несовпадения: " + m.peer_offenses;
+        }
+        add("Провенанс mesh", prov);
+      }
       add("Происхождение", data.origin);
       add("URL", data.webpage_url);
       add("Первый раз замечено", shortTime(data.first_seen_at));
@@ -1931,6 +1945,14 @@
             "Запросить у участников</button>");
         }
       }
+      // «Файл оказался не тем»: отзыв mesh-копии - стоп-лист + удаление.
+      // Кнопка только у скачанной mesh-копии: у файла с площадки отзывать
+      // нечего (там своя история).
+      if (data.status === "downloaded" && meshInfo && !meshInfo.file.missing) {
+        actions.push('<button class="btn ghost" data-detail="reject" ' +
+          'title="Файл получен от участника и оказался не тем: хеш уйдёт ' +
+          'в стоп-лист, файл удалится">Файл оказался не тем?</button>');
+      }
       if (data.webpage_url) {
         actions.push('<button class="btn ghost" data-detail="source">Открыть на площадке</button>');
       }
@@ -1954,6 +1976,21 @@
   function detailThumbHtml(data) {
     return '<div class="detail-thumb" id="detail-thumb">' +
       '<div class="muted">обложка…</div></div>';
+  }
+
+  function meshFileInfo(data) {
+    // Файл-копия из mesh: провенанс лежит в files[].format_json (строка).
+    var found = null;
+    (data.files || []).forEach(function (f) {
+      if (found || f.kind !== "video" || !f.format_json) return;
+      try {
+        var meta = JSON.parse(f.format_json);
+        if (meta && meta.source === "mesh") {
+          found = { file: f, meta: meta };
+        }
+      } catch (e) { /* чужой формат - не наш случай */ }
+    });
+    return found;
   }
 
   function starButtons(value) {
@@ -2099,6 +2136,26 @@
             });
           } else if (action === "mesh-stop") {
             call("mesh_fetch_stop");
+          } else if (action === "reject") {
+            if (!meshFileInfo(data)) {
+              toast("Это не mesh-копия - отзывать нечего", true);
+              return;
+            }
+            var warn = "Отозвать этот файл?\n\n" +
+              "• его хеш уйдёт в стоп-лист - манифесты с ним программа " +
+              "больше не примет;\n" +
+              "• сам файл удаляется с диска;\n" +
+              "• строка станет «упавшей» - «Повторить» пойдёт с площадки.";
+            if (!confirm(warn)) return;
+            call("mesh_reject", { id: data.id }).then(function (res) {
+              if (!res) return;
+              if (res.error) { toast(res.error, true); return; }
+              toast(res.removed
+                ? "Отозвано: хеш в стоп-листе, файл удалён"
+                : "Отозвано, но файл удалить не удалось (см. журнал)");
+              openDetail(data.id);
+              renderGrid();
+            });
           } else if (action === "source" && data.webpage_url) {
             call("open_url", data.webpage_url);
           }
@@ -2457,6 +2514,9 @@
               "запрашиваемых видео. Метаданные от участников НЕ принимаются " +
               "никогда - только файлы, и те проверяются (sha256, структура, " +
               "стоп-лист «несовпадений»).\n\n" +
+              "С роутера также будет запрошен проброс порта (UPnP) - это " +
+              "меняет настройки роутера; выключается настройкой «Проброс " +
+              "порта через роутер» в этой же секции.\n\n" +
               "Продолжить?");
             if (!ok) {
               input.checked = false;
@@ -3480,7 +3540,7 @@
       sync_depth: "full",
       col_views: true, col_likes: true, col_comments: true, col_sync: true,
       sort_col: "", sort_dir: "desc",
-      mesh_enabled: false, mesh_peers: "", mesh_port: 38574,
+      mesh_enabled: false, mesh_peers: "", mesh_port: 38574, mesh_upnp: true,
       dest_dir: "D:\\видео\\downloads",
       output_template: "%(channel)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s",
       quality: "high", subtitles: "none", transcode: "none",
@@ -3668,6 +3728,12 @@
         label: "Порт своего mesh-сервера",
         hint: "Отдаёт только проверенные файлы; адрес стабилен между " +
               "перезапусками.", min: 1024, max: 65535, default: 38574 },
+      { key: "mesh_upnp", type: "bool", section: "Mesh",
+        label: "Проброс порта через роутер (UPnP)",
+        hint: "Роутер откроет ваш порт наружу (TCP и UDP) - это меняет " +
+              "настройки роутера; внешний адрес берём у него же. Без " +
+              "проброса участникам доступна только ваша сеть (LAN).",
+        default: true },
       { key: "dest_dir", type: "path", section: "Загрузка",
         label: "Куда скачивать", hint: "нет - заменено хранилищами",
         hidden: true, default: "D:\\видео\\downloads" },
@@ -3873,9 +3939,17 @@
           origin: "preview",
           webpage_url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
           files: [{ kind: "video", size: 240000000, missing: 0,
-                    path: "D:\\видео\\библиотека\\Ночной дождик [dQw4w9WgXcQ].mp4" }],
+                    path: "D:\\видео\\библиотека\\Ночной дождик [dQw4w9WgXcQ].mp4",
+                    format_json: JSON.stringify({
+                      source: "mesh", peer: "ab12cd34…",
+                      level: "подтверждён 3 узлами", consensus: 3,
+                      peer_offenses: 1,
+                      peer_synced_at: "2026-10-10T21:04:00" }) }],
           raw: { preview: true, id: row.key }
         }));
+      },
+      mesh_reject: function () {
+        return Promise.resolve({ ok: true, removed: true });
       },
       enqueue: function (req) {
         return Promise.resolve({ queued: ((req || {}).ids || []).length });

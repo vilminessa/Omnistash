@@ -1,5 +1,6 @@
 """Дымовой тест окна: Api без pywebview + сборка страницы."""
 
+import json
 import tempfile
 import time
 import unittest
@@ -507,6 +508,72 @@ class TestRefreshMeta(GuiCase):
         self.assertEqual(row["title"], "Снова живое")
         state = api.poll(0)["refresh"]
         self.assertIn("1 из 1", state["summary"])
+
+
+class TestMeshReject(GuiCase):
+    """Отзыв «файл оказался не тем»: стоп-лист + удаление + честный статус."""
+
+    def _seed(self, api, *, mesh: bool = True):
+        conn = api.db.conn
+        vid, _ = repo.upsert_video(conn, {
+            "platform": "youtube", "remote_id": "vidreject001",
+            "key": "youtube:vidreject001", "title": "Клип",
+            "origin": "yt-dlp"})
+        path = self.dir / "Клип [vidreject001].mp4"
+        path.write_bytes(b"ftyp-fake-" + b"x" * 32)
+        fmt = None
+        if mesh:
+            fmt = json.dumps({
+                "source": "mesh", "peer": "ab" * 32,
+                "level": "одиночный узел (принимаем по правилу пользователя)",
+                "consensus": 1, "peer_offenses": 0,
+                "peer_synced_at": "2026-10-11T09:00:00",
+            }, ensure_ascii=False)
+        repo.record_file(conn, vid, str(path), "video",
+                         size=path.stat().st_size, mtime=1.0,
+                         digest="sha256:" + "cd" * 32, format_json=fmt)
+        return vid, path
+
+    def test_reject_bans_removes_and_fails_row(self):
+        api = self.make_api()
+        vid, path = self._seed(api)
+        res = api.mesh_reject({"id": vid})
+        self.assertTrue(res.get("ok"), res)
+        self.assertTrue(res["removed"], "файл должен удалиться")
+        self.assertFalse(path.exists(), "негодная копия уходит с диска")
+        conn = api.db.conn
+        row = dict(conn.execute(
+            "SELECT status, last_error FROM videos WHERE id=?",
+            (vid,)).fetchone())
+        self.assertEqual(row["status"], "failed",
+                         "«Повторить упавшие» пойдёт с площадки")
+        self.assertIn("стоп-листе", row["last_error"] or "")
+        file_row = dict(conn.execute(
+            "SELECT hash, missing FROM files WHERE video_id=?",
+            (vid,)).fetchone())
+        self.assertEqual(file_row["missing"], 1)
+        self.assertEqual(file_row["hash"], "sha256:" + "cd" * 32,
+                         "хеш остаётся - он и есть предмет отзыва")
+        from app.mesh import feedback
+        self.assertIn("sha256:" + "cd" * 32, feedback.banned_set(conn))
+        self.assertEqual(feedback.list_bans(conn)[0]["peer"], "ab" * 32,
+                         "ключ-носитель запоминается как нарушитель")
+        # Повторный отзыв невозможен: статус уже не «скачан».
+        self.assertIn("error", api.mesh_reject({"id": vid}))
+
+    def test_reject_only_for_mesh_copies(self):
+        api = self.make_api()
+        vid, path = self._seed(api, mesh=False)
+        res = api.mesh_reject({"id": vid})
+        self.assertIn("mesh", res.get("error", ""))
+        self.assertTrue(path.exists(), "файл с площадки не трогаем")
+        from app.mesh import feedback
+        self.assertEqual(feedback.banned_set(api.db.conn), set())
+
+    def test_reject_unknown_video_is_error(self):
+        api = self.make_api()
+        self.assertIn("error", api.mesh_reject({"id": 99999}))
+        self.assertIn("error", api.mesh_reject({"id": "не число"}))
 
 
 if __name__ == "__main__":

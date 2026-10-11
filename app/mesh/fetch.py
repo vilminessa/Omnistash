@@ -77,9 +77,20 @@ def restore(conn, row: dict, settings: dict, dest_dir, *,
     if not digest:
         return give_up("Mesh: нет пригодных манифестов (недоступны, "
                        "без подписи или в стоп-листе)")
+    # Репутация: сколько раз ключи-носители принятого хеша УЖЕ приносили
+    # «несовпадение». Информация для человека (в review и в провенанс),
+    # барьером не становится - блокирует только стоп-лист по хешу.
+    holders = {str(m.get("pubkey") or "")
+               for m in (item for _addr, item in pairs)
+               if m.get("sha256") == digest and manifest.verify(m) is None}
+    offenses = sum(feedback.peer_offenses(conn, key) for key in holders if key)
+    if offenses:
+        log(f"Mesh: внимание - узлы с этим хешом уже приносили несовпадения "
+            f"({offenses}); в карточке будет пометка")
     decision = verify.review(
         digest, own_digest=own_digest,
-        manifests=[item for _addr, item in pairs], banned=banned)
+        manifests=[item for _addr, item in pairs], banned=banned,
+        offenses=offenses)
     if not decision["ok"]:
         return give_up(f"Mesh: отказ - {decision['reason']}")
     peer, item = next(

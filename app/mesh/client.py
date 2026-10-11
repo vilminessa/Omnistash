@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import urllib.error
 import urllib.request
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -32,7 +33,13 @@ class MeshCancelled(Exception):
 def _open(url: str, timeout: float = CONNECT_TIMEOUT, headers=None):
     request = urllib.request.Request(
         url, headers={"User-Agent": USER_AGENT, **(headers or {})})
-    return urllib.request.urlopen(request, timeout=timeout)
+    try:
+        return urllib.request.urlopen(request, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        # Тело ответа-отказа не нужно: закрываем, иначе ResourceWarning
+        # всплывает при GC (fp файла остаётся в исключении).
+        exc.close()
+        raise
 
 
 def collect_manifests(remote_id: str, addrs: list[str]) -> list[tuple]:

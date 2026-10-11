@@ -180,6 +180,21 @@ class TestReview(IdentityCase):
         self.assertEqual(decision["consensus"], 1,
                          "неподписанные заявления не участвуют")
 
+    def test_offenses_are_informational_not_blocking(self):
+        digest = "sha256:" + "ab" * 32
+        decision = verify.review(digest, manifests=[self._signed(digest)],
+                                 offenses=3)
+        self.assertTrue(decision["ok"],
+                        "репутация ключа не блокирует - блокирует стоп-лист")
+        self.assertEqual(decision["offenses"], 3)
+        # Без переданной информации - ноль, а не None (в JSON и UI).
+        self.assertEqual(
+            verify.review(digest, manifests=[self._signed(digest)])["offenses"],
+            0)
+        # В провенанс попадает - чтобы через месяц было видно в карточке.
+        provenance = verify.provenance(decision, "cd" * 32)
+        self.assertEqual(provenance["peer_offenses"], 3)
+
 
 class TestProbe(unittest.TestCase):
     """Структурная сверка: подменяем ffprobe (его логика - не предмет)."""
@@ -282,6 +297,17 @@ class TestFeedbackAndMigration(unittest.TestCase):
     def test_empty_digest_rejected(self):
         with self.assertRaises(ValueError):
             feedback.ban(self.conn, "")
+
+    def test_peer_offenses_counts_by_key(self):
+        peer = "ab" * 32
+        self.assertEqual(feedback.peer_offenses(self.conn, peer), 0)
+        feedback.ban(self.conn, "sha256:" + "01" * 32, peer=peer, note="1")
+        feedback.ban(self.conn, "sha256:" + "02" * 32, peer=peer, note="2")
+        feedback.ban(self.conn, "sha256:" + "03" * 32, peer="ee" * 32, note="3")
+        self.assertEqual(feedback.peer_offenses(self.conn, peer), 2,
+                         "считаются нарушения КЛЮЧА, а не все баны подряд")
+        self.assertEqual(feedback.peer_offenses(self.conn, "ff" * 32), 0)
+        self.assertEqual(feedback.peer_offenses(self.conn, ""), 0)
 
 
 if __name__ == "__main__":

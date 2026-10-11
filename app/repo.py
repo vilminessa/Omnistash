@@ -848,8 +848,8 @@ def video_detail(conn: sqlite3.Connection, video_id: int) -> dict | None:
     data = dict(row)
     data["status_label"] = STATUS_LABELS.get(data["status"], data["status"])
     data["files"] = [dict(f) for f in conn.execute(
-        "SELECT kind, path, size, hash, mtime, missing FROM files "
-        "WHERE video_id=? ORDER BY kind", (video_id,))]
+        "SELECT kind, path, size, hash, mtime, missing, format_json "
+        "FROM files WHERE video_id=? ORDER BY kind", (video_id,))]
     data["playlists"] = [dict(p) for p in conn.execute(
         """SELECT p.id, p.title, p.kind, pi.position, pi.removed_at
              FROM playlist_items pi JOIN playlists p ON p.id=pi.playlist_id
@@ -859,6 +859,26 @@ def video_detail(conn: sqlite3.Connection, video_id: int) -> dict | None:
     except json.JSONDecodeError:
         data["raw"] = {}
     return data
+
+
+def mesh_file(conn: sqlite3.Connection, video_id: int) -> dict | None:
+    """Файл-копия, пришедшая из mesh (провенанс source=mesh в format_json).
+
+    Даёт карточке ровно то, что ей нужно увидеть: путь, хеш и подпись
+    происхождения. Скачанный с площадки файл возвращает None - отзыв
+    «несовпадение» относится только к mesh-копиям.
+    """
+    for row in conn.execute(
+            "SELECT path, hash, missing, format_json FROM files "
+            "WHERE video_id=? AND kind='video'", (video_id,)):
+        try:
+            meta = json.loads(row["format_json"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        if isinstance(meta, dict) and meta.get("source") == "mesh":
+            return {"path": row["path"], "hash": row["hash"],
+                    "missing": int(row["missing"] or 0), "meta": meta}
+    return None
 
 
 def queue_rows(conn: sqlite3.Connection) -> list[dict]:

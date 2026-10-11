@@ -31,7 +31,9 @@ from . import settings_schema, sources
 from . import storages as storages_mod
 from . import verify as verify_mod
 from .mesh import dht as mesh_dht
+from .mesh import feedback as mesh_feedback
 from .mesh import fetch as mesh_fetch
+from .mesh import nat as mesh_nat
 from .mesh import server as mesh_server
 from .db import SYNC_MODES, Database
 from .metadata import normalize_video
@@ -200,6 +202,9 @@ class Api:
         self._mesh_stop = threading.Event()
         self._mesh_thread: threading.Thread | None = None
         self._announce_thread: threading.Thread | None = None
+        # UPnP-проброс (PortMapper): живёт только при включённом участии
+        # и согласии на проброс; создаётся в _mesh_apply лениво.
+        self._nat: mesh_nat.PortMapper | None = None
         # Аккаунт Google: окно входа живёт отдельно от главного.
         self._login_window = None
         self._login_cancel = threading.Event()
@@ -481,12 +486,14 @@ class Api:
             return None
 
     def _mesh_apply(self) -> None:
-        """Поднять/остановить mesh-сервер И DHT-узел по настройкам.
+        """Поднять/остановить mesh-сервер, DHT-узел И UPnP-проброс.
 
         Сервер отдаёт только проверенные файлы (с известным sha256) и
         поднимается исключительно при включённом участии (согласие).
         DHT (UDP, тот же порт - другой транспорт) объявляет наши файлы
-        и ищет участников без своих серверов.
+        и ищет участников без своих серверов. Проброс порта за NAT -
+        отдельное согласие (mesh_upnp): роутер или не найден, или отказал
+        - остаёмся на LAN, причина пишется в журнал (никаких падений).
         """
         config = self._current_settings()
         want = bool(config.get("mesh_enabled"))
@@ -496,12 +503,23 @@ class Api:
                 self._mesh_server.stop()
             if self._mesh_dht.running:
                 self._mesh_dht.stop_sync()
+            self._nat_stop()    # проброс старого порта нам больше не нужен
             self._mesh_server = mesh_server.PeerServer(self.db, port)
             self._mesh_dht = mesh_dht.DHTNode(
                 log=self._log, port=port,
                 persist=str(profile_dir() / mesh_dht.PEER_FILE))
             mesh_dht.set_current(None)
             self._mesh_port = port
+        if want and bool(config.get("mesh_upnp", True)):
+            if self._nat is None or self._nat.port != port:
+                self._nat_stop()
+                mapper = mesh_nat.PortMapper(port, log=self._log)
+                self._nat = mapper
+                mapper.start()   # фон: SSDP+SOAP к роутеру не блокируют
+                self._log(f"UPnP: проброс порта {port} запрошен у роутера "
+                          "(TCP+UDP); итог - следующей строкой журнала")
+        else:
+            self._nat_stop()
         if want:
             if not self._mesh_server.running:
                 try:
@@ -528,6 +546,12 @@ class Api:
                 mesh_dht.set_current(None)
                 self._log("DHT-узел остановлен")
 
+    def _nat_stop(self) -> None:
+        """Снять UPnP-проброс (снятие делает фон маппера, тут - только воля)."""
+        mapper, self._nat = self._nat, None
+        if mapper is not None:
+            mapper.stop()
+
     def _start_announce(self) -> None:
         """Объявить имеющиеся файлы в DHT - фоном, один раз за включение."""
         if (self._announce_thread is not None
@@ -542,7 +566,15 @@ class Api:
                     WHERE f.kind='video' AND f.missing=0
                       AND f.hash IS NOT NULL AND v.platform <> 'local'
                     ORDER BY f.id""").fetchall()
-            addr = f"{mesh_dht.local_ip()}:{self._mesh_port}"
+            mapper = self._nat
+            if mapper is not None:
+                # Проброс у роутера ещё уточняется: дождаться итога, чтобы
+                # объявить внешний адрес, а не локальный (без проброса он
+                # адресатам недоступен - announce_addr честно вернёт LAN).
+                mapper.wait(15.0)
+                addr = mapper.announce_addr()
+            else:
+                addr = f"{mesh_dht.local_ip()}:{self._mesh_port}"
             done = 0
             for row in rows:
                 if not self._mesh_dht.running:
@@ -583,7 +615,7 @@ class Api:
         else:
             self._log(f"Настройка {key} = {pair.get('value')!r}")
         self._heavy_at = 0.0  # дерево/счётчики могли измениться
-        if key in ("mesh_enabled", "mesh_port"):
+        if key in ("mesh_enabled", "mesh_port", "mesh_upnp"):
             # Согласие дано/снято или сменился порт - сервер тут же следует.
             self._mesh_apply()
         if key in ("scan_interval_min", "sync_interval_min"):
@@ -2015,6 +2047,74 @@ class Api:
         self._log("Mesh: запрос остановлен")
         return {"ok": True}
 
+    def mesh_reject(self, request=None) -> dict:
+        """«Файл оказался не тем»: стоп-лист + удаление негодной копии.
+
+        Один клик из карточки (с подтверждением - там же): хеш уходит в
+        стоп-лист, ключ-носитель запоминается как нарушитель (репутация),
+        сам файл удаляется с диска, строка files остаётся с missing=1
+        (хеш - для истории), статус становится «упавшее» - «Повторить
+        упавшие» пойдёт с площадки, а не с участников.
+        """
+        request = request or {}
+        try:
+            video_id = int(request.get("id") or 0)
+        except (TypeError, ValueError):
+            return {"error": "Видео не указано"}
+        conn = self.db.conn
+        row = conn.execute(
+            "SELECT id, title, status FROM videos WHERE id=?",
+            (video_id,)).fetchone()
+        if row is None:
+            return {"error": "Видео не найдено"}
+        if row["status"] != "downloaded":
+            return {"error": "Отзыв возможен у скачанного файла "
+                             "(сейчас статус: "
+                             f"{row['status']})"}
+        mesh = repo.mesh_file(conn, video_id)
+        if mesh is None:
+            return {"error": "Это не mesh-копия: отзыв относится только к "
+                             "файлам, полученным от участников"}
+        digest = mesh["hash"]
+        if not digest:
+            return {"error": "У файла нет sha256 - отзывать нечего"}
+        if mesh["missing"]:
+            return {"error": "Файл уже отсутствует на диске"}
+        meta = mesh["meta"]
+        peer = str(meta.get("peer") or "")
+        # 1) стоп-лист: решение человека окончательно - хеш негоден,
+        #    даже если удалять файл не выйдет (права, диск).
+        try:
+            mesh_feedback.ban(conn, digest, peer,
+                              note="несовпадение после просмотра")
+        except ValueError as exc:
+            return {"error": str(exc)}
+        # 2) сам негодный файл - с диска (иначе он останется «скачанным»).
+        remove_note = ""
+        path = str(mesh["path"] or "")
+        if path:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                conn.execute("UPDATE files SET missing=1 WHERE path=?",
+                             (path,))
+            except OSError as exc:
+                remove_note = (f"; сам файл удалить не удалось ({exc}) - "
+                               "удалите вручную")
+        repo.set_status(conn, [video_id], "failed")
+        repo.set_last_error(
+            conn, video_id,
+            "негодная копия из mesh: хеш в стоп-листе - повторите с площадки"
+            + remove_note)
+        self._heavy_at = 0.0
+        shown = str(digest)
+        self._log(f"Mesh: «{row['title']}» отклонён - хеш "
+                  f"{shown[:18]}… в стоп-листе"
+                  + (f", носитель {peer[:12]}…" if peer else "")
+                  + remove_note)
+        return {"ok": True, "title": row["title"], "removed": not remove_note,
+                "hash": shown}
+
     def _mesh_worker(self, row: dict, config: dict, dest_dir: str) -> None:
         try:
             ok = mesh_fetch.restore(self.db.conn, row, config, dest_dir,
@@ -2724,6 +2824,7 @@ class Api:
         self._mesh_server.stop()
         self._mesh_dht.stop_sync()
         mesh_dht.set_current(None)
+        self._nat_stop()
         self.dl.wait(timeout=15)
         self.db.close()
 

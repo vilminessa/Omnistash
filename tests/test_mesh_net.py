@@ -111,6 +111,7 @@ class TestServer(MeshNetCase):
                 f"http://127.0.0.1:{self.port}/manifest/vid000000009",
                 timeout=10)
         self.assertEqual(caught.exception.code, 404)
+        caught.exception.close()   # тело отказа не читаем - fp закрыть
 
     def test_file_with_and_without_range(self):
         holder = self.seed_holder()
@@ -136,6 +137,7 @@ class TestServer(MeshNetCase):
                 urllib.request.urlopen(
                     f"http://127.0.0.1:{self.port}{path}", timeout=10)
             self.assertEqual(caught.exception.code, 404, path)
+            caught.exception.close()   # fp отказа закрываем сразу
 
 
 class TestClient(MeshNetCase):
@@ -273,6 +275,41 @@ class TestRestore(MeshNetCase):
                                 str(self.root / "out4"), log=logs.append)
         self.assertFalse(ok, "без своих метаданных сверять нечего")
         self.assertTrue(any("нет своих метаданных" in line for line in logs))
+
+    def test_peer_reputation_is_informational(self):
+        """Носитель с историей: приём проходит, пометка - обязательна.
+
+        Репутация ключа (сколько раз он приносил «несовпадение») - это
+        информация для человека в журнале и в провенансе, а не барьер:
+        блокирует только стоп-лист по самому хешу.
+        """
+        self.seed_holder()
+        receiver = self.seed_receiver()
+        from app.mesh import feedback
+        pubkey = identity.get_identity()[1].hex()
+        feedback.ban(self.db_b.conn, "sha256:" + "77" * 32,
+                     peer=pubkey, note="старое несовпадение")
+        feedback.ban(self.db_b.conn, "sha256:" + "78" * 32,
+                     peer=pubkey, note="ещё одно")
+        row = {"id": receiver["vid"], "remote_id": "vid000000001",
+               "title": "Клип"}
+        logs = []
+        with mock.patch.object(mesh_verify, "probe",
+                               return_value={"checked": True, "ok": None,
+                                             "duration": 213.0,
+                                             "errors": [], "skipped": "тест"}):
+            ok = mesh_fetch.restore(self.db_b.conn, row, self._settings(),
+                                    str(self.root / "out7"),
+                                    log=logs.append, reason="")
+        self.assertTrue(ok, "репутация - информация, не барьер")
+        self.assertTrue(any("несовпадения" in line for line in logs),
+                        f"в журнале должна быть пометка: {logs}")
+        files = [dict(r) for r in self.db_b.conn.execute(
+            "SELECT format_json FROM files WHERE video_id=?",
+            (receiver["vid"],))]
+        provenance = json.loads(files[0]["format_json"])
+        self.assertEqual(provenance["peer_offenses"], 2,
+                         "провенанс обязан хранить историю носителя")
 
     def test_structure_failure_rejected(self):
         self.seed_holder()

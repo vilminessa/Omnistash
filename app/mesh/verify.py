@@ -88,14 +88,16 @@ def probe(path, expected_duration=None) -> dict:
 
 def review(received_digest: str, own_digest: str | None = None,
            manifests: list | None = None,
-           banned=frozenset()) -> dict:
+           banned=frozenset(), offenses: int = 0) -> dict:
     """Решение о приёме + сводка для человека.
 
     Возвращает: ok (принимаем), reason (почему нет), level (уровень
     приёма для провенанса/UI), consensus (сколько подписанных манифестов
     дают принятый хеш), claims (все предлаганные хеши -> кол-во),
     peer_synced_at (даты синка узлов с принятым хешом, новые первыми),
-    divergent (есть ли альтернативные хеши).
+    divergent (есть ли альтернативные хеши), offenses (сколько раз ключи-
+    носители принятого хеша УЖЕ приносили «несовпадение» - информация
+    для человека, барьером не становится: блокирует только стоп-лист).
     """
     signed = [m for m in (manifests or []) if manifest_mod.verify(m) is None]
     claims = manifest_mod.claims(signed)
@@ -106,6 +108,7 @@ def review(received_digest: str, own_digest: str | None = None,
     base = {"received": received_digest, "consensus": consensus,
             "claims": {h: len(v) for h, v in claims.items()},
             "peer_synced_at": peer_dates, "divergent": divergent,
+            "offenses": int(offenses or 0),
             "ok": True, "reason": None, "level": ""}
 
     if received_digest in banned:
@@ -142,6 +145,7 @@ def provenance(decision: dict, peer_pubkey: str, peer_synced_at: str = "",
         "peer_synced_at": str(peer_synced_at or ""),
         "level": decision.get("level") or "",
         "consensus": int(decision.get("consensus") or 0),
+        "peer_offenses": int(decision.get("offenses") or 0),
         "claims": decision.get("claims") or {},
         "structure_checked": bool(structure.get("checked")),
         "structure_errors": list(structure.get("errors") or []),
