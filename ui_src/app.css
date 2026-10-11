@@ -440,6 +440,10 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
   color: var(--muted);
   padding: 4px 8px;
   border-bottom: 1px solid var(--line);
+  /* Шапка обрезается по ширине панели и ездит вместе с телом списка
+     (scrollLeft синхронизируется в bind): заголовки остаются над своими
+     колонками при горизонтальной прокрутке. */
+  overflow: hidden;
 }
 /* Заголовки колонок не должны переноситься - «СТАТУ С» выглядит поломкой.
    Сортируемые - кликабельны (курсор и активное состояние). */
@@ -454,7 +458,12 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 
 .grid-body { position: relative; flex: 1 1 auto; overflow: auto; outline: none; }
 .grid-spacer { width: 1px; }
-.grid-rows { position: absolute; top: 0; left: 0; right: 0; }
+/* Строки шире вьюпорта (11 колонок не везде влезают): ширина задаётся
+   из JS (--list-w = сумма колонок), min-width держит минимум во всю
+   панель - тогда .grid-body честно даёт горизонтальный скролл, а не
+   молча обрезает правые колонки. */
+.grid-rows { position: absolute; top: 0; left: 0;
+             width: var(--list-w, auto); min-width: 100%; }
 
 .row {
   height: var(--row-h);

@@ -1493,12 +1493,31 @@
   function applyListColumns() {
     // Один источник правды для ширины колонок: скрытые (настройки col_*)
     // и узкий экран - одна CSS-переменная на панель, строки наследуют.
+    // Числа обязаны получить единицу: «26» в grid-template-columns -
+    // невалидная длина, и вся сетка целиком падает в none (одна колонка,
+    // ячейки друг на друге).
     var narrow = window.matchMedia("(max-width: 900px)").matches;
-    var spec = visibleCols().map(function (col) {
-      return col.w[narrow ? 1 : 0];
+    var cols = visibleCols();
+    var total = 0;
+    var spec = cols.map(function (col) {
+      var w = col.w[narrow ? 1 : 0];
+      if (typeof w === "number") {
+        total += w;
+        return w + "px";
+      }
+      var m = /minmax\((\d+)px/.exec(w);
+      total += m ? Number(m[1]) : 180;
+      return w;
     });
     var panel = document.getElementById("panel-library");
-    if (panel) panel.style.setProperty("--list-cols", spec.join(" "));
+    if (!panel) return;
+    panel.style.setProperty("--list-cols", spec.join(" "));
+    // Ширина контейнера строк: сумма треков + gap + горизонтальный padding.
+    // Без неё строки (position:absolute, right:0) жёстко равны ширине
+    // вьюпорта, и колонки, не поместившиеся, обрезаются молча - вместо
+    // честного горизонтального скролла.
+    total += 8 * Math.max(0, cols.length - 1) + 16;
+    panel.style.setProperty("--list-w", total + "px");
   }
 
   function renderGridHead() {
@@ -2999,6 +3018,13 @@
       tab.addEventListener("click", function () { switchTab(tab.dataset.tab); });
     });
 
+    // Ширины колонок зависят от ширины окна (≤900px - тесный набор):
+    // пересчёт при ресайте, иначе развернутое/свернутое окно помнит бы
+    // старый шаблон. Вызов прямой (дешёвый setProperty), без rAF.
+    window.addEventListener("resize", function () {
+      applyListColumns();
+    });
+
     $("search").addEventListener("input", debounce(function () {
       state.query = $("search").value;
       renderGrid(true);
@@ -3015,6 +3041,9 @@
     });
 
     $("grid-body").addEventListener("scroll", function () {
+      // Шапка лежит ВНЕ скроллера тела: сдвигаем её вручную, иначе при
+      // горизонтальной прокрутке заголовки разъезжаются с колонками.
+      $("grid-head").scrollLeft = $("grid-body").scrollLeft;
       if (!paintGrid._raf) {
         paintGrid._raf = requestAnimationFrame(function () {
           paintGrid._raf = 0;
