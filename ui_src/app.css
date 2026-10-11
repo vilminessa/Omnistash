@@ -423,9 +423,12 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .scan-fill { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .2s; }
 .scan-text { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Шаблон колонок - через переменную: JS (сортировка/скрытие колонок и
+   узкий экран) пересчитывает --list-cols на панели, строки наследуют. */
 .grid-head, .row {
   display: grid;
-  grid-template-columns: 26px 116px minmax(180px, 1fr) 190px 72px 100px 92px;
+  grid-template-columns: var(--list-cols,
+    26px 116px minmax(180px, 1fr) 190px 72px 100px 92px);
   gap: 8px;
   align-items: center;
 }
@@ -438,12 +441,16 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
   padding: 4px 8px;
   border-bottom: 1px solid var(--line);
 }
-/* Заголовки колонок не должны переноситься - «СТАТУ С» выглядит поломкой. */
+/* Заголовки колонок не должны переноситься - «СТАТУ С» выглядит поломкой.
+   Сортируемые - кликабельны (курсор и активное состояние). */
 .grid-head > span {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.grid-head [data-col] { cursor: pointer; user-select: none; }
+.grid-head [data-col]:hover { color: var(--text); }
+.grid-head [data-col][aria-sort] { color: var(--text); }
 
 .grid-body { position: relative; flex: 1 1 auto; overflow: auto; outline: none; }
 .grid-spacer { width: 1px; }
@@ -463,9 +470,10 @@ body[data-theme="light"] .row { border-bottom-color: rgba(0, 0, 0, .05); }
 
 .cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .c-title { font-weight: 500; }
-.c-channel, .c-date, .c-size, .c-dur { color: var(--muted); font-size: 12px; }
-.c-dur, .c-size { text-align: right; }
-.c-date { text-align: left; }
+.c-channel, .c-date, .c-size, .c-dur, .c-views, .c-likes, .c-comments,
+.c-sync { color: var(--muted); font-size: 12px; }
+.c-dur, .c-size, .c-views, .c-likes, .c-comments { text-align: right; }
+.c-date, .c-sync { text-align: left; }
 
 .status {
   display: inline-flex;
@@ -910,6 +918,7 @@ body[data-theme="light"] .row { border-bottom-color: rgba(0, 0, 0, .05); }
 
 @media (max-width: 900px) {
   .tree { width: 180px; flex-basis: 180px; }
-  .grid-head, .row { grid-template-columns: 26px 104px minmax(140px, 1fr) 130px 64px 88px 78px; }
+  /* Колонки списка на узком экране пересчитывает JS (applyListColumns):
+     скрытые колонки и ширины - одна переменная, media здесь не мешает. */
   .field { grid-template-columns: 1fr; }
 }

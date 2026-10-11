@@ -121,6 +121,8 @@ def upsert_video(conn: sqlite3.Connection, data: dict, *,
                  uploaded_at=coalesce(?, uploaded_at),
                  duration_s=coalesce(?, duration_s),
                  view_count=coalesce(?, view_count),
+                 like_count=coalesce(?, like_count),
+                 comment_count=coalesce(?, comment_count),
                  category=coalesce(?, category),
                  webpage_url=coalesce(?, webpage_url),
                  thumb_url=coalesce(?, thumb_url),
@@ -129,8 +131,10 @@ def upsert_video(conn: sqlite3.Connection, data: dict, *,
                  updated_at=?
                WHERE id=?""",
             (data.get("title"), data.get("description"), data.get("uploaded_at"),
-             data.get("duration_s"), data.get("view_count"), data.get("category"),
-             data.get("webpage_url"), data.get("thumb_url"), raw,
+             data.get("duration_s"), data.get("view_count"),
+             data.get("like_count"), data.get("comment_count"),
+             data.get("category"), data.get("webpage_url"),
+             data.get("thumb_url"), raw,
              channel_id, now, vid),
         )
         return vid, False
@@ -138,14 +142,16 @@ def upsert_video(conn: sqlite3.Connection, data: dict, *,
     cur = conn.execute(
         """INSERT INTO videos (key, platform, remote_id, channel_id, title,
                                description, uploaded_at, duration_s, view_count,
-                               category, webpage_url, thumb_url, raw_json, origin,
-                               status, first_seen_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                               like_count, comment_count, category, webpage_url,
+                               thumb_url, raw_json, origin, status,
+                               first_seen_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (key, platform, remote_id, channel_id, data.get("title"),
          data.get("description"), data.get("uploaded_at"), data.get("duration_s"),
-         data.get("view_count"), data.get("category"), data.get("webpage_url"),
-         data.get("thumb_url"), data.get("raw_json"), data.get("origin") or "yt-dlp",
-         "known", now, now),
+         data.get("view_count"), data.get("like_count"),
+         data.get("comment_count"), data.get("category"),
+         data.get("webpage_url"), data.get("thumb_url"), data.get("raw_json"),
+         data.get("origin") or "yt-dlp", "known", now, now),
     )
     return int(cur.lastrowid), True
 
@@ -480,6 +486,18 @@ def commit_plan(conn: sqlite3.Connection, snapshot: dict, plan: dict,
                 stage("videos", "active" if index < len(todo) else "done",
                       index, len(todo))
 
+        # «Когда данные приходили с площадки» - отдельно от updated_at:
+        # тот меняется и от скачивания, и от правок, а synced_at честно
+        # отвечает только на вопрос «когда синк освежил эту строку».
+        synced_at = now_iso()
+        synced_ids = list(ids_by_key.values())
+        for start in range(0, len(synced_ids), 400):
+            chunk = synced_ids[start:start + 400]
+            conn.execute(
+                f"UPDATE videos SET synced_at=? "
+                f"WHERE id IN ({','.join('?' * len(chunk))})",
+                [synced_at, *chunk])
+
         # --- стадия 4: связи ----------------------------------------------
         stage("links", "active", 0, len(entries))
         gone = now_iso()
@@ -499,19 +517,32 @@ def commit_plan(conn: sqlite3.Connection, snapshot: dict, plan: dict,
         # Позиции, которых больше нет в снапшоте: помечаем убывшими.
         # Файлы и записи видео не трогаем - исчезнувшее из плейлиста
         # не значит «удалить у меня».
-        current = {video_key(PLATFORM, e["remote_id"]) for e in entries}
-        rows = conn.execute(
-            """SELECT pi.id, v.key FROM playlist_items pi
-                 JOIN videos v ON v.id = pi.video_id
-                WHERE pi.playlist_id=? AND pi.removed_at IS NULL""",
-            (playlist_id,)).fetchall()
+        #
+        # Дырки (недоступные без входа: возрастное, приватное - в полном
+        # режиме такие реальны) приходят БЕЗ remote_id: отличить «этот
+        # ролик выпал» от «его просто не смогли прочитать» нельзя, а
+        # гадать нельзя тем более - поэтому при наличии дырок сверку
+        # пропускаем (removed=0), а не помечаем ложных убывших.
+        raw_entries = [e for e in (snapshot.get("entries") or [])
+                       if isinstance(e, dict)]
+        holes = sum(1 for e in raw_entries
+                    if e.get("unavailable") or not e.get("remote_id"))
         removed = 0
-        for row in rows:
-            if row["key"] not in current:
-                conn.execute("UPDATE playlist_items SET removed_at=? WHERE id=?",
-                             (gone, row["id"]))
-                removed += 1
+        if not holes:
+            current = {video_key(PLATFORM, e["remote_id"]) for e in entries}
+            rows = conn.execute(
+                """SELECT pi.id, v.key FROM playlist_items pi
+                     JOIN videos v ON v.id = pi.video_id
+                    WHERE pi.playlist_id=? AND pi.removed_at IS NULL""",
+                (playlist_id,)).fetchall()
+            for row in rows:
+                if row["key"] not in current:
+                    conn.execute(
+                        "UPDATE playlist_items SET removed_at=? WHERE id=?",
+                        (gone, row["id"]))
+                    removed += 1
         stats["removed"] = removed
+        stats["holes"] = holes
         stats["playlist_id"] = playlist_id
         stats["total"] = stats["new_videos"] + stats["known_videos"]
         # Итоги стадий - для финального чек-листа: каждый «done» должен
@@ -530,20 +561,28 @@ def commit_plan(conn: sqlite3.Connection, snapshot: dict, plan: dict,
 
 
 def _entry_to_video(entry: dict) -> dict:
-    """Плоская запись плейлиста -> аргумент upsert_video (без raw_json)."""
+    """Запись снапшота -> аргумент upsert_video.
+
+    raw_json здесь НЕ None: upsert с full=False сохраняет старую богатую
+    карточку приоритетнее (old_raw or new_raw), а той, где raw_json ещё
+    не было, - дописывает приходящий. Быстрый синк кладёт тонкую запись,
+    полный - полную.
+    """
     return {
         "platform": PLATFORM,
         "remote_id": entry.get("remote_id"),
         "key": video_key(PLATFORM, entry.get("remote_id")),
         "title": entry.get("title"),
-        "description": None,
+        "description": entry.get("description"),
         "uploaded_at": entry.get("uploaded_at"),
         "duration_s": entry.get("duration_s"),
         "view_count": entry.get("view_count"),
-        "category": None,
+        "like_count": entry.get("like_count"),
+        "comment_count": entry.get("comment_count"),
+        "category": entry.get("category"),
         "webpage_url": entry.get("webpage_url"),
-        "thumb_url": None,
-        "raw_json": None,          # тонкий: богатый raw_json не затираем
+        "thumb_url": entry.get("thumb"),
+        "raw_json": entry.get("raw"),
         "origin": "yt-dlp",
         "channel": entry.get("channel"),
     }
@@ -684,15 +723,37 @@ def save_fields(conn, ids, fields: dict) -> int:
     return int(cursor.rowcount)
 
 
+# Сортировка списка: ключ из запроса окна -> выражение SQL. Только эти
+# ключи умеет list_videos (белый список против SQL-инъекций); "size" -
+# alias вычисляемого подзапроса, он же разрешён SQLite в ORDER BY.
+ORDER_COLS: dict[str, str] = {
+    "status": "v.status",
+    # nlow() - юникод-casefold (зарегистрирован в db.Database.conn):
+    # COLLATE NOCASE в SQLite знает только ASCII.
+    "title": "nlow(v.title)",
+    "channel": "nlow(c.title)",
+    "duration": "v.duration_s",
+    "date": "v.uploaded_at",
+    "size": "size",
+    "views": "v.view_count",
+    "likes": "v.like_count",
+    "comments": "v.comment_count",
+    "sync": "v.synced_at",
+}
+
+
 def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
                 status: str | None = None, query: str = "",
-                rating_min: int | None = None,
+                rating_min: int | None = None, order: dict | None = None,
                 offset: int = 0, limit: int = 200) -> dict:
     """Строки таблицы библиотеки: (total, rows) для виртуализированного списка.
 
     scope: {"type": "pool"|"channel"|"playlist", "id": int}.
     Поиск - по FTS5 (название, описание, локальные теги), фильтры - по
     статусу и рейтингу, страница - offset/limit.
+    order: {"col": <ключ из ORDER_COLS>, "dir": "asc"|"desc"} - сортировка
+    по белому списку: ключ из запроса окна попадает в SQL только через
+    этот словарь, произвольный текст отвергается молча (дефолтная дата).
     """
     scope = scope or {"type": "pool"}
     joins, where, args = [], [], []
@@ -721,17 +782,24 @@ def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
     total = conn.execute(
         f"SELECT COUNT(*) n FROM videos v {join_sql} {where_sql}", args).fetchone()["n"]
 
-    order = "v.uploaded_at DESC NULLS LAST, v.id DESC"
+    # Сортировка по белому списку; NULL - последним в обе стороны, чтобы
+    # пустые даты/счётчики не занимали первую строку по возрастанию.
+    order_sql = "v.uploaded_at DESC NULLS LAST, v.id DESC"
+    direction = "DESC" if str((order or {}).get("dir") or "").lower() == "desc" else "ASC"
+    col = str((order or {}).get("col") or "")
+    if col in ORDER_COLS:
+        order_sql = f"{ORDER_COLS[col]} {direction} NULLS LAST, v.id DESC"
     rows = [dict(row) for row in conn.execute(
         f"""SELECT v.id, v.key, v.title, v.status, v.duration_s, v.uploaded_at,
                    v.origin, v.user_rating, v.user_tags, v.watched_at,
+                   v.view_count, v.like_count, v.comment_count, v.synced_at,
                    c.title AS channel,
                    (SELECT SUM(size) FROM files f
                      WHERE f.video_id=v.id AND f.kind='video' AND f.missing=0) AS size
               FROM videos v
               LEFT JOIN channels c ON c.id = v.channel_id
               {join_sql} {where_sql}
-             ORDER BY {order}
+             ORDER BY {order_sql}
              LIMIT ? OFFSET ?""",
         [*args, int(limit), int(offset)])]
     for row in rows:

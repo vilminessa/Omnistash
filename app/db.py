@@ -407,8 +407,21 @@ def _migrate_v3(conn: sqlite3.Connection) -> None:
     _add_column(conn, "playlists", "account_id TEXT")
 
 
+def _migrate_v4(conn: sqlite3.Connection) -> None:
+    """Счётчики площадки «на момент синхронизации» + время этого синка.
+
+    synced_at отделён от updated_at намеренно: updated_at меняется от
+    скачивания, правок и любых апсертов, а «когда данные приходили с
+    площадки» - отдельный вопрос (у плейлистов такое уже есть:
+    last_synced_at).
+    """
+    _add_column(conn, "videos", "like_count INTEGER")
+    _add_column(conn, "videos", "comment_count INTEGER")
+    _add_column(conn, "videos", "synced_at TEXT")
+
+
 # Порядок важен: номер версии = индекс + 1.
-MIGRATIONS = (_migrate_v1, _migrate_v2, _migrate_v3)
+MIGRATIONS = (_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4)
 
 
 class Database:
@@ -449,6 +462,14 @@ class Database:
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA foreign_keys=ON")
             conn.execute("PRAGMA busy_timeout=10000")
+            # Юникод-регистронезависимость для сортировки: встроенные
+            # COLLATE NOCASE и lower() SQLite понимают только ASCII, а
+            # названия в основном кириллические (casefold решает весь
+            # юникод, включая «а» vs «А»).
+            conn.create_function(
+                "nlow", 1,
+                lambda value: value.casefold() if isinstance(value, str)
+                else value)
             with self._registry_lock:
                 self._all.append(conn)
             self._local.conn = conn

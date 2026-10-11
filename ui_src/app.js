@@ -51,6 +51,8 @@
     ffmpegOfferDismissed: false, // «Отмена» у стартового предложения (до перезапуска)
     viewMode: "list",       // «list»/«grid» - из настройки view_mode
     tileSize: "medium",     // «small»/«medium»/«large» - из tile_size
+    sort: { col: "", dir: "desc" }, // сортировка списка (sort_col/sort_dir)
+    refresh: null,          // обновление метаданных с площадки (poll)
     account: null,          // состояние аккаунта Google из poll (без секретов)
     botNoteDismissed: false // «Скрыть» у подсказки про аккаунт
   };
@@ -170,7 +172,12 @@
       if (!snap) return;
       state.since = snap.log_cursor;
       applySnapshot(snap);
-    }).catch(function () { ticking = false; });
+    }).catch(function (err) {
+      // Ошибку тика нельзя глотать молча: один упавший рендер останавливал
+      // бы обновление UI до перезапуска, и причина оставалась бы не видна.
+      ticking = false;
+      console.error("tick:", err);
+    });
   }
 
   function applySnapshot(snap) {
@@ -201,6 +208,7 @@
     }
     if (changed("schedule", snap.schedule)) renderSchedule(snap.schedule);
     if (changed("verify", snap.verify)) renderVerify(snap.verify);
+    if (changed("refresh", snap.refresh)) renderRefresh(snap.refresh);
     if (changed("ffmpeg", snap.ffmpeg)) {
       state.ffmpeg = snap.ffmpeg;
       renderFfmpegState();
@@ -219,9 +227,12 @@
       // Вид/размер плитки живут в настройках - при смене перерисовываем
       // без сброса: страницы загружены, выделение и скролл не трогаем.
       var viewChanged = syncViewFromSettings();
+      // Сортировка и состав колонок - тоже настройки (sort_col/col_*).
+      var sortChanged = syncSortAndCols();
       applyViewState();
       renderSettings();
       if (viewChanged) paintGrid();
+      if (sortChanged) renderGrid(true);
     }
     $("stop-scan-btn").hidden = !(snap.scan && snap.scan.running);
     $("rescan-btn").disabled = !!(snap.scan && snap.scan.running);
@@ -318,6 +329,39 @@
     $("dedupe-note-text").textContent =
       "Сверка нашла: " + parts.join(" · ") +
       ". Разберите - в индексе должно остаться по одной копии.";
+  }
+
+  function renderRefresh(refresh) {
+    // Обновление метаданных с площадки: та же полоса, что у скана,
+    // с кнопкой остановки - обход по одному запросу на видео долгий.
+    state.refresh = refresh || null;
+    var bar = $("refresh-bar");
+    if (!refresh) { bar.hidden = true; return; }
+    if (refresh.running) {
+      bar.hidden = false;
+      var pct = refresh.total
+        ? Math.round(refresh.done * 100 / refresh.total) : 0;
+      $("refresh-fill").style.width = pct + "%";
+      $("refresh-text").textContent =
+        "Метаданные " + refresh.done + " / " + refresh.total +
+        (refresh.current ? " · " + refresh.current : "") +
+        (refresh.errors ? " · ошибок " + refresh.errors : "");
+      $("refresh-stop-btn").hidden = false;
+    } else if (refresh.summary) {
+      bar.hidden = false;
+      $("refresh-fill").style.width = "100%";
+      $("refresh-text").textContent = refresh.summary;
+      $("refresh-stop-btn").hidden = true;
+    } else {
+      bar.hidden = true;
+    }
+    // Состояние рядом с кнопкой в настройках (поле action).
+    var span = document.querySelector("#settings-body [data-refresh-state]");
+    if (span) {
+      span.textContent = refresh.running
+        ? "идёт " + refresh.done + " / " + refresh.total
+        : (refresh.summary || "");
+    }
   }
 
   /* ------------------------------------------------------------------ *
@@ -1413,6 +1457,102 @@
     updateFfmpegOffer();
   }
 
+  /* ------------------------------------------------------------------ *
+   *  Колонки списка: конфиг, скрытие, сортировка кликом по заголовку
+   * ------------------------------------------------------------------ */
+
+  // w: [широкий экран, узкий (<900px)]; sortable - ключ сортировки в бэке;
+  // setting - настройка, выключающая колонку (кроме «Название»).
+  var LIST_COLS = [
+    { key: "check", label: "", w: [26, 26] },
+    { key: "status", label: "Статус", w: [116, 104], sortable: "status" },
+    { key: "title", label: "Название",
+      w: ["minmax(180px, 1fr)", "minmax(140px, 1fr)"], sortable: "title" },
+    { key: "channel", label: "Канал", w: [190, 130], sortable: "channel" },
+    { key: "duration", label: "Время", w: [72, 64], sortable: "duration" },
+    { key: "date", label: "Дата", w: [100, 88], sortable: "date" },
+    { key: "size", label: "Размер", w: [92, 78], sortable: "size" },
+    { key: "views", label: "Просмотры", w: [86, 74],
+      sortable: "views", setting: "col_views" },
+    { key: "likes", label: "Лайки", w: [70, 62],
+      sortable: "likes", setting: "col_likes" },
+    { key: "comments", label: "Комменты", w: [74, 64],
+      sortable: "comments", setting: "col_comments" },
+    { key: "sync", label: "Синк", w: [92, 76],
+      sortable: "sync", setting: "col_sync" }
+  ];
+
+  function colVisible(col) {
+    return !col.setting || state.settings[col.setting] !== false;
+  }
+
+  function visibleCols() {
+    return LIST_COLS.filter(colVisible);
+  }
+
+  function applyListColumns() {
+    // Один источник правды для ширины колонок: скрытые (настройки col_*)
+    // и узкий экран - одна CSS-переменная на панель, строки наследуют.
+    var narrow = window.matchMedia("(max-width: 900px)").matches;
+    var spec = visibleCols().map(function (col) {
+      return col.w[narrow ? 1 : 0];
+    });
+    var panel = document.getElementById("panel-library");
+    if (panel) panel.style.setProperty("--list-cols", spec.join(" "));
+  }
+
+  function renderGridHead() {
+    var head = $("grid-head");
+    if (!head) return;
+    var sort = state.sort || { col: "", dir: "desc" };
+    head.innerHTML = visibleCols().map(function (col) {
+      if (col.key === "check") {
+        return '<span class="c-check"><input type="checkbox" id="sel-all" ' +
+          'title="Выбрать всё на странице" aria-label="Выбрать всё"></span>';
+      }
+      var active = col.sortable && sort.col === col.sortable;
+      var ind = active ? (sort.dir === "asc" ? " ▲" : " ▼") : "";
+      return '<span class="c-' + col.key + '"' +
+        (col.sortable
+          ? ' data-col="' + col.sortable + '" role="button" tabindex="0"' +
+            (active ? ' aria-sort="' + (sort.dir === "asc" ? "ascending" : "descending") + '"' : "")
+          : "") +
+        ' title="' + esc(col.label) + '">' + esc(col.label) + ind + "</span>";
+    }).join("");
+    // Шапка пересобирается - чекбоксу «выбрать всё» нужна свежая связь
+    // с флагом выделения (обработчик висит делегированием, см. bindMain).
+    var all = $("sel-all");
+    if (all) all.checked = false;
+  }
+
+  function toggleSort(col) {
+    // Тогл: та же колонка - разворот направления, новая - по убыванию.
+    var same = state.sort.col === col;
+    var dir = (same && state.sort.dir === "desc") ? "asc" : "desc";
+    state.sort = { col: col, dir: dir };
+    renderGridHead();
+    renderGrid(true);        // страницы под новым порядком не имеют смысла
+    // Выбор живёт в настройках: переживает перезапуск.
+    call("save_setting", { key: "sort_col", value: col });
+    call("save_setting", { key: "sort_dir", value: dir }).then(function (res) {
+      if (res && res.settings) {
+        state.settings = res.settings;
+        state.rev = res.settings_rev;
+      }
+    });
+  }
+
+  function syncSortAndCols() {
+    // Настройки -> состояние списка: сортировка и состав колонок.
+    var col = state.settings.sort_col || "";
+    var dir = state.settings.sort_dir === "asc" ? "asc" : "desc";
+    var sortChanged = (state.sort.col !== col) || (state.sort.dir !== dir);
+    if (sortChanged) state.sort = { col: col, dir: dir };
+    renderGridHead();
+    applyListColumns();
+    return sortChanged;
+  }
+
   function enqueueSelection() {
     var ids = Array.from(state.selected);
     if (!ids.length) return;
@@ -1455,6 +1595,8 @@
       return call("list_videos", {
         scope: state.scope, status: state.status, query: state.query,
         rating_min: state.ratingMin || null,
+        order: state.sort && state.sort.col
+          ? { col: state.sort.col, dir: state.sort.dir } : null,
         offset: page * PAGE, limit: PAGE
       }).then(function (res) {
         if (res) {
@@ -1589,20 +1731,37 @@
     // карточку; полные пометки живут там же.
     var stars = starBadge(row);
     var watched = watchBadge(row);
+    var cells = {
+      check: '<span class="c-check"><input type="checkbox" class="row-check" data-id="' +
+        row.id + '"' + (picked ? " checked" : "") +
+        ' aria-label="Выбрать строку"></span>',
+      status: '<span class="cell status" data-s="' + esc(row.status) + '">' +
+        esc(row.status_label || statusLabel(row.status)) + "</span>",
+      title: '<span class="cell c-title" title="' + esc(row.title) + '">' +
+        esc(row.title || "—") + stars + watched + "</span>",
+      channel: '<span class="cell c-channel" title="' + esc(row.channel) + '">' +
+        esc(row.channel || "—") + "</span>",
+      duration: '<span class="cell c-dur">' + humanDuration(row.duration_s) + "</span>",
+      date: '<span class="cell c-date">' + shortDate(row.uploaded_at) + "</span>",
+      size: '<span class="cell c-size">' +
+        (row.size ? humanSize(row.size) : "—") + "</span>",
+      // Счётчики площадки «на момент синка»: прочерк честнее пустого нуля.
+      views: '<span class="cell c-views">' + bigCount(row.view_count) + "</span>",
+      likes: '<span class="cell c-likes">' + bigCount(row.like_count) + "</span>",
+      comments: '<span class="cell c-comments">' + bigCount(row.comment_count) + "</span>",
+      sync: '<span class="cell c-sync">' + shortDate(row.synced_at) + "</span>"
+    };
+    // Состав строк должен совпадать со шапкой: скрытая колонка не
+    // рисуется ни там, ни здесь, и сетка не рассыпается.
     return '<div class="row' + (picked ? " picked" : "") + '" data-id="' +
       row.id + '" data-i="' + index + '">' +
-      '<span class="c-check"><input type="checkbox" class="row-check" data-id="' +
-        row.id + '"' + (picked ? " checked" : "") +
-        ' aria-label="Выбрать строку"></span>' +
-      '<span class="cell status" data-s="' + esc(row.status) + '">' +
-        esc(row.status_label || statusLabel(row.status)) + "</span>" +
-      '<span class="cell c-title" title="' + esc(row.title) + '">' +
-        esc(row.title || "—") + stars + watched + "</span>" +
-      '<span class="cell c-channel" title="' + esc(row.channel) + '">' + esc(row.channel || "—") + "</span>" +
-      '<span class="cell c-dur">' + humanDuration(row.duration_s) + "</span>" +
-      '<span class="cell c-date">' + shortDate(row.uploaded_at) + "</span>" +
-      '<span class="cell c-size">' + (row.size ? humanSize(row.size) : "—") + "</span>" +
+      visibleCols().map(function (col) { return cells[col.key] || ""; }).join("") +
       "</div>";
+  }
+
+  function bigCount(value) {
+    if (value === null || value === undefined || value === "") return "—";
+    return Number(value).toLocaleString("ru-RU");
   }
 
   function starBadge(row) {
@@ -1668,9 +1827,14 @@
       add("Статус", data.status_label || statusLabel(data.status));
       add("Ключ", data.key);
       add("Канал", data.channel);
-      add("Загружено", shortDate(data.uploaded_at));
+      add("Опубликовано", shortDate(data.uploaded_at));
       add("Длительность", data.duration_s ? humanDuration(data.duration_s) : "");
       add("Просмотров", data.view_count === null ? "" : Number(data.view_count).toLocaleString("ru-RU"));
+      add("Лайков", data.like_count === null || data.like_count === undefined
+        ? "" : Number(data.like_count).toLocaleString("ru-RU"));
+      add("Комментариев", data.comment_count === null || data.comment_count === undefined
+        ? "" : Number(data.comment_count).toLocaleString("ru-RU"));
+      add("Синк данных", shortTime(data.synced_at));
       add("Происхождение", data.origin);
       add("URL", data.webpage_url);
       add("Первый раз замечено", shortTime(data.first_seen_at));
@@ -2110,10 +2274,13 @@
         '">…</button>';
     } else if (field.type === "action") {
       // Поле-кнопка (transient): значение не читаем, действие - по data-action.
+      // Спан состояния у каждого действия свой - их несколько в карточке.
       control = '<button class="btn ghost" data-action="' +
         esc(field.action || "") + '">' +
         esc(field.action_label || "Выполнить") + "</button>" +
-        '<span class="muted" data-ffmpeg-state></span>';
+        '<span class="muted"' +
+        (field.action === "refresh-meta" ? " data-refresh-state"
+                                         : " data-ffmpeg-state") + "></span>";
     } else if (field.type === "account") {
       // Виджет аккаунтов: живой список (метка/дата/удаление) + добавление.
       // Куки применяются там, где аккаунт привязан к источнику.
@@ -2201,11 +2368,19 @@
         });
       });
 
-    // Поля-кнопки: действие опознаём по data-action (сейчас одно - ffmpeg).
+    // Поля-кнопки: действие опознаём по data-action.
     Array.prototype.forEach.call(
       document.querySelectorAll("#settings-body [data-action]"), function (btn) {
         btn.addEventListener("click", function () {
           if (btn.dataset.action === "ffmpeg-install") openFfmpegOverlay();
+          if (btn.dataset.action === "refresh-meta") {
+            call("refresh_meta_start").then(function (res) {
+              if (!res) return;
+              if (res.error) { toast(res.error, true); return; }
+              toast("Обновление метаданных: " + res.total + " видео");
+              switchTab("library");   // прогресс - в списке библиотеки
+            });
+          }
         });
       });
 
@@ -2406,9 +2581,12 @@
       // Вид библиотеки - тоже настройка, применяем сразу: у следующего
       // опроса rev уже совпадёт, ветка в applySnapshot не сработает.
       var viewChanged = syncViewFromSettings();
+      // Скрытие колонки (col_*) меняет шапку, строки и шаблон сетки.
+      var colsChanged = /^col_/.test(key);
       applyViewState();
       renderSettings();
       if (viewChanged) paintGrid();
+      if (colsChanged) { syncSortAndCols(); renderGrid(true); }
       toast("Сохранено");
     }).catch(function (err) { toast("Не удалось сохранить: " + err, true); });
   }
@@ -2899,13 +3077,31 @@
     $("sel-storage").addEventListener("change", function () {
       state.selStorage = $("sel-storage").value;
     });
-    $("sel-all").addEventListener("change", function () {
-      var on = $("sel-all").checked;
+    // Шапка списка пересобирается (сортировка, скрытие колонок), поэтому
+    // и сортировка, и «выбрать всё» живут делегированием на контейнере.
+    $("grid-head").addEventListener("click", function (event) {
+      var head = event.target && event.target.closest
+        ? event.target.closest("[data-col]") : null;
+      if (head) toggleSort(head.dataset.col);
+    });
+    $("grid-head").addEventListener("keydown", function (event) {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      var head = event.target && event.target.closest
+        ? event.target.closest("[data-col]") : null;
+      if (head) { event.preventDefault(); toggleSort(head.dataset.col); }
+    });
+    $("grid-head").addEventListener("change", function (event) {
+      if (!event.target || event.target.id !== "sel-all") return;
+      var on = event.target.checked;
       Array.prototype.forEach.call(
         document.querySelectorAll("#grid-rows .row-check"), function (box) {
           box.checked = on;
           toggleSelected(Number(box.dataset.id), on, box.closest(".row"));
         });
+    });
+    // Остановка обхода метаданных (прогресс-бар в этой же панели).
+    $("refresh-stop-btn").addEventListener("click", function () {
+      call("refresh_meta_stop");
     });
 
     // Стартовый выбор хранилища.
@@ -3101,6 +3297,10 @@
       document.body.dataset.theme = state.settings.theme === "light" ? "light" : "dark";
       $("version").textContent = "Omnistash " + (data.version || "");
       renderSettings();
+      // Шапка и шаблон сетки живут по настройкам (sort_col/col_*): до
+      // первого тика rev уже выровнен, ветка в applySnapshot не сработает.
+      syncViewFromSettings();
+      syncSortAndCols();
       renderGrid(true);
     });
     setInterval(tick, POLL_MS);
@@ -3122,28 +3322,37 @@
       { id: 1, key: "youtube:aaa111bbb22", title: "Ночной дождик", status: "downloaded",
         status_label: "скачано", duration_s: 3725, uploaded_at: "2025-01-14",
         channel: "Автор А", size: 240000000, user_rating: 5, has_thumb: true,
+        view_count: 182000, like_count: 4310, comment_count: 152,
+        synced_at: "2026-10-10T21:04:00",
         watched_at: "2026-01-02T10:00:00" },
       { id: 2, key: "youtube:ccc333ddd44", title: "Утренний туман", status: "known",
         status_label: "в индексе", duration_s: 130, uploaded_at: "2024-11-02",
         channel: "Автор Б", size: 0, user_rating: 0, watched_at: null,
-        has_thumb: false },
+        view_count: 9400, like_count: 210, comment_count: 7,
+        synced_at: "2026-10-10T21:04:00", has_thumb: false },
       { id: 3, key: "youtube:eee555fff66", title: "Долгая дорога", status: "downloaded",
         status_label: "скачано", duration_s: 540, uploaded_at: "2023-06-30",
         channel: "Автор А", size: 272000000, user_rating: 3, watched_at: null,
-        has_thumb: true },
+        view_count: 45000, like_count: 980, comment_count: 44,
+        synced_at: "2026-09-30T08:12:00", has_thumb: true },
       { id: 4, key: "local:abc", title: "Файл без личности", status: "downloaded",
         status_label: "скачано", duration_s: 61, uploaded_at: null,
         channel: null, size: 0, user_rating: 0, watched_at: null,
-        has_thumb: false },
+        view_count: null, like_count: null, comment_count: null,
+        synced_at: null, has_thumb: false },
       { id: 5, key: "youtube:ggg777hhh88", title: "Снятый клип", status: "missing",
         status_label: "файл пропал", duration_s: 200, uploaded_at: "2022-02-02",
         channel: "Автор В", size: 0, user_rating: 0, watched_at: null,
-        has_thumb: false }
+        view_count: 1500000, like_count: null, comment_count: 89,
+        synced_at: null, has_thumb: false }
     ];
     var settings = {
       library_roots: [{ path: "D:\\видео\\библиотека", recursive: true, enabled: true }],
       default_storage_id: "st_preview1",
       default_sync_mode: "partial", sidecar_mode: "embed", compute_hash: true,
+      sync_depth: "full",
+      col_views: true, col_likes: true, col_comments: true, col_sync: true,
+      sort_col: "", sort_dir: "desc",
       dest_dir: "D:\\видео\\downloads",
       output_template: "%(channel)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s",
       quality: "high", subtitles: "none", transcode: "none",
@@ -3211,6 +3420,10 @@
                        missing: [], missing_total: 0, summary: null,
                        error: null };
     var mockVerifyTimer = null;
+    // Обновление метаданных с площадки: обход по таймеру, как воркер.
+    var mockRefresh = { running: false, done: 0, total: 0, current: "",
+                        errors: 0, summary: null };
+    var mockRefreshTimer = null;
     // Установка ffmpeg: в превью её имитируем, чтобы оверлей было видно.
     // По умолчанию «найден» - тогда превью не блокируется автопредложением
     // (как у пользователя с установленным ffmpeg). «?ff=1» показывает
@@ -3278,6 +3491,37 @@
         choices: [["embed", "Всё в видео (+ .omnistash.json на папку)"],
                   ["files", "Файлы рядом с видео (post.json, обложка)"]],
         default: "embed" },
+      { key: "sync_depth", type: "choice", section: "Библиотека",
+        label: "Глубина синка",
+        hint: "«Полная» - лайки, комменты, даты (по запросу на видео); " +
+              "«Быстрая» - только то, что есть в списке.",
+        choices: [["full", "Полная (лайки, комменты, даты)"],
+                  ["fast", "Быстрая (только список)"]],
+        default: "full" },
+      { key: "col_views", type: "bool", section: "Библиотека",
+        label: "Колонка «Просмотры»",
+        hint: "Видимость колонок списка; лишние можно выключить здесь.",
+        default: true },
+      { key: "col_likes", type: "bool", section: "Библиотека",
+        label: "Колонка «Лайки»",
+        hint: "Счётчик площадки на момент последнего синка.", default: true },
+      { key: "col_comments", type: "bool", section: "Библиотека",
+        label: "Колонка «Комменты»",
+        hint: "Счётчик площадки на момент последнего синка.", default: true },
+      { key: "col_sync", type: "bool", section: "Библиотека",
+        label: "Колонка «Синк»",
+        hint: "Когда данные в последний раз обновлялись с площадки.",
+        default: true },
+      { key: "_refresh_meta", type: "action", section: "Библиотека",
+        label: "Метаданные с площадки",
+        hint: "Подтянуть лайки, комменты, даты и обложки по известным " +
+              "видео - без перекачки файлов. Прогресс - в списке библиотеки.",
+        action: "refresh-meta", action_label: "Обновить метаданные…",
+        transient: true, default: [] },
+      { key: "sort_col", type: "str", section: "", label: "",
+        hint: "Последняя колонка сортировки.", hidden: true, default: "" },
+      { key: "sort_dir", type: "str", section: "", label: "",
+        hint: "Направление сортировки.", hidden: true, default: "desc" },
       { key: "dest_dir", type: "path", section: "Загрузка",
         label: "Куда скачивать", hint: "нет - заменено хранилищами",
         hidden: true, default: "D:\\видео\\downloads" },
@@ -3413,6 +3657,7 @@
             return JSON.parse(JSON.stringify(mockSync));
           })(),
           verify: JSON.parse(JSON.stringify(mockVerify)),
+          refresh: JSON.parse(JSON.stringify(mockRefresh)),
           ffmpeg: JSON.parse(JSON.stringify(mockFfmpeg)),
           account: JSON.parse(JSON.stringify(mockAccount)),
           schedule: { scan: { interval: 0, next_in: null, last: null },
@@ -3433,6 +3678,29 @@
           if (req.query && row.title.toLowerCase().indexOf(req.query.toLowerCase()) < 0) return false;
           return true;
         });
+        // Сортировка как в бэке: белый список колонок, пустые - последними.
+        var order = req.order || null;
+        var sortKey = order && order.col;
+        var access = { title: "title", channel: "channel", duration: "duration_s",
+                       date: "uploaded_at", size: "size", views: "view_count",
+                       likes: "like_count", comments: "comment_count",
+                       sync: "synced_at", status: "status" };
+        if (sortKey && access[sortKey]) {
+          var field = access[sortKey];
+          var sign = order.dir === "asc" ? 1 : -1;
+          list = list.slice().sort(function (a, b) {
+            var av = a[field], bv = b[field];
+            var an = av === null || av === undefined;
+            var bn = bv === null || bv === undefined;
+            if (an && bn) return 0;
+            if (an) return 1;      // NULLS LAST в обе стороны
+            if (bn) return -1;
+            if (typeof av === "string" || typeof bv === "string") {
+              return sign * String(av).localeCompare(String(bv), "ru");
+            }
+            return sign * (av - bv);
+          });
+        }
         return Promise.resolve({
           total: list.length,
           rows: list.slice(req.offset || 0, (req.offset || 0) + (req.limit || PAGE))
@@ -3553,6 +3821,40 @@
         mockFfmpeg.running = false;
         mockFfmpeg.phase = "cancelled";
         mockFfmpeg.pct = 0;
+        return Promise.resolve({ ok: true });
+      },
+      refresh_meta_start: function () {
+        if (mockRefresh.running) {
+          return Promise.resolve({ error: "Обновление метаданных уже идёт" });
+        }
+        mockRefresh = { running: true, done: 0, total: rows.length,
+                        current: "", errors: 0, summary: null };
+        var step = 0;
+        mockRefreshTimer = setInterval(function () {
+          step += 1;
+          mockRefresh.done = step;
+          mockRefresh.current = rows[step - 1] ? rows[step - 1].title : "";
+          if (step >= rows.length) {
+            clearInterval(mockRefreshTimer);
+            mockRefreshTimer = null;
+            mockRefresh.running = false;
+            mockRefresh.summary = "Метаданные обновлены: " + rows.length +
+              " из " + rows.length + " · ошибок 0";
+          }
+        }, 700);
+        return Promise.resolve({ ok: true, total: rows.length });
+      },
+      refresh_meta_stop: function () {
+        if (mockRefreshTimer) {
+          clearInterval(mockRefreshTimer);
+          mockRefreshTimer = null;
+        }
+        if (mockRefresh.running) {
+          mockRefresh.running = false;
+          mockRefresh.summary = "Остановлено: Метаданные обновлены: " +
+            mockRefresh.done + " из " + mockRefresh.total +
+            " · ошибок " + mockRefresh.errors;
+        }
         return Promise.resolve({ ok: true });
       },
       verify_start: function () {

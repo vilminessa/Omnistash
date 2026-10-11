@@ -21,7 +21,10 @@ from . import google_auth
 from . import metadata
 from .metadata import flat_entry, normalize_playlist
 
-CHUNK = 100        # записей на запрос
+CHUNK = 100        # записей на запрос (быстрый плоский синк)
+DEEP_CHUNK = 25    # записей на запрос в полном режиме: каждый чанк в десятки
+                   # раз дороже (полный info на каждое видео) - и прогресс
+                   # должен дышать чаще
 MAX_CHUNKS = 500   # защита от зацикливания (50 000 записей)
 SUPPORTED = ("playlist", "channel")
 
@@ -35,10 +38,17 @@ class Aborted(Exception):
 
 
 def _opts(settings: dict | None) -> dict:
-    """Опции yt-dlp для плоского извлечения: метаданные, без файлов."""
+    """Опции yt-dlp для извлечения списка: метаданные, без файлов.
+
+    Глубина синка (настройка sync_depth):
+      "full" (по умолчанию) - каждое видео извлекается полностью: лайки,
+        комменты, дата публикации, описание, обложка. Медленно (запрос
+        на видео) и ближе к анти-боту - зато база богаче;
+      "fast" - плоский список: длительность/просмотры/обложка одним
+        запросом на чанк (старое поведение).
+    """
     settings = settings or {}
-    return {
-        "extract_flat": "in_playlist",
+    opts = {
         "skip_download": True,
         "quiet": True,
         "no_warnings": True,
@@ -47,6 +57,9 @@ def _opts(settings: dict | None) -> dict:
         "retries": max(int(settings.get("retries") or 0), 1),
         # Обход/прокси и cookies подключатся вместе с Bypass из Synfronia (M4).
     }
+    if str(settings.get("sync_depth") or "full") == "fast":
+        opts["extract_flat"] = "in_playlist"
+    return opts
 
 
 def _extract(request_url: str, items: str, settings: dict | None = None,
@@ -71,6 +84,37 @@ def _extract(request_url: str, items: str, settings: dict | None = None,
             return ydl.extract_info(request_url, download=False)
     except yt_dlp.utils.DownloadError as exc:
         raise FetchError(f"Площадка не ответила: {exc}") from exc
+
+
+def fetch_video(url: str, *, settings: dict | None = None,
+                stop=None) -> dict:
+    """Полные метаданные ОДНОГО видео (без файлов).
+
+    Этим же конвейером пользуется кнопка «Обновить метаданные»: полный
+    запрос несёт то, чего нет в плоском списке плейлиста - лайки,
+    комменты, дату публикации, описание и обложку. Один запрос на видео,
+    поэтому stop проверяется между видео (в воркере), а не здесь.
+    """
+    settings = settings or {}
+    opts = {
+        "noplaylist": True,           # одиночное видео, даже если в ссылке list
+        "skip_download": True,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 25,
+        "retries": max(int(settings.get("retries") or 0), 1),
+    }
+    browser_opt = google_auth.browser_cookie_option(settings)
+    if browser_opt:
+        opts["cookiesfrombrowser"] = browser_opt
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except yt_dlp.utils.DownloadError as exc:
+        raise FetchError(f"Площадка не ответила: {exc}") from exc
+    if not isinstance(info, dict) or not info.get("id"):
+        raise FetchError("площадка не вернула описание видео")
+    return info
 
 
 def classify(url: str) -> dict:
@@ -127,9 +171,13 @@ def fetch_snapshot(url: str, *, settings: dict | None = None,
 def _snapshot(url: str, kind: str, *, settings: dict | None,
               on_progress, stop, cookiefile) -> dict:
     delay = max(int((settings or {}).get("delay_ms") or 0), 0) / 1000.0
+    # Размер чанка зависит от глубины: полный режим берёт по 25 записей
+    # (каждая - отдельный тяжёлый запрос), быстрый - по 100.
+    chunk_size = (CHUNK if str((settings or {}).get("sync_depth") or "full")
+                  == "fast" else DEEP_CHUNK)
 
     # Первый чанк приносит и метаданные плейлиста, и первые записи.
-    head = _extract(url, f"1-{CHUNK}", settings, cookiefile)
+    head = _extract(url, f"1-{chunk_size}", settings, cookiefile)
     if not isinstance(head, dict) or head.get("_type") not in ("playlist", None):
         raise FetchError("Ссылка не оказалась плейлистом или каналом")
 
@@ -163,8 +211,8 @@ def _snapshot(url: str, kind: str, *, settings: dict | None,
             break
         if delay:
             time.sleep(delay)
-        chunk = _extract(request_url, f"{start}-{start + CHUNK - 1}", settings,
-                         cookiefile)
+        chunk = _extract(request_url, f"{start}-{start + chunk_size - 1}",
+                         settings, cookiefile)
         chunk_entries = _collect(chunk.get("entries") if isinstance(chunk, dict) else None,
                                  playlist_channel, start=start)
         chunks += 1
@@ -174,9 +222,9 @@ def _snapshot(url: str, kind: str, *, settings: dict | None,
         got = len(entries)
         if on_progress:
             on_progress(got, total)
-        # Меньше, чем просили, - конец списка. Ровно CHUNK может значить и
-        # конец, и просто границу: тогда решит следующий (пустой) запрос.
-        if len(chunk_entries) < CHUNK:
+        # Меньше, чем просили, - конец списка. Ровно chunk_size может значить
+        # и конец, и просто границу: тогда решит следующий (пустой) запрос.
+        if len(chunk_entries) < chunk_size:
             break
         start = got + 1
 

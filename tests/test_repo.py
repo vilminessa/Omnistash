@@ -1,5 +1,6 @@
 """План добавления и его принятие: счётчики, стадии, идемпотентность."""
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -160,6 +161,50 @@ class TestCommit(RepoCase):
         self.assertEqual(row["raw_json"], '{"deep": "значение"}')
         self.assertEqual(row["description"], "полное описание")
 
+    def test_holes_do_not_mark_removed(self):
+        # Дырка (недоступное без remote_id) делает сверку «выпавших»
+        # неопределённой: отличить «ролик выпал» от «его не смогли
+        # прочитать» нельзя - не гадаем, removed не трогаем.
+        self.commit(snapshot([
+            entry("vid000000001", "Один", 1),
+            entry("vid000000002", "Два", 2),
+        ]))
+        with_hole = snapshot([
+            entry("vid000000001", "Один", 1),
+            {"position": 2, "remote_id": None, "title": None,
+             "duration_s": None, "view_count": None, "unavailable": True,
+             "webpage_url": None, "channel": None},
+        ])
+        stats = repo.commit_plan(self.conn, with_hole,
+                                 repo.plan_diff(self.conn, with_hole))
+        self.assertEqual(stats["removed"], 0)
+        self.assertEqual(stats["holes"], 1)
+        alive = self.conn.execute(
+            "SELECT COUNT(*) n FROM playlist_items WHERE removed_at IS NULL"
+        ).fetchone()["n"]
+        self.assertEqual(alive, 2, "связи не должны помечаться убывшими")
+
+    def test_sync_stamps_synced_at_and_metrics(self):
+        # Полная запись (новый синк) приносит счётчики, дату выхода и
+        # обложку; synced_at честно помечает «данные пришли с площадки».
+        rich = dict(entry("vid000000001", "Полное", 1))
+        rich.update({"uploaded_at": "2021-06-04", "view_count": 100,
+                     "like_count": 42, "comment_count": 7,
+                     "thumb": "https://i.ytimg.com/x.jpg",
+                     "description": "Описание",
+                     "raw": json.dumps({"id": "vid000000001",
+                                        "like_count": 42})})
+        self.commit(snapshot([rich]))
+        row = dict(self.conn.execute(
+            "SELECT * FROM videos WHERE remote_id='vid000000001'").fetchone())
+        self.assertEqual(row["like_count"], 42)
+        self.assertEqual(row["comment_count"], 7)
+        self.assertEqual(row["uploaded_at"], "2021-06-04")
+        self.assertEqual(row["thumb_url"], "https://i.ytimg.com/x.jpg")
+        self.assertEqual(row["description"], "Описание")
+        self.assertTrue(row["synced_at"], "время синка должно записаться")
+        self.assertIn('"like_count": 42', row["raw_json"])
+
     def test_sync_never_touches_local_fields(self):
         snap = snapshot([entry("vid000000001", "Одно", 1)])
         self.commit(snap)
@@ -228,6 +273,98 @@ class TestRead(RepoCase):
         vid = repo.video_id_by_key(self.conn, "youtube:vid000000002")
         self.conn.execute("UPDATE videos SET status='downloaded' WHERE id=?", (vid,))
         self.assertEqual(repo.enqueue(self.conn, [vid]), 0)
+
+
+class TestListVideosSort(RepoCase):
+    """Сортировка списка: белый список колонок и NULLS LAST."""
+
+    def _seed(self):
+        # Альфа: дата первая, счётчики средние; Бета: счётчики больше,
+        # дата новее; Гамма: вообще без даты и счётчиков (проверка NULLS).
+        def add(remote_id, title, date, views, likes, comments, channel,
+                duration):
+            repo.upsert_video(self.conn, {
+                "platform": "youtube", "remote_id": remote_id,
+                "key": f"youtube:{remote_id}", "title": title,
+                "uploaded_at": date, "duration_s": duration,
+                "view_count": views, "like_count": likes,
+                "comment_count": comments, "origin": "yt-dlp",
+                "webpage_url": f"https://youtu.be/{remote_id}",
+                "channel": {"platform": "youtube",
+                            "remote_id": "UC" + channel * 22,
+                            "title": channel, "handle": None, "url": None},
+            })
+        add("vid000000001", "альфа", "2023-01-01", 100, 10, 1, "Автор Б", 100)
+        add("vid000000002", "Бета", "2024-06-15", 300, 30, 3, "Автор А", 200)
+        add("vid000000003", "Гамма", None, None, None, None, "Автор А", 300)
+
+    def titles(self, **kwargs):
+        return [row["title"] for row in
+                repo.list_videos(self.conn, **kwargs)["rows"]]
+
+    def test_default_is_date_desc(self):
+        self._seed()
+        self.assertEqual(self.titles(), ["Бета", "альфа", "Гамма"])
+
+    def test_views_direction_and_nulls_last(self):
+        self._seed()
+        self.assertEqual(
+            self.titles(order={"col": "views", "dir": "desc"}),
+            ["Бета", "альфа", "Гамма"])
+        # По возрастанию пустые всё равно в конце.
+        self.assertEqual(
+            self.titles(order={"col": "views", "dir": "asc"}),
+            ["альфа", "Бета", "Гамма"])
+
+    def test_metrics_columns_sort(self):
+        self._seed()
+        self.assertEqual(self.titles(order={"col": "likes", "dir": "desc"})[:2],
+                         ["Бета", "альфа"])
+        self.assertEqual(self.titles(order={"col": "comments", "dir": "asc"})[:2],
+                         ["альфа", "Бета"])
+
+    def test_title_is_case_insensitive(self):
+        self._seed()
+        # Русская локаль без учёта регистра: «альфа» < «Бета» < «Гамма».
+        self.assertEqual(self.titles(order={"col": "title", "dir": "asc"}),
+                         ["альфа", "Бета", "Гамма"])
+
+    def test_channel_and_duration_and_status(self):
+        self._seed()
+        first = repo.list_videos(self.conn, order={"col": "channel", "dir": "asc"},
+                                 limit=1)["rows"][0]
+        self.assertEqual(first["channel"], "Автор А")   # А < Б, NULLS нет
+        self.assertEqual(
+            self.titles(order={"col": "duration", "dir": "asc"})[0], "альфа")
+        self.assertEqual(
+            self.titles(order={"col": "status", "dir": "asc"})[0] is not None, True)
+
+    def test_size_uses_computed_column(self):
+        self._seed()
+        # Размер - подзапрос по files: даём «Бете» файл.
+        vid = self.conn.execute(
+            "SELECT id FROM videos WHERE title='Бета'").fetchone()["id"]
+        repo.record_file(self.conn, vid, "D:/lib/Бета.mp4", "video",
+                         size=500, mtime=1.0)
+        rows = repo.list_videos(self.conn, order={"col": "size", "dir": "desc"})["rows"]
+        self.assertEqual(rows[0]["title"], "Бета")
+        self.assertEqual(rows[0]["size"], 500)
+
+    def test_unknown_column_falls_back_to_default(self):
+        self._seed()
+        # Ключ из запроса окна не является SQL: мусор молча отвергается,
+        # порядок остаётся дефолтным (дата ↓).
+        hacked = self.titles(order={"col": "title; DROP TABLE videos", "dir": "asc"})
+        self.assertEqual(hacked, ["Бета", "альфа", "Гамма"])
+        self.assertEqual(self.counts("videos"), 3, "таблица должна выжить")
+
+    def test_sync_column_sorts(self):
+        self._seed()
+        self.conn.execute(
+            "UPDATE videos SET synced_at='2026-01-01T00:00:00' "
+            "WHERE title='Гамма'")
+        rows = repo.list_videos(self.conn, order={"col": "sync", "dir": "desc"})["rows"]
+        self.assertEqual(rows[0]["title"], "Гамма")
 
 
 if __name__ == "__main__":

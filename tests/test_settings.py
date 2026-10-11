@@ -24,6 +24,17 @@ class TestCoerce(unittest.TestCase):
         self.assertEqual(settings_schema.coerce("sidecar_mode", "мусор"), "embed")
         self.assertEqual(settings_schema.defaults()["sidecar_mode"], "embed")
 
+    def test_sync_depth_choice(self):
+        # Глубина синка: по умолчанию полная (лайки/даты), «мусор» -> full.
+        self.assertEqual(settings_schema.coerce("sync_depth", "fast"), "fast")
+        self.assertEqual(settings_schema.coerce("sync_depth", "full"), "full")
+        self.assertEqual(settings_schema.coerce("sync_depth", "мусор"), "full")
+        self.assertEqual(settings_schema.defaults()["sync_depth"], "full")
+
+    def test_column_visibility_defaults_on(self):
+        for key in ("col_views", "col_likes", "col_comments", "col_sync"):
+            self.assertTrue(settings_schema.defaults()[key], key)
+
     def test_keep_sidecar_hidden_but_supported(self):
         # Старый флаг ушёл из карточки, но остался в схеме: чужие
         # settings.json с явным False должны продолжать читаться.

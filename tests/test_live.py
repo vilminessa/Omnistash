@@ -293,8 +293,11 @@ class TestLiveAccountPlaylist(LiveCase):
                                        "mode": "manual"})["ok"])
         flow = self.wait(api, "confirm")
         counts = flow["plan"]["counts"]
-        self.assertGreaterEqual(counts["new_videos"], 5,
-                                "плейлист должен отдаваться целиком")
+        # Полный режим извлечения (по умолчанию): недоступное без входа
+        # приходит дыркой («пропущено»), а не записью - считаем целиком
+        # как новые + пропущенные.
+        self.assertGreaterEqual(counts["new_videos"] + counts["skipped"], 5,
+                                f"плейлист должен отдаваться целиком: {counts}")
         self.assertTrue(api.add_confirm()["ok"])
         self.wait(api, "done")
         self.assertEqual(api.poll(0)["stats"]["playlists"], 1)

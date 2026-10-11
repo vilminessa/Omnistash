@@ -121,9 +121,13 @@ def normalize_video(info: dict, platform: str = PLATFORM, origin: str = "yt-dlp"
         "key": video_key(platform, remote_id) if remote_id else None,
         "title": to_text(info.get("title")),
         "description": description,
-        "uploaded_at": iso_date(info.get("upload_date") or info.get("release_date")),
+        # Дата ВЫХОДА: release_date (публикация; у премьер - назначенная)
+        # важнее upload_date (когда файл загрузили).
+        "uploaded_at": iso_date(info.get("release_date") or info.get("upload_date")),
         "duration_s": to_int(info.get("duration")),
         "view_count": to_int(info.get("view_count")),
+        "like_count": to_int(info.get("like_count")),
+        "comment_count": to_int(info.get("comment_count")),
         "category": to_text(info.get("category")),
         "webpage_url": to_text(info.get("webpage_url")) or to_text(info.get("url")),
         "thumb_url": thumb,
@@ -151,23 +155,43 @@ def normalize_playlist(info: dict, kind: str = "remote", platform: str = PLATFOR
 
 
 def flat_entry(entry, position: int, platform: str = PLATFORM) -> dict:
-    """Запись плейлиста из extract_flat: только то, что нужно для diff.
+    """Запись снапшота -> то, что писать в строки videos.
 
     entry может быть None (приватное/удалённое видео в списке) - тогда
     получаем «дырку» с флагом unavailable: она попадёт в счётчик
     «пропущено» диалога и не создаст строку в БД.
+
+    Режим извлечения бывает разным (см. настройку «Глубина синка»):
+    быстрый плоский список даёт длительность/просмотры/обложку, полный -
+    и лайки, и комменты, и даты. Поэтому поля собираем «если есть»:
+    медленный синк молча дополняет то, что быстрый не смог.
     """
     if not isinstance(entry, dict):
         return {"position": position, "remote_id": None, "title": None,
                 "unavailable": True, "channel": None}
     remote_id = to_text(entry.get("id"))
+    thumb = to_text(entry.get("thumbnail"))
+    if not thumb and isinstance(entry.get("thumbnails"), list) and entry["thumbnails"]:
+        last = entry["thumbnails"][-1]
+        if isinstance(last, dict):
+            thumb = to_text(last.get("url"))
     return {
         "position": position,
         "remote_id": remote_id,
         "title": to_text(entry.get("title")),
         "duration_s": to_int(entry.get("duration")),
-        "uploaded_at": iso_date(entry.get("upload_date") or entry.get("release_date")),
+        "uploaded_at": iso_date(entry.get("release_date")
+                                or entry.get("upload_date")),
         "view_count": to_int(entry.get("view_count")),
+        "like_count": to_int(entry.get("like_count")),
+        "comment_count": to_int(entry.get("comment_count")),
+        "description": to_text(entry.get("description")),
+        "category": to_text(entry.get("category")),
+        "thumb": thumb,
+        # Сырой info-dict записи: в быстром режиме тонкий (упsert с
+        # full=False всё равно не затрёт им богатую карточку), в полном -
+        # полный.
+        "raw": slim_info(entry),
         "unavailable": not bool(remote_id),
         "webpage_url": to_text(entry.get("url")) or (
             f"https://www.youtube.com/watch?v={remote_id}" if remote_id else None),

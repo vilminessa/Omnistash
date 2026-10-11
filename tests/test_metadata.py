@@ -3,8 +3,8 @@
 import json
 import unittest
 
-from app.metadata import (classify_url, normalize_video, playlist_kind,
-                          slim_info, video_key)
+from app.metadata import (classify_url, flat_entry, normalize_video,
+                          playlist_kind, slim_info, video_key)
 from app.util import human_duration, human_size, iso_date, sanitize_name
 
 
@@ -105,6 +105,60 @@ class TestNormalizeVideo(unittest.TestCase):
     def test_missing_channel_is_none(self):
         data = normalize_video({"id": "x", "title": "t"})
         self.assertIsNone(data["channel"])
+
+    def test_metrics_and_release_date(self):
+        # Дата ВЫХОДА (release_date) важнее даты загрузки: у премьер они
+        # расходятся, и зрелю интересует выход. Счётчики - в колонки.
+        data = normalize_video({
+            "id": "x", "title": "t",
+            "release_date": "20210604", "upload_date": "20220714",
+            "like_count": 6841, "comment_count": "38", "view_count": 5,
+        })
+        self.assertEqual(data["uploaded_at"], "2021-06-04")
+        self.assertEqual(data["like_count"], 6841)
+        self.assertEqual(data["comment_count"], 38)
+        # Без release - как раньше, по дате загрузки.
+        data = normalize_video({"id": "x", "upload_date": "20220714"})
+        self.assertEqual(data["uploaded_at"], "2022-07-14")
+
+
+class TestFlatEntry(unittest.TestCase):
+    """Запись снапшота: полный режим приносит больше полей, быстрый - меньше."""
+
+    def test_full_entry_carries_metrics(self):
+        item = flat_entry({
+            "id": "dQw4w9WgXcQ", "title": "Клип", "duration": 213,
+            "view_count": 100, "like_count": 42, "comment_count": 7,
+            "release_date": "20210604", "upload_date": "20220714",
+            "description": "Описание", "category": "Музыка",
+        }, position=1)
+        self.assertEqual(item["remote_id"], "dQw4w9WgXcQ")
+        self.assertEqual(item["uploaded_at"], "2021-06-04")
+        self.assertEqual(item["like_count"], 42)
+        self.assertEqual(item["comment_count"], 7)
+        self.assertEqual(item["description"], "Описание")
+        self.assertEqual(item["category"], "Музыка")
+        # Сырой info уезжает в raw_json (в быстром режиме он тонкий,
+        # но upsert full=False старую богатую карточку им не затирает).
+        parsed = json.loads(item["raw"])
+        self.assertEqual(parsed["title"], "Клип")
+
+    def test_fast_entry_takes_thumb_from_thumbnails(self):
+        # Плоский список не отдаёт scalar thumbnail - берём из списка.
+        item = flat_entry({
+            "id": "vid000000001", "title": "V", "duration": 10,
+            "view_count": 5,
+            "thumbnails": [{"url": "https://i.ytimg.com/1.jpg"},
+                           {"url": "https://i.ytimg.com/2.jpg"}],
+        }, position=2)
+        self.assertEqual(item["thumb"], "https://i.ytimg.com/2.jpg")
+        self.assertIsNone(item["like_count"])       # быстрый режим их не даёт
+        self.assertIsNone(item["description"])
+
+    def test_unavailable_hole(self):
+        item = flat_entry(None, position=3)
+        self.assertTrue(item["unavailable"])
+        self.assertIsNone(item["remote_id"])
 
 
 class TestFormats(unittest.TestCase):

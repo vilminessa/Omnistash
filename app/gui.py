@@ -31,6 +31,7 @@ from . import settings_schema, sources
 from . import storages as storages_mod
 from . import verify as verify_mod
 from .db import SYNC_MODES, Database
+from .metadata import normalize_video
 from .paths import log_path
 from .queue import DownloadWorker
 from .util import human_size, now_iso
@@ -168,6 +169,12 @@ class Api:
                               "summary": None, "error": None}
         self._verify_stop = threading.Event()
         self._verify_thread: threading.Thread | None = None
+        # Обновление метаданных: подтянуть с площадки лайки/комменты/даты
+        # по уже известным видео - без перекачки файлов.
+        self._refresh: dict = {"running": False, "done": 0, "total": 0,
+                               "current": "", "errors": 0, "summary": None}
+        self._refresh_stop = threading.Event()
+        self._refresh_thread: threading.Thread | None = None
         # ffmpeg: установка ТОЛЬКО по кнопке пользователя (GPL не вшиваем).
         self._ffmpeg: dict = {"running": False, "phase": "", "pct": 0,
                               "error": None}
@@ -372,6 +379,7 @@ class Api:
             verify_state = dict(self._verify)
             verify_state["broken"] = list(self._verify.get("broken") or [])[:100]
             verify_state["missing"] = list(self._verify.get("missing") or [])[:100]
+            refresh_state = dict(self._refresh)
             ffmpeg_state = dict(self._ffmpeg)
         # Найден ли ffmpeg - дешёвые stat-вызовы: спрашиваем при каждом
         # опросе, чтобы правда не отставала от установки/удаления руками.
@@ -414,6 +422,7 @@ class Api:
             "repack": repack_state,
             "schedule": schedule_state,
             "verify": verify_state,
+            "refresh": refresh_state,
             "ffmpeg": ffmpeg_state,
             "account": account_state,
             "settings": config,
@@ -432,6 +441,7 @@ class Api:
                 status=request.get("status") or None,
                 query=request.get("query") or "",
                 rating_min=request.get("rating_min") or None,
+                order=request.get("order") or None,
                 offset=int(request.get("offset") or 0),
                 limit=min(int(request.get("limit") or 200), 500),
             )
@@ -1687,6 +1697,104 @@ class Api:
                 missing=result.get("missing") or [],
                 missing_total=result.get("missing_total", 0),
                 summary=summary, error=result.get("error"), current="")
+            self._busy = False
+            self._status = "Готово"
+            self._heavy_at = 0.0
+        self._log(summary)
+
+    # ------------------------------------------------------------------ #
+    #  Обновление метаданных: «подтянуть актуальные данные по площадке»
+    # ------------------------------------------------------------------ #
+
+    def refresh_meta_start(self, request=None) -> dict:
+        """Обойти все площадочные видео полным запросом и освежить строки.
+
+        Это кнопка «обновить данные у уже скачанного»: файлы не трогаются,
+        меняются только колонки (лайки, комменты, даты, обложки) и
+        synced_at. Плоский синк таких полей не приносит - здесь приходят.
+        """
+        with self._lock:
+            if self._refresh.get("running"):
+                return {"error": "Обновление метаданных уже идёт"}
+        rows = [dict(r) for r in self.db.conn.execute(
+            """SELECT id, remote_id, webpage_url FROM videos
+                WHERE platform <> 'local'
+                ORDER BY id""")]
+        if not rows:
+            return {"error": "Обновлять нечего: площадочных видео нет"}
+        self._refresh_stop.clear()
+        with self._lock:
+            self._refresh = {"running": True, "done": 0, "total": len(rows),
+                             "current": "", "errors": 0, "summary": None}
+            self._busy = True
+            self._status = "Обновление метаданных…"
+        thread = threading.Thread(target=self._refresh_worker, args=(rows,),
+                                  daemon=True, name="omnistash-refresh-meta")
+        with self._lock:
+            self._refresh_thread = thread
+        thread.start()
+        self._log(f"Обновление метаданных: {len(rows)} видео "
+                  "(без перекачки файлов)")
+        return {"ok": True, "total": len(rows)}
+
+    def refresh_meta_stop(self) -> dict:
+        """Остановить обход: уже освежённые строки остаются."""
+        with self._lock:
+            if not self._refresh.get("running"):
+                return {"ok": False}
+        self._refresh_stop.set()
+        self._log("Обновление метаданных остановлено")
+        return {"ok": True}
+
+    def _refresh_worker(self, rows: list[dict]) -> None:
+        conn = self.db.conn
+        config = self._current_settings()
+        done = errors = consecutive = 0
+        stopped = False
+        total = len(rows)
+        for row in rows:
+            if self._refresh_stop.is_set():
+                stopped = True
+                break
+            url = row["webpage_url"] or (
+                "https://www.youtube.com/watch?v=" + (row["remote_id"] or ""))
+            current = ""
+            try:
+                info = sources.fetch_video(url, settings=config,
+                                           stop=self._refresh_stop)
+                data = normalize_video(info, origin="yt-dlp")
+                vid, _created = repo.upsert_video(conn, data, full=True)
+                if vid:
+                    # Данные только что пришли с площадки - вот честное
+                    # «время синка» для этой строки.
+                    conn.execute("UPDATE videos SET synced_at=? WHERE id=?",
+                                 (now_iso(), vid))
+                current = data.get("title") or row["remote_id"]
+                consecutive = 0
+            except Exception as exc:  # noqa: BLE001 - строка не валит обход
+                errors += 1
+                consecutive += 1
+                current = f"ошибка: {exc}"
+                if consecutive <= 3 or consecutive % 20 == 0:
+                    self._log(f"Метаданные {row['remote_id']}: {exc}")
+                if consecutive >= 3 and done < 2:
+                    # С первых же строк ничего не идёт - связи нет, дальше
+                    # мучать площадку бессмысленно.
+                    self._log("Обновление метаданных прервано: "
+                              "площадка не отвечает с самого начала")
+                    stopped = True
+                    break
+            done += 1
+            with self._lock:
+                self._refresh.update(done=done, current=current, errors=errors)
+                self._status = f"Метаданные {done}/{total}"
+
+        summary = (f"Метаданные обновлены: {done} из {total}"
+                   f" · ошибок {errors}")
+        if stopped:
+            summary = "Остановлено: " + summary
+        with self._lock:
+            self._refresh.update(running=False, summary=summary, current="")
             self._busy = False
             self._status = "Готово"
             self._heavy_at = 0.0

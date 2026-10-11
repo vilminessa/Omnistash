@@ -199,17 +199,28 @@ class TestAccountColumnV3(unittest.TestCase):
             "SELECT sql FROM sqlite_master WHERE name='playlists'"
         ).fetchone()["sql"]
         self.assertIn("account_id", sql, "колонка аккаунта должна появиться")
+        # База поехала дальше: v4 (счётчики площадки) добавилась поверх v3.
         self.assertEqual(
-            int(database.conn.execute("PRAGMA user_version").fetchone()[0]), 3)
+            int(database.conn.execute("PRAGMA user_version").fetchone()[0]), 4)
         row = database.conn.execute("SELECT remote_id FROM playlists").fetchone()
         self.assertEqual(row["remote_id"], "PLv2", "данные должны пережить")
+
+    def test_v4_adds_metric_columns(self):
+        # Счётчики «на момент синка» и время самого синка - колонки v4.
+        database = db_mod.Database(self.path)
+        self.addCleanup(database.close)
+        sql = database.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='videos'"
+        ).fetchone()["sql"]
+        for column in ("like_count", "comment_count", "synced_at"):
+            self.assertIn(column, sql, f"колонка {column} должна появиться")
 
     def test_second_run_is_idempotent(self):
         db_mod.Database(self.path).close()
         database = db_mod.Database(self.path)
         self.addCleanup(database.close)
         self.assertEqual(
-            int(database.conn.execute("PRAGMA user_version").fetchone()[0]), 3)
+            int(database.conn.execute("PRAGMA user_version").fetchone()[0]), 4)
         count = database.conn.execute(
             "SELECT COUNT(*) n FROM playlists").fetchone()["n"]
         self.assertEqual(count, 1, "повторный запуск не должен дублировать")

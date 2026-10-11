@@ -381,5 +381,88 @@ class TestPage(GuiCase):
         self.assertNotIn("fetch(", page)
 
 
+class TestRefreshMeta(GuiCase):
+    """«Обновить метаданные»: полный запрос -> колонки + synced_at."""
+
+    def _video(self, api, title="Старое"):
+        vid, _ = repo.upsert_video(api.db.conn, {
+            "platform": "youtube", "remote_id": "vid000000001",
+            "key": "youtube:vid000000001", "title": title,
+            "webpage_url": "https://www.youtube.com/watch?v=vid000000001",
+            "origin": "yt-dlp"})
+        return vid
+
+    def test_refresh_updates_columns_and_synced_at(self):
+        api = self.make_api()
+        vid = self._video(api)
+        fake_info = {"id": "vid000000001", "title": "Свежее",
+                     "like_count": 42, "comment_count": 7,
+                     "release_date": "20250101", "view_count": 123,
+                     "thumbnail": "https://i.ytimg.com/x.jpg",
+                     "description": "Описание с площадки"}
+        with mock.patch("app.gui.sources.fetch_video", return_value=fake_info):
+            result = api.refresh_meta_start()
+            self.assertTrue(result.get("ok"), result)
+            self.assertEqual(result["total"], 1)
+            # Join ВНУТРИ with: патч должен жить, пока воркер ходит в сеть.
+            api._refresh_thread.join(timeout=15)
+        self.assertFalse(api._refresh_thread.is_alive())
+
+        row = dict(api.db.conn.execute(
+            "SELECT * FROM videos WHERE id=?", (vid,)).fetchone())
+        self.assertEqual(row["title"], "Свежее")
+        self.assertEqual(row["like_count"], 42)
+        self.assertEqual(row["comment_count"], 7)
+        self.assertEqual(row["view_count"], 123)
+        self.assertEqual(row["uploaded_at"], "2025-01-01")
+        self.assertEqual(row["thumb_url"], "https://i.ytimg.com/x.jpg")
+        self.assertTrue(row["synced_at"], "synced_at должен записаться")
+        state = api.poll(0)["refresh"]
+        self.assertFalse(state["running"])
+        self.assertIn("1 из 1", state["summary"])
+
+    def test_refresh_error_is_counted_not_fatal(self):
+        api = self.make_api()
+        self._video(api)
+        with mock.patch("app.gui.sources.fetch_video",
+                        side_effect=RuntimeError("площадка упала")):
+            self.assertTrue(api.refresh_meta_start().get("ok"))
+            api._refresh_thread.join(timeout=15)
+        state = api.poll(0)["refresh"]
+        self.assertFalse(state["running"])
+        self.assertEqual(state["errors"], 1)
+        self.assertIn("ошибок 1", state["summary"])
+
+    def test_refresh_stop_between_videos(self):
+        import threading
+
+        api = self.make_api()
+        self._video(api)
+        second, _ = repo.upsert_video(api.db.conn, {
+            "platform": "youtube", "remote_id": "vid000000002",
+            "key": "youtube:vid000000002", "title": "Второй",
+            "webpage_url": "https://www.youtube.com/watch?v=vid000000002",
+            "origin": "yt-dlp"})
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_fetch(url, **kwargs):
+            started.set()
+            release.wait(10)
+            return {"id": "vid000000001", "title": "Первый"}
+
+        with mock.patch("app.gui.sources.fetch_video", side_effect=slow_fetch):
+            self.assertTrue(api.refresh_meta_start().get("ok"))
+            self.assertTrue(started.wait(10), "воркер не стартовал")
+            self.assertTrue(api.refresh_meta_stop().get("ok"))
+            release.set()
+            api._refresh_thread.join(timeout=15)
+        self.assertFalse(api._refresh_thread.is_alive())
+        state = api.poll(0)["refresh"]
+        self.assertFalse(state["running"])
+        self.assertTrue(state["summary"].startswith("Остановлено"),
+                        state["summary"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -309,19 +309,41 @@ class TestChunking(unittest.TestCase):
             return self._head(entries, total)
 
         with mock.patch("app.sources._extract", side_effect=fake_extract):
+            # Дефолт - полная глубина: чанк маленький (каждая запись в нём
+            # стоит полного запроса), прогресс дышит чаще.
             snapshot = sources.fetch_snapshot(
                 self.URL, settings={"delay_ms": 0},
                 on_progress=lambda got, want: progress.append((got, want)))
 
-        self.assertEqual(calls, ["1-100", "101-200", "201-300"])
+        self.assertEqual(calls, [f"{i}-{i + 24}" for i in range(1, 251, 25)])
         self.assertEqual(len(snapshot["entries"]), total)
         self.assertEqual(snapshot["playlist"]["item_count"], total)
         # Прогресс растёт и заканчивается ровно на итоге.
-        self.assertEqual(progress[0], (100, 250))
+        self.assertEqual(progress[0], (25, 250))
         self.assertEqual(progress[-1], (250, 250))
         # Позиции не сбиваются между чанками.
         positions = [e["position"] for e in snapshot["entries"]]
         self.assertEqual(positions, list(range(1, total + 1)))
+
+    def test_fast_depth_uses_large_chunks(self):
+        """Быстрая глубина: плоский список по 100 записей на запрос."""
+        total = 250
+        calls = []
+
+        def fake_extract(url, items, settings=None, cookiefile=None):
+            calls.append(items)
+            start, end = (int(x) for x in items.split("-"))
+            last = min(end, total)
+            entries = ([{"id": f"vid{i:09d}", "title": f"Видео {i}"}
+                        for i in range(start, last + 1)] if start <= total else [])
+            return self._head(entries, total)
+
+        with mock.patch("app.sources._extract", side_effect=fake_extract):
+            snapshot = sources.fetch_snapshot(
+                self.URL, settings={"delay_ms": 0, "sync_depth": "fast"})
+
+        self.assertEqual(calls, ["1-100", "101-200", "201-300"])
+        self.assertEqual(len(snapshot["entries"]), total)
 
     def test_stop_between_chunks_aborts(self):
         stop = threading.Event()
@@ -345,7 +367,9 @@ class TestChunking(unittest.TestCase):
 
         with mock.patch("app.sources._extract", side_effect=fake_extract):
             snapshot = sources.fetch_snapshot(self.URL)
-        self.assertEqual(calls, ["1-100"])
+        # Дефолт - полная глубина: чанк в 25 записей, список из трёх
+        # укладывается в первый же запрос.
+        self.assertEqual(calls, ["1-25"])
         self.assertEqual(len(snapshot["entries"]), 3)
 
 
