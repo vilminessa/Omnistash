@@ -1716,6 +1716,9 @@ class Api:
         with self._lock:
             if self._refresh.get("running"):
                 return {"error": "Обновление метаданных уже идёт"}
+            if self._sync.get("running"):
+                return {"error": "Идёт синхронизация - дождитесь, она сама "
+                                 "обновит метаданные источников"}
         rows = [dict(r) for r in self.db.conn.execute(
             """SELECT id, remote_id, webpage_url FROM videos
                 WHERE platform <> 'local'
@@ -1746,7 +1749,28 @@ class Api:
         self._log("Обновление метаданных остановлено")
         return {"ok": True}
 
-    def _refresh_worker(self, rows: list[dict]) -> None:
+    def _restore_unavailable(self, conn, video_id: int) -> None:
+        """Снять метку «удалено на площадке», когда видео снова отдаётся.
+
+        Файл остаётся скачанным, если был скачан (status='downloaded'),
+        иначе строка снова «в индексе» (status='known'). Ничего не
+        перекачивается - меняется только пометка.
+        """
+        row = conn.execute("SELECT status FROM videos WHERE id=?",
+                           (video_id,)).fetchone()
+        if not row or row["status"] != "unavailable":
+            return
+        has_file = conn.execute(
+            "SELECT 1 FROM files WHERE video_id=? AND kind='video' "
+            "AND missing=0 LIMIT 1", (video_id,)).fetchone()
+        repo.set_status(conn, [video_id],
+                        "downloaded" if has_file else "known")
+        self._log(f"Видео снова доступно - метка «удалено» снята "
+                  f"(id {video_id})")
+
+    def _refresh_worker(self, rows: list[dict], *, final: bool = True) -> None:
+        """Обход метаданных. final=False - этап внутри синхронизации
+        (busy и статус дороги оставляет своему воркеру)."""
         conn = self.db.conn
         config = self._current_settings()
         done = errors = consecutive = 0
@@ -1769,13 +1793,26 @@ class Api:
                     # «время синка» для этой строки.
                     conn.execute("UPDATE videos SET synced_at=? WHERE id=?",
                                  (now_iso(), vid))
+                    # Если строка была помечена «удалено» - метка снимается.
+                    self._restore_unavailable(conn, vid)
                 current = data.get("title") or row["remote_id"]
                 consecutive = 0
             except Exception as exc:  # noqa: BLE001 - строка не валит обход
                 errors += 1
                 consecutive += 1
                 current = f"ошибка: {exc}"
-                if consecutive <= 3 or consecutive % 20 == 0:
+                if downloader_mod.unavailable_error(str(exc)):
+                    # Удалено/приватное: помечаем строку архивной и НИЧЕГО
+                    # не пишем поверх - последние известные данные (raw_json,
+                    # колонки, файл) остаются как были.
+                    try:
+                        repo.set_status(conn, [row["id"]], "unavailable")
+                        self._log(f"{row['remote_id'] or row['id']}: "
+                                  "удалено на площадке - строка помечена, "
+                                  "данные сохранены")
+                    except Exception:  # noqa: BLE001 - пометка не должна валить обход
+                        pass
+                elif consecutive <= 3 or consecutive % 20 == 0:
                     self._log(f"Метаданные {row['remote_id']}: {exc}")
                 if consecutive >= 3 and done < 2:
                     # С первых же строк ничего не идёт - связи нет, дальше
@@ -1788,6 +1825,12 @@ class Api:
             with self._lock:
                 self._refresh.update(done=done, current=current, errors=errors)
                 self._status = f"Метаданные {done}/{total}"
+                if self._sync.get("meta_active"):
+                    # Этап 2 синка: счётчики дублируются в состояние sync,
+                    # чтобы вкладка «Источники» показывала прогресс этапа.
+                    self._sync["meta"] = {"done": done, "total": total,
+                                          "current": current,
+                                          "errors": errors}
 
         summary = (f"Метаданные обновлены: {done} из {total}"
                    f" · ошибок {errors}")
@@ -1795,8 +1838,9 @@ class Api:
             summary = "Остановлено: " + summary
         with self._lock:
             self._refresh.update(running=False, summary=summary, current="")
-            self._busy = False
-            self._status = "Готово"
+            if final:
+                self._busy = False
+                self._status = "Готово"
             self._heavy_at = 0.0
         self._log(summary)
 
@@ -2227,16 +2271,24 @@ class Api:
     #  Синхронизация источников: переснять каждый источник и применить diff
     # ------------------------------------------------------------------ #
 
-    def sync_start(self) -> dict:
-        """Фаза A+C для всех источников сразу: снапшот -> diff -> запись.
+    def sync_start(self, request=None) -> dict:
+        """Актуализация: снапшот источников -> diff -> запись, а по
+        умолчанию сразу и второй этап - метаданные видео вне источников.
 
-        Режим каждого источника решает, что делать с новым: «Полная»
-        ставит в очередь сразу, «Частичная»/«Ручная» показывают счётчики и
-        дают кнопку «поставить новые в очередь» (качалка всё равно ждёт).
+        request:
+          source_id - синк одного источника (без второго этапа);
+          meta_after - выполнять ли второй этап (по умолчанию True:
+            любая «синхронизация всё» - полная актуализация; так же
+            ведут себя таймер расписания и --sync под планировщик).
         """
+        request = request or {}
+        source_id = request.get("source_id")
+        meta_after = bool(request.get("meta_after", True)) and not source_id
         with self._lock:
             if self._sync.get("running"):
                 return {"error": "Синхронизация уже идёт"}
+            if self._refresh.get("running"):
+                return {"error": "Идёт обновление метаданных - дождитесь"}
             if self._add.get("phase") in ("fetching", "committing"):
                 return {"error": "Сначала закончите добавление источника"}
             if self._scan and self._scan.get("running"):
@@ -2244,29 +2296,45 @@ class Api:
             sources_list = [s for s in repo.sources(self.db.conn)
                             if s.get("url") and s.get("kind") in
                             ("uploads", "remote", "mix")]
+            if source_id:
+                try:
+                    wanted = int(source_id)
+                except (TypeError, ValueError):
+                    wanted = -1
+                sources_list = [s for s in sources_list
+                                if s.get("id") == wanted]
             if not sources_list:
-                return {"error": "Нет источников для синхронизации"}
+                return {"error": "Источник не найден" if source_id
+                        else "Нет источников для синхронизации"}
             config = dict(self._current_settings())
             self._sync_stop.clear()
+            self._refresh_stop.clear()
             self._sync = {"running": True, "index": 0,
                           "total": len(sources_list), "current": None,
                           "fetch": None, "stage": None, "results": [],
                           "new_ids": [], "new_total": 0, "queued": 0,
-                          "error": None}
+                          "error": None,
+                          # Этап 2 «метаданные»: виден на этой же вкладке.
+                          "meta_active": False, "meta": None}
             self._busy = True
             self._status = f"Синхронизация 0/{len(sources_list)}"
-        self._log(f"Синхронизация: источников {len(sources_list)}")
+        self._log(f"Синхронизация: источников {len(sources_list)}"
+                  + ("" if meta_after else " (только наполнение)"))
         thread = threading.Thread(target=self._sync_worker,
-                                  args=(sources_list, config),
+                                  args=(sources_list, config, meta_after),
                                   name="omnistash-sync", daemon=True)
         self._sync_thread = thread
         thread.start()
-        return {"ok": True, "sources": len(sources_list)}
+        return {"ok": True, "sources": len(sources_list),
+                "meta_after": meta_after}
 
     def sync_stop(self) -> dict:
-        """Остановить между источниками и между чанками (БД не пострадает)."""
+        """Остановить между источниками, между чанками и на этапе 2
+        (БД не пострадает): гасим и второй этап, если он уже идёт."""
         if self._sync.get("running"):
             self._sync_stop.set()
+            if self._sync.get("meta_active"):
+                self._refresh_stop.set()
             self._log("Синхронизация остановлена пользователем")
             return {"ok": True}
         return {"ok": False}
@@ -2281,7 +2349,8 @@ class Api:
         return self.enqueue({"ids": ids,
                              "storage_id": request.get("storage_id")})
 
-    def _sync_worker(self, sources_list: list[dict], config: dict) -> None:
+    def _sync_worker(self, sources_list: list[dict], config: dict,
+                     meta_after: bool = False) -> None:
         conn = self.db.conn
         stop = self._sync_stop
         new_ids: list[int] = []
@@ -2362,6 +2431,12 @@ class Api:
                 if stats["new_videos"] or stats.get("removed"):
                     self._log(f"{title}: новых {stats['new_videos']}, "
                               f"убрано {stats.get('removed') or 0}")
+
+            # Этап 2 «метаданные»: записи источников только что освежил
+            # первый этап - дальше видео ВНЕ источников (единичные), чтобы
+            # не дублировать сотни запросов по уже свежим записам.
+            if meta_after and not stop.is_set():
+                self._sync_meta_stage(conn)
         except Exception as exc:  # noqa: BLE001 - воркер не должен молча умереть
             self._log(f"Синхронизация упала: {exc}")
             with self._lock:
@@ -2386,6 +2461,38 @@ class Api:
                 # --sync под планировщик, иначе режим ничего не качает.
                 self._log(f"Очередь после синка: {queued_total}, запускаю")
                 self.dl.start()
+
+    def _sync_meta_stage(self, conn) -> None:
+        """Этап 2 актуализации: метаданные видео вне источников.
+
+        Идёт в том же потоке (sync.running остаётся True - этап виден на
+        вкладке), но со своим состоянием refresh (кнопка «Остановить» в
+        списке библиотеки тоже гасит его).
+        """
+        if self._sync_stop.is_set():
+            return
+        rows = [dict(r) for r in conn.execute(
+            """SELECT id, remote_id, webpage_url FROM videos
+                WHERE platform <> 'local'
+                  AND id NOT IN (SELECT video_id FROM playlist_items)
+                ORDER BY id""")]
+        if not rows:
+            return
+        with self._lock:
+            if self._sync_stop.is_set():
+                return          # остановили на границе этапов
+            self._refresh = {"running": True, "done": 0, "total": len(rows),
+                             "current": "", "errors": 0, "summary": None}
+            self._sync["meta_active"] = True
+            self._sync["meta"] = {"done": 0, "total": len(rows),
+                                  "current": "", "errors": 0}
+        self._log(f"Актуализация: этап 2 - метаданные {len(rows)} видео "
+                  "вне источников")
+        try:
+            self._refresh_worker(rows, final=False)
+        finally:
+            with self._lock:
+                self._sync["meta_active"] = False
 
     def _sync_fetch(self, got: int, total: int) -> None:
         with self._lock:

@@ -210,6 +210,15 @@ class DownloadWorker:
             return
 
         if result.get("error"):
+            if downloader.unavailable_error(result["error"]):
+                # Удалено/приватное: не «упадёт» и не пойдёт в «повторить
+                # упавшие» (бессмысленно) - строка помечается архивной,
+                # файл и последние данные остаются как были.
+                repo.set_status(conn, [row["id"]], "unavailable")
+                repo.set_last_error(conn, row["id"], result["error"])
+                self._log(f"Удалено на площадке: "
+                          f"{row['title'] or row['key']} - {result['error']}")
+                return
             repo.set_status(conn, [row["id"]], "failed")
             repo.set_last_error(conn, row["id"], result["error"])
             with self._lock:

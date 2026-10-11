@@ -463,6 +463,51 @@ class TestRefreshMeta(GuiCase):
         self.assertTrue(state["summary"].startswith("Остановлено"),
                         state["summary"])
 
+    def test_refresh_marks_unavailable_and_keeps_data(self):
+        """Удалённое видео: метка «архивное», последние данные целы."""
+        api = self.make_api()
+        vid = self._video(api, title="Последнее известное")
+        api.db.conn.execute(
+            "UPDATE videos SET view_count=777 WHERE id=?", (vid,))
+
+        with mock.patch("app.gui.sources.fetch_video",
+                        side_effect=RuntimeError(
+                            "ERROR: [youtube] vid000000001: Video unavailable")):
+            self.assertTrue(api.refresh_meta_start().get("ok"))
+            api._refresh_thread.join(timeout=15)
+        self.assertFalse(api._refresh_thread.is_alive())
+
+        row = dict(api.db.conn.execute(
+            "SELECT status, title, view_count FROM videos WHERE id=?",
+            (vid,)).fetchone())
+        self.assertEqual(row["status"], "unavailable")
+        self.assertEqual(row["title"], "Последнее известное",
+                         "данные не должны затираться")
+        self.assertEqual(row["view_count"], 777)
+        state = api.poll(0)["refresh"]
+        self.assertFalse(state["running"])
+        self.assertEqual(state["errors"], 1)
+
+    def test_refresh_restores_unavailable_marker(self):
+        """Видео снова доступно: метка снимается, данные освежаются."""
+        api = self.make_api()
+        vid = self._video(api)
+        repo.set_status(api.db.conn, [vid], "unavailable")
+
+        fake_info = {"id": "vid000000001", "title": "Снова живое",
+                     "like_count": 3}
+        with mock.patch("app.gui.sources.fetch_video", return_value=fake_info):
+            self.assertTrue(api.refresh_meta_start().get("ok"))
+            api._refresh_thread.join(timeout=15)
+
+        row = dict(api.db.conn.execute(
+            "SELECT status, title FROM videos WHERE id=?", (vid,)).fetchone())
+        # Файла не было - строка снова «в индексе».
+        self.assertEqual(row["status"], "known")
+        self.assertEqual(row["title"], "Снова живое")
+        state = api.poll(0)["refresh"]
+        self.assertIn("1 из 1", state["summary"])
+
 
 if __name__ == "__main__":
     unittest.main()

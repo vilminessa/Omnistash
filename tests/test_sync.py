@@ -221,5 +221,141 @@ class TestSyncGuards(SyncCase):
         self.assertEqual(self.api.poll(0)["stats"]["total"], 2)
 
 
+class TestActualize(SyncCase):
+    """Полная актуализация: этап 1 (источники) -> этап 2 (единичные)."""
+
+    def _orphan_video(self):
+        """Видео вне источников - его трогает только второй этап."""
+        from app import repo
+        vid, _ = repo.upsert_video(self.api.db.conn, {
+            "platform": "youtube", "remote_id": "orphan00001",
+            "key": "youtube:orphan00001", "title": "Единичное",
+            "webpage_url": "https://www.youtube.com/watch?v=orphan00001",
+            "origin": "yt-dlp"})
+        return vid
+
+    def test_actualize_runs_meta_stage_for_orphans(self):
+        self.add_source(fixture_snapshot(count=2))
+        orphan = self._orphan_video()
+        fetched = []
+
+        def fake_video(url, settings=None, stop=None):
+            fetched.append(url)
+            return {"id": "orphan00001", "title": "Единичное свежее",
+                    "like_count": 5, "comment_count": 1,
+                    "release_date": "20250101", "view_count": 10}
+
+        self.fetch_result = fixture_snapshot(count=2)
+        with mock.patch("app.gui.sources.fetch_video", side_effect=fake_video):
+            started = self.api.sync_start()
+            self.assertTrue(started.get("ok"), started)
+            self.assertTrue(started.get("meta_after"),
+                            "по умолчанию - полная актуализация")
+            result = self.wait_sync(self.api)
+
+        self.assertFalse(result["running"])
+        # Этап 2 обошёл ровно единичное: записи источников уже освежил
+        # первый этап - дублировать запросы по ним нельзя.
+        self.assertEqual(len(fetched), 1, fetched)
+        row = dict(self.api.db.conn.execute(
+            "SELECT title, like_count, comment_count, synced_at FROM videos "
+            "WHERE id=?", (orphan,)).fetchone())
+        self.assertEqual(row["title"], "Единичное свежее")
+        self.assertEqual(row["like_count"], 5)
+        self.assertEqual(row["comment_count"], 1)
+        self.assertTrue(row["synced_at"])
+        refresh = self.api.poll(0)["refresh"]
+        self.assertFalse(refresh["running"])
+        self.assertIn("1 из 1", refresh["summary"])
+
+    def test_single_source_sync_skips_meta_stage(self):
+        self.add_source(fixture_snapshot(count=2))
+        source_id = self.api.db.conn.execute(
+            "SELECT id FROM playlists").fetchone()["id"]
+        started = self.api.sync_start({"source_id": source_id})
+        self.assertTrue(started.get("ok"), started)
+        self.assertFalse(started.get("meta_after"),
+                         "синк одного источника - только наполнение")
+        with mock.patch("app.gui.sources.fetch_video",
+                        side_effect=AssertionError("этап 2 не должен идти")):
+            result = self.wait_sync(self.api)
+        self.assertEqual(result["results"][0]["known"], 2)
+        self.assertEqual(result["results"][0]["error"], None)
+
+    def test_unknown_source_is_error(self):
+        result = self.api.sync_start({"source_id": 999})
+        self.assertEqual(result["error"], "Источник не найден")
+
+    def test_refresh_and_sync_do_not_overlap(self):
+        import threading
+
+        self.add_source(fixture_snapshot(count=1))
+        self._orphan_video()
+        started_ev = threading.Event()
+        release = threading.Event()
+
+        def slow_video(url, **kwargs):
+            started_ev.set()
+            release.wait(10)
+            return {"id": "orphan00001", "title": "X"}
+
+        with mock.patch("app.gui.sources.fetch_video", side_effect=slow_video):
+            # Обновление метаданных идёт -> синк не пускается.
+            self.assertTrue(self.api.refresh_meta_start().get("ok"))
+            self.assertTrue(started_ev.wait(10), "обход не стартовал")
+            blocked = self.api.sync_start()
+            self.assertIn("метаданных", blocked["error"])
+            # Отпускаем воркер ДО остановки, иначе join ждёт всю паузу.
+            release.set()
+            self.api.refresh_meta_stop()
+            self.api._refresh_thread.join(timeout=10)
+        self.assertFalse(self.api._refresh_thread.is_alive())
+
+        # Синк идёт -> обновление метаданных не пускается.
+        self.fetch_delay = 10
+        self.fetch_result = fixture_snapshot(count=1)
+        self.assertTrue(self.api.sync_start().get("ok"))
+        blocked = self.api.refresh_meta_start()
+        self.assertIn("синхронизация", blocked["error"].lower())
+        self.assertTrue(self.api.sync_stop()["ok"])
+        self.wait_sync(self.api)
+
+    def test_stop_during_meta_stage(self):
+        import threading
+
+        self.add_source(fixture_snapshot(count=1))
+        self._orphan_video()
+        # Вторая строка: «Остановлено» честно ловится на границе между
+        # строками - на последней строке воркер успел бы завершиться сам.
+        from app import repo as repo_mod
+        repo_mod.upsert_video(self.api.db.conn, {
+            "platform": "youtube", "remote_id": "orphan00002",
+            "key": "youtube:orphan00002", "title": "Второе единичное",
+            "webpage_url": "https://www.youtube.com/watch?v=orphan00002",
+            "origin": "yt-dlp"})
+        started_ev = threading.Event()
+        release = threading.Event()
+
+        def slow_video(url, **kwargs):
+            started_ev.set()
+            release.wait(10)
+            return {"id": "orphan00001", "title": "X"}
+
+        self.fetch_result = fixture_snapshot(count=1)
+        with mock.patch("app.gui.sources.fetch_video", side_effect=slow_video):
+            self.assertTrue(self.api.sync_start().get("ok"))
+            self.assertTrue(started_ev.wait(15), "этап 2 не начался")
+            # Одна кнопка «Остановить» гасит и второй этап.
+            self.assertTrue(self.api.sync_stop()["ok"])
+            release.set()
+            result = self.wait_sync(self.api)
+
+        self.assertFalse(result["running"])
+        refresh = self.api.poll(0)["refresh"]
+        self.assertFalse(refresh["running"])
+        self.assertTrue(refresh["summary"].startswith("Остановлено"),
+                        refresh["summary"])
+
+
 if __name__ == "__main__":
     unittest.main()

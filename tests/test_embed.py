@@ -187,5 +187,31 @@ class TestOpts(EmbedCase):
         self.assertFalse(downloader.embed_mode({"sidecar_mode": "files"}))
 
 
+class TestUnavailableError(unittest.TestCase):
+    """«Удалено/приватно» против «временного сбоя» и «нужен вход»."""
+
+    def test_unavailable_markers(self):
+        self.assertTrue(downloader.unavailable_error(
+            "ERROR: [youtube] abcd1234: Video unavailable"))
+        self.assertTrue(downloader.unavailable_error("Private video"))
+        self.assertTrue(downloader.unavailable_error(
+            "This video has been removed by the user"))
+        self.assertTrue(downloader.unavailable_error(
+            "This account has been terminated"))
+        # Человеческий текст из _human_error - очередь классифицирует его.
+        self.assertTrue(downloader.unavailable_error(
+            "видео недоступно (удалено или приватное)"))
+
+    def test_not_unavailable(self):
+        # «Требует вход» проходится аккаунтом, а не архивной меткой;
+        # сетевые сбои - это «повторить упавшие».
+        self.assertFalse(downloader.unavailable_error("Please sign in"))
+        self.assertFalse(downloader.unavailable_error("confirm your age"))
+        self.assertFalse(downloader.unavailable_error("HTTP Error 503"))
+        self.assertFalse(downloader.unavailable_error(
+            "площадка не отдала файл (временный сбой?)"))
+        self.assertFalse(downloader.unavailable_error(""))
+
+
 if __name__ == "__main__":
     unittest.main()

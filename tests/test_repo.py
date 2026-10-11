@@ -184,6 +184,35 @@ class TestCommit(RepoCase):
         ).fetchone()["n"]
         self.assertEqual(alive, 2, "связи не должны помечаться убывшими")
 
+    def test_unavailable_marker_removed_on_sync(self):
+        # Строка помечена «удалено», но синк снова принёс её данные:
+        # метка снимается - скачанное остаётся «скачанным», без файла -
+        # снова «в индексе». Файл и данные не трогаются.
+        snap = snapshot([entry("vid000000001", "Вернулось", 1)])
+        self.commit(snap)
+        vid = self.conn.execute(
+            "SELECT id FROM videos WHERE remote_id='vid000000001'"
+        ).fetchone()["id"]
+        repo.record_file(self.conn, vid, "D:/lib/x.mp4", "video",
+                         size=10, mtime=1.0)
+
+        self.conn.execute("UPDATE videos SET status='unavailable' WHERE id=?",
+                          (vid,))
+        self.commit(snap)
+        row = self.conn.execute(
+            "SELECT status FROM videos WHERE id=?", (vid,)).fetchone()
+        self.assertEqual(row["status"], "downloaded",
+                         "скачанное+вернувшееся снова скачано")
+
+        self.conn.execute("UPDATE videos SET status='unavailable' WHERE id=?",
+                          (vid,))
+        self.conn.execute("DELETE FROM files WHERE video_id=?", (vid,))
+        self.commit(snap)
+        row = self.conn.execute(
+            "SELECT status FROM videos WHERE id=?", (vid,)).fetchone()
+        self.assertEqual(row["status"], "known",
+                         "без файла - снова просто в индексе")
+
     def test_sync_stamps_synced_at_and_metrics(self):
         # Полная запись (новый синк) приносит счётчики, дату выхода и
         # обложку; synced_at честно помечает «данные пришли с площадки».

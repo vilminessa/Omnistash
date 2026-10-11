@@ -127,6 +127,41 @@ class TestWorker(QueueCase):
         self.api.dl.stop()
         self.api.dl.wait(timeout=15)
 
+    def test_unavailable_marks_archived_not_failed(self):
+        """Удалённое с площадки - «архивное», а не «упавшее».
+
+        Ничего не удаляется (строка и её данные целы), в «повторить
+        упавшие» такое не попадает - качать больше нечего.
+        """
+        vid = make_video(self.api, "vid000000077", "Удалённое")
+
+        def gone(video, settings, *, stop, on_progress=None, dest=None,
+                 **kwargs):
+            return {"cancelled": False, "files": [], "info": {},
+                    "error": "видео недоступно (удалено или приватное)",
+                    "hash": None}
+
+        self.fake_download(gone)
+        self.api.queue_start()
+        self.api.dl.wait(timeout=15)
+
+        row = self.api.db.conn.execute(
+            "SELECT status, title, last_error FROM videos WHERE id=?",
+            (vid,)).fetchone()
+        self.assertEqual(row["status"], "unavailable")
+        self.assertEqual(row["title"], "Удалённое", "строка не должна исчезнуть")
+        self.assertIn("недоступно", row["last_error"] or "")
+        state = self.api.dl.state
+        self.assertEqual(state["failed"], 0,
+                         "удалённое - не сбой качалки")
+
+        # «Повторить упавшие» такое не трогает.
+        retry = self.api.queue_retry()
+        self.assertEqual(retry.get("retried"), 0, retry)
+        status = self.api.db.conn.execute(
+            "SELECT status FROM videos WHERE id=?", (vid,)).fetchone()["status"]
+        self.assertEqual(status, "unavailable")
+
     def test_stop_returns_item_to_queue(self):
         make_video(self.api, "vid000000003", "Долгое")
         started = {"hit": False}

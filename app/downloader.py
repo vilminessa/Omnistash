@@ -562,3 +562,20 @@ def _human_error(exc: Exception) -> str:
     if "unable to download" in low or "http error 4" in low:
         return "площадка не отдала файл (временный сбой?)"
     return text.strip()[:300]
+
+
+# «Видео удалено/приватно» - не временный сбой: строку помечаем архивной
+# (unavailable), а не «упавшей». Сюда сознательно НЕ входят «требует
+# вход» и «подтвердите, что вы не бот» - они проходятся аккаунтом.
+_UNAVAILABLE_MARKERS = (
+    "video unavailable", "private video", "has been removed",
+    "no longer available", "been terminated", "copyright",
+    # человеческий текст из _human_error (очередь классифицирует его)
+    "видео недоступно",
+)
+
+
+def unavailable_error(exc) -> bool:
+    """Площадка ответила «удалено/приватно» (а не временным сбоем)?"""
+    text = str(exc).lower()
+    return any(marker in text for marker in _UNAVAILABLE_MARKERS)

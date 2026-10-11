@@ -497,6 +497,18 @@ def commit_plan(conn: sqlite3.Connection, snapshot: dict, plan: dict,
                 f"UPDATE videos SET synced_at=? "
                 f"WHERE id IN ({','.join('?' * len(chunk))})",
                 [synced_at, *chunk])
+        # Строка, помеченная «удалено на площадке», снова отдалась площадкой
+        # (синк её освежил) - метка снимается: скачанное остаётся
+        # «скачанным», остальное снова «в индексе». Ничего не перекачиваем.
+        if synced_ids:
+            marks = ",".join("?" * len(synced_ids))
+            conn.execute(
+                f"""UPDATE videos SET status = CASE WHEN EXISTS(
+                        SELECT 1 FROM files f WHERE f.video_id = videos.id
+                             AND f.kind='video' AND f.missing=0)
+                    THEN 'downloaded' ELSE 'known' END
+                  WHERE status='unavailable' AND id IN ({marks})""",
+                synced_ids)
 
         # --- стадия 4: связи ----------------------------------------------
         stage("links", "active", 0, len(entries))

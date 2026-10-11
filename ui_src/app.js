@@ -1881,7 +1881,10 @@
       if (data.status === "queued" || data.status === "downloading") {
         actions.push('<button class="btn" data-detail="queue">К очереди</button>');
       }
-      if (data.status === "downloaded") {
+      // «Открыть» опирается на наличие файла, а не только на статус:
+      // у архивного («удалено на площадке») локальная копия цела и её
+      // можно смотреть.
+      if (data.status === "downloaded" || data.status === "unavailable") {
         var localFile = (data.files || []).filter(function (f) {
           return f.kind === "video" && !f.missing;
         })[0];
@@ -2079,7 +2082,9 @@
         '<td class="num">' + (src.total || 0) + "</td>" +
         '<td class="num">' + (src.downloaded || 0) + "</td>" +
         '<td class="num">' + (src.pending || 0) + "</td>" +
-        "<td>" + shortTime(src.last_synced_at) + "</td>" +
+        "<td>" + shortTime(src.last_synced_at) +
+        ' <button class="btn ghost" data-sync-src="' + src.id +
+        '" title="Синхронизировать только этот источник">Синк</button></td>' +
         "</tr>";
     }).join("");
   }
@@ -2154,6 +2159,19 @@
     var bar = $("sync-bar");
     if (sync.running) {
       bar.hidden = false;
+      if (sync.meta_active && sync.meta) {
+        // Этап 2/2 - метаданные видео вне источников (счётчики шлёт
+        // воркер синка; полоса та же, только надпись про этап).
+        var m = sync.meta;
+        var mpct = m.total ? Math.round(m.done * 100 / m.total) : 0;
+        $("sync-fill").style.width = mpct + "%";
+        $("sync-title").textContent = "Актуализация: метаданные";
+        $("sync-sub").textContent = "этап 2/2 · " + m.done + " / " + m.total +
+          (m.current ? " · " + m.current : "") +
+          (m.errors ? " · ошибок " + m.errors : "");
+        $("sync-counters").textContent = "";
+        return;
+      }
       var percent = 0;
       if (sync.fetch && sync.fetch.total) {
         percent = Math.round(sync.fetch.got * 100 / sync.fetch.total);
@@ -2164,7 +2182,8 @@
       }
       $("sync-fill").style.width = percent + "%";
       $("sync-title").textContent = sync.current || "…";
-      var sub = "источник " + Math.max(sync.index || 0, 1) + " / " + (sync.total || 1);
+      var sub = "этап 1/2 · источник " + Math.max(sync.index || 0, 1) +
+        " / " + (sync.total || 1);
       if (sync.fetch && sync.fetch.total) {
         sub += " · записей " + sync.fetch.got + " / " + sync.fetch.total;
       }
@@ -3269,6 +3288,18 @@
       });
     });
     $("sync-stop-btn").addEventListener("click", function () { call("sync_stop"); });
+    // Синк одного источника: строки пересобираются, поэтому делегирование.
+    $("sources-body").addEventListener("click", function (event) {
+      var btn = event.target && event.target.closest
+        ? event.target.closest("[data-sync-src]") : null;
+      if (!btn) return;
+      call("sync_start", { source_id: Number(btn.dataset.syncSrc) })
+        .then(function (res) {
+          if (!res) return;
+          if (res.error) { toast(res.error, true); return; }
+          toast("Синхронизация источника запущена");
+        });
+    });
     $("sync-queue-btn").addEventListener("click", function () {
       var pick = document.getElementById("sync-storage");
       call("sync_queue_new", { storage_id: pick ? pick.value : "" })
@@ -3373,7 +3404,13 @@
         status_label: "файл пропал", duration_s: 200, uploaded_at: "2022-02-02",
         channel: "Автор В", size: 0, user_rating: 0, watched_at: null,
         view_count: 1500000, like_count: null, comment_count: 89,
-        synced_at: null, has_thumb: false }
+        synced_at: null, has_thumb: false },
+      { id: 6, key: "youtube:hhh111iii22", title: "Архивное видео",
+        status: "unavailable", status_label: "удалено на площадке",
+        duration_s: 300, uploaded_at: "2021-05-05", channel: "Автор А",
+        size: 99000000, user_rating: 0, watched_at: null,
+        view_count: 42000, like_count: 900, comment_count: 55,
+        synced_at: "2026-10-10T21:04:00", has_thumb: false }
     ];
     var settings = {
       library_roots: [{ path: "D:\\видео\\библиотека", recursive: true, enabled: true }],
@@ -3400,7 +3437,8 @@
     // Симуляция синхронизации: fetch растёт, затем падает в результат.
     var mockSync = { running: false, index: 0, total: 0, current: null,
                      fetch: null, stage: null, results: [], new_ids: [],
-                     new_total: 0, queued: 0, error: null };
+                     new_total: 0, queued: 0, error: null,
+                     meta_active: false, meta: null };
     // Симуляция добавления источника: индексация -> подтверждение -> итог.
     // В превью нет сети, но экраны (селект «Куда качать», итог с меткой,
     // пикер) должны быть проверяемы.
@@ -3664,7 +3702,18 @@
                      bot_hint: true };
           })(),
           sync: (function () {
-            if (mockSync.running) {
+            if (mockSync.running && mockSync.meta_active) {
+              // Этап 2/2 - метаданные видео вне источников (running держится
+              // до конца, как у настоящего воркера).
+              mockSync.meta.done = Math.min(mockSync.meta.total,
+                                            (mockSync.meta.done || 0) + 1);
+              mockSync.meta.current = "Ночной дождик";
+              if (mockSync.meta.done >= mockSync.meta.total) {
+                mockSync.meta_active = false;
+                mockSync.meta = null;
+                mockSync.running = false;
+              }
+            } else if (mockSync.running) {
               mockSync.fetch = mockSync.fetch || { got: 0, total: 3 };
               mockSync.fetch.got += 1;
               if (mockSync.fetch.got === 2) {
@@ -3672,7 +3721,6 @@
                                    current: 1, total: 3 };
               }
               if (mockSync.fetch.got >= mockSync.fetch.total) {
-                mockSync.running = false;
                 mockSync.fetch = null;
                 mockSync.stage = null;
                 mockSync.results = [{ title: "Тестовый плейлист",
@@ -3681,6 +3729,10 @@
                                       queued: 0, error: null }];
                 mockSync.new_total = 2;
                 mockSync.new_ids = [11, 12];
+                // Этап 1 готов - уходит этап 2 (метаданные).
+                mockSync.meta_active = true;
+                mockSync.meta = { done: 0, total: 3, current: "",
+                                  errors: 0 };
               }
             }
             return JSON.parse(JSON.stringify(mockSync));
@@ -4149,6 +4201,8 @@
       },
       sync_stop: function () {
         mockSync.running = false;
+        mockSync.meta_active = false;
+        mockSync.meta = null;
         mockSync.fetch = null;
         mockSync.stage = null;
         return Promise.resolve({ ok: true });
