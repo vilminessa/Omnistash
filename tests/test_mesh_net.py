@@ -290,6 +290,53 @@ class TestRestore(MeshNetCase):
         self.assertFalse(ok)
         self.assertTrue(any("структурная проверка" in line for line in logs))
 
+    def test_dht_lookup_supplies_addresses(self):
+        """restore БЕЗ ручных адресов находит участника через DHT.
+
+        Сквозной путь: узел-анонсер объявляет файл (TCP-сервер А) ->
+        значение лежит у узел-слушателя -> restore берёт адрес из DHT ->
+        манифесты -> перенос -> проверки -> скачанный файл.
+        """
+        from app.mesh import dht as dht_mod
+        holder = self.seed_holder()
+        receiver = self.seed_receiver()
+        row = {"id": receiver["vid"], "remote_id": "vid000000001",
+               "title": "Клип"}
+        announcer = dht_mod.DHTNode(multicast=False, port=0)
+        listener = dht_mod.DHTNode(multicast=False, port=0)
+        import os as _os
+        announcer.own = _os.urandom(dht_mod.NODE_ID_LEN)
+        listener.own = _os.urandom(dht_mod.NODE_ID_LEN)
+        with mock.patch.object(dht_mod, "BOOTSTRAP", ()):
+            pa = announcer.start_sync()
+            pl = listener.start_sync()
+            try:
+                announcer.table.add(dht_mod.Contact(listener.own, "127.0.0.1", pl))
+                listener.table.add(dht_mod.Contact(announcer.own, "127.0.0.1", pa))
+                tcp_addr = f"127.0.0.1:{self.port}"
+                accepted = announcer.announce_sync(
+                    "vid000000001", holder["digest"], 100,
+                    "2026-10-11T09:00:00", tcp_addr)
+                self.assertGreater(accepted, 0, "значение должно дойти")
+                dht_mod.set_current(listener)
+                settings = {"mesh_enabled": True}    # БЕЗ ручных адресов!
+                logs = []
+                with mock.patch.object(mesh_verify, "probe",
+                                       return_value={"checked": True,
+                                                     "ok": None,
+                                                     "duration": 213.0,
+                                                     "errors": []}):
+                    ok = mesh_fetch.restore(self.db_b.conn, row, settings,
+                                            str(self.root / "out6"),
+                                            log=logs.append, reason="")
+                self.assertTrue(ok, logs)
+                self.assertTrue((self.root / "out6" /
+                                 "Клип [vid000000001].mp4").is_file())
+            finally:
+                dht_mod.set_current(None)
+                announcer.stop_sync()
+                listener.stop_sync()
+
 
 if __name__ == "__main__":
     unittest.main()

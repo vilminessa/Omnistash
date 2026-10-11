@@ -91,6 +91,12 @@ def sign(message: bytes) -> bytes:
 
 def verify(public_raw: bytes, message: bytes, signature: bytes) -> bool:
     """Проверка подписи ЧУЖОГО ключа (ключ из манифеста/записи DHT)."""
+    # Дегенерат «все нули» (и ключ, и подпись): замечено, что такая пара
+    # может пройти провайдеру - фильтруем прямо здесь, это ровно тот
+    # случай, которым подделывают адреса в DHT.
+    if not public_raw or not signature or not any(public_raw) \
+            or not any(signature):
+        return False
     try:
         Ed25519PublicKey.from_public_bytes(public_raw).verify(signature, message)
         return True

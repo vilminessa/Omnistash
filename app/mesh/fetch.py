@@ -19,7 +19,7 @@ import os
 
 from ..indexer import file_hash
 from ..util import human_size, sanitize_name
-from . import client, feedback, manifest, verify
+from . import client, dht, feedback, manifest, verify
 
 
 def restore(conn, row: dict, settings: dict, dest_dir, *,
@@ -39,6 +39,18 @@ def restore(conn, row: dict, settings: dict, dest_dir, *,
     addrs = [a.strip() for a in
              str(settings.get("mesh_peers") or "").replace(";", ",").split(",")
              if a.strip()]
+    banned = feedback.banned_set(conn)
+    # DHT: участники, заранее объявившие этот файл (плюс ручные адреса).
+    # Значение несёт20-байтный срез хеша - его и сверяем со стоп-листом.
+    node = dht.current()
+    if node is not None and node.running:
+        banned_head = {b[len("sha256:"):][:40] for b in banned}
+        for found in node.lookup_sync(row["remote_id"]):
+            addr = str(found.get("addr") or "")
+            head = bytes(found.get("hash") or b"").hex()
+            if not addr or addr in addrs or head in banned_head:
+                continue
+            addrs.append(addr)
     if not addrs:
         return give_up("Mesh: адреса участников не заданы - пропускаю "
                        f"(«{row.get('title') or row.get('key')}»)")
@@ -61,7 +73,6 @@ def restore(conn, row: dict, settings: dict, dest_dir, *,
     except Exception as exc:  # noqa: BLE001 - сбой не должен ронять поток
         return give_up(f"Mesh: манифесты не получены: {exc}")
 
-    banned = feedback.banned_set(conn)
     digest = client.pick_digest(pairs, banned)
     if not digest:
         return give_up("Mesh: нет пригодных манифестов (недоступны, "

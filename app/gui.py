@@ -30,11 +30,12 @@ from . import schedule as schedule_mod
 from . import settings_schema, sources
 from . import storages as storages_mod
 from . import verify as verify_mod
+from .mesh import dht as mesh_dht
 from .mesh import fetch as mesh_fetch
 from .mesh import server as mesh_server
 from .db import SYNC_MODES, Database
 from .metadata import normalize_video
-from .paths import log_path
+from .paths import log_path, profile_dir
 from .queue import DownloadWorker
 from .util import human_size, now_iso
 
@@ -188,10 +189,17 @@ class Api:
         config0 = self._current_settings()
         self._mesh_port = int(config0.get("mesh_port") or 38574)
         self._mesh_server = mesh_server.PeerServer(self.db, self._mesh_port)
+        # UDP-узел DHT (тот же номер порта - другой транспорт): вход в
+        # сеть через публичные bootstrap-роутеры + LAN-multicast; живые
+        # соседи помнятся в профиле между запусками.
+        self._mesh_dht = mesh_dht.DHTNode(
+            log=self._log, port=self._mesh_port,
+            persist=str(profile_dir() / mesh_dht.PEER_FILE))
         self._mesh: dict = {"running": False, "video_id": None,
                             "title": "", "error": None, "summary": None}
         self._mesh_stop = threading.Event()
         self._mesh_thread: threading.Thread | None = None
+        self._announce_thread: threading.Thread | None = None
         # Аккаунт Google: окно входа живёт отдельно от главного.
         self._login_window = None
         self._login_cancel = threading.Event()
@@ -473,10 +481,12 @@ class Api:
             return None
 
     def _mesh_apply(self) -> None:
-        """Поднять/остановить mesh-сервер по текущим настройкам.
+        """Поднять/остановить mesh-сервер И DHT-узел по настройкам.
 
         Сервер отдаёт только проверенные файлы (с известным sha256) и
         поднимается исключительно при включённом участии (согласие).
+        DHT (UDP, тот же порт - другой транспорт) объявляет наши файлы
+        и ищет участников без своих серверов.
         """
         config = self._current_settings()
         want = bool(config.get("mesh_enabled"))
@@ -484,18 +494,75 @@ class Api:
         if port != self._mesh_port:
             if self._mesh_server.running:
                 self._mesh_server.stop()
+            if self._mesh_dht.running:
+                self._mesh_dht.stop_sync()
             self._mesh_server = mesh_server.PeerServer(self.db, port)
+            self._mesh_dht = mesh_dht.DHTNode(
+                log=self._log, port=port,
+                persist=str(profile_dir() / mesh_dht.PEER_FILE))
+            mesh_dht.set_current(None)
             self._mesh_port = port
-        if want and not self._mesh_server.running:
-            try:
-                opened = self._mesh_server.start()
-                self._log(f"Mesh-сервер поднят: порт {opened} "
-                          "(отдаёт только проверенные файлы)")
-            except OSError as exc:
-                self._log(f"Mesh-сервер не поднялся (порт {port}): {exc}")
-        elif not want and self._mesh_server.running:
-            self._mesh_server.stop()
-            self._log("Mesh-сервер остановлен")
+        if want:
+            if not self._mesh_server.running:
+                try:
+                    opened = self._mesh_server.start()
+                    self._log(f"Mesh-сервер поднят: порт {opened} "
+                              "(отдаёт только проверенные файлы)")
+                except OSError as exc:
+                    self._log(f"Mesh-сервер не поднялся (порт {port}): {exc}")
+            if not self._mesh_dht.running:
+                try:
+                    udp = self._mesh_dht.start_sync()
+                    mesh_dht.set_current(self._mesh_dht)
+                    self._log(f"DHT-узел поднят: udp {udp} "
+                              "(вход через публичные роутеры + LAN)")
+                    self._start_announce()
+                except RuntimeError as exc:
+                    self._log(f"DHT-узел не поднялся: {exc}")
+        else:
+            if self._mesh_server.running:
+                self._mesh_server.stop()
+                self._log("Mesh-сервер остановлен")
+            if self._mesh_dht.running:
+                self._mesh_dht.stop_sync()
+                mesh_dht.set_current(None)
+                self._log("DHT-узел остановлен")
+
+    def _start_announce(self) -> None:
+        """Объявить имеющиеся файлы в DHT - фоном, один раз за включение."""
+        if (self._announce_thread is not None
+                and self._announce_thread.is_alive()):
+            return
+
+        def worker() -> None:
+            conn = self.db.conn
+            rows = conn.execute(
+                """SELECT v.remote_id, v.synced_at, f.hash, f.size
+                     FROM videos v JOIN files f ON f.video_id = v.id
+                    WHERE f.kind='video' AND f.missing=0
+                      AND f.hash IS NOT NULL AND v.platform <> 'local'
+                    ORDER BY f.id""").fetchall()
+            addr = f"{mesh_dht.local_ip()}:{self._mesh_port}"
+            done = 0
+            for row in rows:
+                if not self._mesh_dht.running:
+                    break
+                try:
+                    self._mesh_dht.announce_sync(
+                        row["remote_id"], row["hash"], row["size"] or 0,
+                        row["synced_at"] or "", addr)
+                except Exception:  # noqa: BLE001 - объявление не должно валить
+                    pass
+                done += 1
+                if done % 50 == 0:
+                    self._log(f"DHT: объявлено {done}/{len(rows)}")
+            if done:
+                self._log(f"DHT: объявлено файлов {done} из {len(rows)} "
+                          f"(адрес {addr})")
+
+        self._announce_thread = threading.Thread(
+            target=worker, daemon=True, name="omnistash-mesh-announce")
+        self._announce_thread.start()
 
     def save_setting(self, pair=None) -> dict:
         """Значение из карточки настроек: {key, value} -> свежие настройки."""
@@ -2655,6 +2722,8 @@ class Api:
             if thread is not None and thread.is_alive():
                 thread.join(timeout=15)
         self._mesh_server.stop()
+        self._mesh_dht.stop_sync()
+        mesh_dht.set_current(None)
         self.dl.wait(timeout=15)
         self.db.close()
 
