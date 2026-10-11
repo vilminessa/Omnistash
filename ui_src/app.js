@@ -53,6 +53,8 @@
     tileSize: "medium",     // «small»/«medium»/«large» - из tile_size
     sort: { col: "", dir: "desc" }, // сортировка списка (sort_col/sort_dir)
     refresh: null,          // обновление метаданных с площадки (poll)
+    mesh: null,             // запрос видео у участников (poll)
+    detailId: null,         // открытая карточка (для обновления по mesh)
     account: null,          // состояние аккаунта Google из poll (без секретов)
     botNoteDismissed: false // «Скрыть» у подсказки про аккаунт
   };
@@ -209,6 +211,7 @@
     if (changed("schedule", snap.schedule)) renderSchedule(snap.schedule);
     if (changed("verify", snap.verify)) renderVerify(snap.verify);
     if (changed("refresh", snap.refresh)) renderRefresh(snap.refresh);
+    if (changed("mesh", snap.mesh)) renderMeshState(snap.mesh);
     if (changed("ffmpeg", snap.ffmpeg)) {
       state.ffmpeg = snap.ffmpeg;
       renderFfmpegState();
@@ -361,6 +364,21 @@
       span.textContent = refresh.running
         ? "идёт " + refresh.done + " / " + refresh.total
         : (refresh.summary || "");
+    }
+  }
+
+  function renderMeshState(mesh) {
+    // Запрос видео у участников: если открытая карточка - эта же строка,
+    // обновляем её и встречаем результат тостом (сигнатура срабатывает
+    // один раз на изменение - тост не задублируется).
+    var wasRunning = !!(state.mesh && state.mesh.running);
+    state.mesh = mesh || null;
+    if (!mesh) return;
+    var finished = wasRunning && !mesh.running && !!mesh.summary;
+    var open = !$("detail-overlay").hidden;
+    if (state.detailId != null && mesh.video_id === state.detailId) {
+      if (open) openDetail(state.detailId);
+      if (finished) toast(mesh.summary, !!mesh.error);
     }
   }
 
@@ -1837,6 +1855,7 @@
   function openDetail(id) {
     call("get_video", id).then(function (data) {
       if (!data) return;
+      state.detailId = data.id;
       $("detail-title").textContent = data.title || "Без названия";
       var kv = [];
       var add = function (label, value) {
@@ -1854,6 +1873,11 @@
       add("Комментариев", data.comment_count === null || data.comment_count === undefined
         ? "" : Number(data.comment_count).toLocaleString("ru-RU"));
       add("Синк данных", shortTime(data.synced_at));
+      // Mesh: состояние запроса для ЭТОЙ строки (если он идёт/был).
+      if (state.mesh && state.mesh.video_id === data.id) {
+        add("Mesh", state.mesh.running ? "идёт запрос к участникам…"
+                                       : (state.mesh.summary || ""));
+      }
       add("Происхождение", data.origin);
       add("URL", data.webpage_url);
       add("Первый раз замечено", shortTime(data.first_seen_at));
@@ -1892,6 +1916,19 @@
           actions.push('<button class="btn primary" data-detail="play">' +
             "Открыть</button>");
           actions.push('<button class="btn" data-detail="folder">Открыть папку</button>');
+        }
+      }
+      // Mesh: запрос файлу у участников - путь восстановления, когда
+      // площадка не отдаёт (удалено/приватное/без входа) или файл потерян.
+      if (state.settings.mesh_enabled &&
+          ["known", "failed", "missing", "detached",
+           "unavailable"].indexOf(data.status) >= 0) {
+        if (state.mesh && state.mesh.running) {
+          actions.push('<button class="btn" data-detail="mesh-stop">' +
+            "Остановить запрос</button>");
+        } else {
+          actions.push('<button class="btn" data-detail="mesh">' +
+            "Запросить у участников</button>");
         }
       }
       if (data.webpage_url) {
@@ -2053,6 +2090,15 @@
             });
           } else if (action === "play") {
             playVideo(data.id);
+          } else if (action === "mesh") {
+            call("mesh_fetch_video", { id: data.id }).then(function (res) {
+              if (!res) return;
+              if (res.error) { toast(res.error, true); return; }
+              toast("Запрос к участникам запущен");
+              openDetail(data.id);      // кнопка сменится на «Остановить»
+            });
+          } else if (action === "mesh-stop") {
+            call("mesh_fetch_stop");
           } else if (action === "source" && data.webpage_url) {
             call("open_url", data.webpage_url);
           }
@@ -2402,6 +2448,21 @@
         input.addEventListener("change", function () {
           var key = input.dataset.key;
           var value = input.type === "checkbox" ? input.checked : input.value;
+          // Согласие на mesh: включение - явное действие с объяснением,
+          // что уходит наружу (адрес и id запрашиваемых видео).
+          if (key === "mesh_enabled" && value) {
+            var ok = confirm(
+              "Включить участие в mesh?\n\n" +
+              "Наружу будут уходить: ваш адрес (когда поднят сервер) и id " +
+              "запрашиваемых видео. Метаданные от участников НЕ принимаются " +
+              "никогда - только файлы, и те проверяются (sha256, структура, " +
+              "стоп-лист «несовпадений»).\n\n" +
+              "Продолжить?");
+            if (!ok) {
+              input.checked = false;
+              return;
+            }
+          }
           saveSetting(key, value);
         });
       });
@@ -3419,6 +3480,7 @@
       sync_depth: "full",
       col_views: true, col_likes: true, col_comments: true, col_sync: true,
       sort_col: "", sort_dir: "desc",
+      mesh_enabled: false, mesh_peers: "", mesh_port: 38574,
       dest_dir: "D:\\видео\\downloads",
       output_template: "%(channel)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s",
       quality: "high", subtitles: "none", transcode: "none",
@@ -3491,6 +3553,10 @@
     var mockRefresh = { running: false, done: 0, total: 0, current: "",
                         errors: 0, summary: null };
     var mockRefreshTimer = null;
+    // Mesh: запрос у участников (карточка) - имитируем быстрый перенос.
+    var mockMesh = { running: false, video_id: null, title: "",
+                     error: null, summary: null };
+    var mockMeshTimer = null;
     // Установка ffmpeg: в превью её имитируем, чтобы оверлей было видно.
     // По умолчанию «найден» - тогда превью не блокируется автопредложением
     // (как у пользователя с установленным ffmpeg). «?ff=1» показывает
@@ -3589,6 +3655,19 @@
         hint: "Последняя колонка сортировки.", hidden: true, default: "" },
       { key: "sort_dir", type: "str", section: "", label: "",
         hint: "Направление сортировки.", hidden: true, default: "desc" },
+      { key: "mesh_enabled", type: "bool", section: "Mesh",
+        label: "Помогать участникам (и получать от них)",
+        hint: "Если площадка не отдаёт видео - запросить файл у участников. " +
+              "Наружу уходят адрес и id запрашиваемых видео; файлы " +
+              "проверяются (sha256, структура, стоп-лист).",
+        default: false },
+      { key: "mesh_peers", type: "str", section: "Mesh",
+        label: "Адреса участников",
+        hint: "Через запятую: ip:port.", default: "" },
+      { key: "mesh_port", type: "int", section: "Mesh",
+        label: "Порт своего mesh-сервера",
+        hint: "Отдаёт только проверенные файлы; адрес стабилен между " +
+              "перезапусками.", min: 1024, max: 65535, default: 38574 },
       { key: "dest_dir", type: "path", section: "Загрузка",
         label: "Куда скачивать", hint: "нет - заменено хранилищами",
         hidden: true, default: "D:\\видео\\downloads" },
@@ -3739,6 +3818,7 @@
           })(),
           verify: JSON.parse(JSON.stringify(mockVerify)),
           refresh: JSON.parse(JSON.stringify(mockRefresh)),
+          mesh: JSON.parse(JSON.stringify(mockMesh)),
           ffmpeg: JSON.parse(JSON.stringify(mockFfmpeg)),
           account: JSON.parse(JSON.stringify(mockAccount)),
           schedule: { scan: { interval: 0, next_in: null, last: null },
@@ -3936,6 +4016,26 @@
             mockRefresh.done + " из " + mockRefresh.total +
             " · ошибок " + mockRefresh.errors;
         }
+        return Promise.resolve({ ok: true });
+      },
+      mesh_fetch_video: function (req) {
+        req = req || {};
+        if (mockMesh.running) {
+          return Promise.resolve({ error: "Запрос к участникам уже идёт" });
+        }
+        mockMesh = { running: true, video_id: Number(req.id),
+                     title: "", error: null, summary: null };
+        if (mockMeshTimer) clearTimeout(mockMeshTimer);
+        mockMeshTimer = setTimeout(function () {
+          mockMesh.running = false;
+          mockMesh.summary = "Файл получен от участников";
+        }, 2500);
+        return Promise.resolve({ ok: true });
+      },
+      mesh_fetch_stop: function () {
+        if (mockMeshTimer) clearTimeout(mockMeshTimer);
+        mockMesh.running = false;
+        mockMesh.summary = "Остановлено";
         return Promise.resolve({ ok: true });
       },
       verify_start: function () {

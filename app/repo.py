@@ -240,16 +240,18 @@ def record_file(conn: sqlite3.Connection, video_id: int, path: str, kind: str,
     storage, rel = storages_mod.split_path(storages_list, path)
     conn.execute(
         """INSERT INTO files (video_id, kind, path, size, hash, mtime, missing,
-                              storage_id, rel_path)
-           VALUES (?,?,?,?,?,?,?,?,?)
+                              storage_id, rel_path, format_json)
+           VALUES (?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT (path) DO UPDATE SET
                video_id=excluded.video_id, kind=excluded.kind,
                size=excluded.size, hash=coalesce(excluded.hash, files.hash),
                mtime=excluded.mtime, missing=0,
                storage_id=excluded.storage_id,
-               rel_path=excluded.rel_path""",
+               rel_path=excluded.rel_path,
+               format_json=coalesce(excluded.format_json, files.format_json)""",
         (video_id, kind, path, size, digest, mtime, 0,
-         storage["id"] if storage else None, rel if storage else None))
+         storage["id"] if storage else None, rel if storage else None,
+         format_json))
     if kind == "video":
         conn.execute(
             """UPDATE videos SET status='downloaded', downloaded_at=coalesce(downloaded_at, ?)

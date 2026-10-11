@@ -30,6 +30,8 @@ from . import schedule as schedule_mod
 from . import settings_schema, sources
 from . import storages as storages_mod
 from . import verify as verify_mod
+from .mesh import fetch as mesh_fetch
+from .mesh import server as mesh_server
 from .db import SYNC_MODES, Database
 from .metadata import normalize_video
 from .paths import log_path
@@ -180,6 +182,16 @@ class Api:
                               "error": None}
         self._ffmpeg_stop = threading.Event()
         self._ffmpeg_thread: threading.Thread | None = None
+        # Mesh: сервер участника (поднимается только при включённом
+        # участии - настройки mesh_*) и состояние запроса «видео у
+        # участников» из карточки.
+        config0 = self._current_settings()
+        self._mesh_port = int(config0.get("mesh_port") or 38574)
+        self._mesh_server = mesh_server.PeerServer(self.db, self._mesh_port)
+        self._mesh: dict = {"running": False, "video_id": None,
+                            "title": "", "error": None, "summary": None}
+        self._mesh_stop = threading.Event()
+        self._mesh_thread: threading.Thread | None = None
         # Аккаунт Google: окно входа живёт отдельно от главного.
         self._login_window = None
         self._login_cancel = threading.Event()
@@ -190,6 +202,8 @@ class Api:
         self.dl = DownloadWorker(self.db, self._current_settings, log=self._log)
         settings.reload_if_changed(self._settings_cache)
         self._log("Индекс открыт: " + str(self.db.path))
+        # Mesh-сервер: поднимется только если участник уже включался.
+        self._mesh_apply()
         # Версия сборки: в журнале всегда видно, что за exe работает
         # (значение одно на весь проект - app.__version__).
         self._log(f"Omnistash {__version__}")
@@ -380,6 +394,7 @@ class Api:
             verify_state["broken"] = list(self._verify.get("broken") or [])[:100]
             verify_state["missing"] = list(self._verify.get("missing") or [])[:100]
             refresh_state = dict(self._refresh)
+            mesh_state = dict(self._mesh)
             ffmpeg_state = dict(self._ffmpeg)
         # Найден ли ffmpeg - дешёвые stat-вызовы: спрашиваем при каждом
         # опросе, чтобы правда не отставала от установки/удаления руками.
@@ -423,6 +438,7 @@ class Api:
             "schedule": schedule_state,
             "verify": verify_state,
             "refresh": refresh_state,
+            "mesh": mesh_state,
             "ffmpeg": ffmpeg_state,
             "account": account_state,
             "settings": config,
@@ -456,6 +472,31 @@ class Api:
         except (TypeError, ValueError):
             return None
 
+    def _mesh_apply(self) -> None:
+        """Поднять/остановить mesh-сервер по текущим настройкам.
+
+        Сервер отдаёт только проверенные файлы (с известным sha256) и
+        поднимается исключительно при включённом участии (согласие).
+        """
+        config = self._current_settings()
+        want = bool(config.get("mesh_enabled"))
+        port = int(config.get("mesh_port") or 38574)
+        if port != self._mesh_port:
+            if self._mesh_server.running:
+                self._mesh_server.stop()
+            self._mesh_server = mesh_server.PeerServer(self.db, port)
+            self._mesh_port = port
+        if want and not self._mesh_server.running:
+            try:
+                opened = self._mesh_server.start()
+                self._log(f"Mesh-сервер поднят: порт {opened} "
+                          "(отдаёт только проверенные файлы)")
+            except OSError as exc:
+                self._log(f"Mesh-сервер не поднялся (порт {port}): {exc}")
+        elif not want and self._mesh_server.running:
+            self._mesh_server.stop()
+            self._log("Mesh-сервер остановлен")
+
     def save_setting(self, pair=None) -> dict:
         """Значение из карточки настроек: {key, value} -> свежие настройки."""
         if not isinstance(pair, dict):
@@ -475,6 +516,9 @@ class Api:
         else:
             self._log(f"Настройка {key} = {pair.get('value')!r}")
         self._heavy_at = 0.0  # дерево/счётчики могли измениться
+        if key in ("mesh_enabled", "mesh_port"):
+            # Согласие дано/снято или сменился порт - сервер тут же следует.
+            self._mesh_apply()
         if key in ("scan_interval_min", "sync_interval_min"):
             # Смена интервала переносит срок сразу: не ждём старого.
             self.sched.apply_settings(
@@ -1845,6 +1889,89 @@ class Api:
         self._log(summary)
 
     # ------------------------------------------------------------------ #
+    #  Mesh: запрос видео у участников (кнопка в карточке)
+    # ------------------------------------------------------------------ #
+
+    def mesh_fetch_video(self, request=None) -> dict:
+        """Восстановить файл у участников - путь восстановления из карточки.
+
+        Та же честная механика, что в очереди (mesh.fetch.restore): манифесты
+        -> стоп-лист/эталон -> перенос -> sha256 -> структура -> провенанс.
+        """
+        request = request or {}
+        try:
+            video_id = int(request.get("id") or 0)
+        except (TypeError, ValueError):
+            return {"error": "Видео не указано"}
+        config = dict(self._current_settings())
+        if not config.get("mesh_enabled"):
+            return {"error": "Участие в mesh выключено в настройках "
+                             "(секция Mesh)"}
+        with self._lock:
+            if self._mesh.get("running"):
+                return {"error": "Запрос к участникам уже идёт"}
+        conn = self.db.conn
+        row = conn.execute(
+            "SELECT id, remote_id, title, key, status, channel_id, "
+            "target_storage_id FROM videos WHERE id=?", (video_id,)).fetchone()
+        if row is None:
+            return {"error": "Видео не найдено"}
+        row = dict(row)
+        if row["status"] in ("queued", "downloading"):
+            return {"error": "Видео уже качается очередью"}
+        if row["status"] == "downloaded":
+            return {"error": "Файл уже скачан - проверяйте в «Целостности»"}
+        storage, error = storages_mod.resolve_for_row(conn, row, config)
+        if not storage:
+            return {"error": error}
+        self._mesh_stop.clear()
+        with self._lock:
+            self._mesh = {"running": True, "video_id": video_id,
+                          "title": row.get("title") or "", "error": None,
+                          "summary": None}
+        thread = threading.Thread(target=self._mesh_worker,
+                                  args=(row, config, storage["path"]),
+                                  name="omnistash-mesh-fetch", daemon=True)
+        with self._lock:
+            self._mesh_thread = thread
+        thread.start()
+        self._log(f"Mesh: запрос «{row.get('title')}» у участников "
+                  f"(назначение: {storage['label']})")
+        return {"ok": True, "title": row.get("title") or ""}
+
+    def mesh_fetch_stop(self) -> dict:
+        """Остановить идущий запрос (перенос проверяет stop на чанках)."""
+        with self._lock:
+            if not self._mesh.get("running"):
+                return {"ok": False}
+        self._mesh_stop.set()
+        self._log("Mesh: запрос остановлен")
+        return {"ok": True}
+
+    def _mesh_worker(self, row: dict, config: dict, dest_dir: str) -> None:
+        try:
+            ok = mesh_fetch.restore(self.db.conn, row, config, dest_dir,
+                                    log=self._log, stop=self._mesh_stop,
+                                    reason="запрос из карточки")
+        except Exception as exc:  # noqa: BLE001 - воркер не должен молча умереть
+            self._log(f"Mesh: запрос упал: {exc}")
+            with self._lock:
+                self._mesh.update(running=False, error=str(exc),
+                                  summary=f"Ошибка: {exc}")
+            return
+        if self._mesh_stop.is_set():
+            summary = "Остановлено"
+        elif ok:
+            summary = "Файл получен от участников"
+        else:
+            summary = "Не удалось получить у участников (см. журнал)"
+        with self._lock:
+            self._mesh.update(running=False, summary=summary,
+                              error=None if ok else summary)
+            if ok:
+                self._heavy_at = 0.0
+
+    # ------------------------------------------------------------------ #
     #  ffmpeg: докачка по согласию (GPL не вшиваем - см. ffmpeg_installer)
     # ------------------------------------------------------------------ #
 
@@ -2508,6 +2635,7 @@ class Api:
         self._repack_stop.set()
         self._verify_stop.set()
         self._ffmpeg_stop.set()
+        self._mesh_stop.set()
         self._login_cancel.set()
         with self._lock:
             login_window = self._login_window
@@ -2521,10 +2649,12 @@ class Api:
         for thread in (self._scan_thread, self._add_thread, self._sync_thread,
                        self._migrate_thread, self._repack_thread,
                        self._verify_thread, self._ffmpeg_thread,
+                       self._mesh_thread,
                        getattr(self, "_avail_thread", None),
                        getattr(self, "_check_thread", None)):
             if thread is not None and thread.is_alive():
                 thread.join(timeout=15)
+        self._mesh_server.stop()
         self.dl.wait(timeout=15)
         self.db.close()
 

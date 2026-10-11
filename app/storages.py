@@ -606,3 +606,33 @@ def resolve_target(conn, settings: dict, *, video_id: int | None = None,
             if storage:
                 return storage
     return by_id(settings.get("default_storage_id"))
+
+
+def resolve_for_row(conn, row: dict, settings: dict):
+    """Цель для КОНКРЕТНОЙ строки (очередь, mesh-восстановление).
+
+    Порядок: явный выбор у строки (target_storage_id) -> общий резолвер.
+    Возвращает (storage, error): фон не может спрашивать пользователя,
+    поэтому отсутствие выбора - тоже результат, видимый в журнале.
+    """
+    import os
+
+    target_id = row.get("target_storage_id")
+    if target_id:
+        storage = get(conn, target_id)
+        if not storage or storage["status"] != "active":
+            return None, (f"хранилище отвязано или удалено "
+                          f"({(storage or {}).get('label', target_id)})")
+        if not storage.get("enabled", 1):
+            return None, f"хранилище отключено: {storage['label']}"
+        if not os.path.isdir(storage["path"]):
+            return None, f"нет хранилища: {storage['label']} не подключён"
+        return storage, None
+
+    storage = resolve_target(conn, settings, video_id=row.get("id"),
+                             channel_id=row.get("channel_id"))
+    if storage and os.path.isdir(storage["path"]):
+        return storage, None
+    if storage:
+        return None, f"нет хранилища: {storage['label']} не подключён"
+    return None, "не выбрано хранилище - укажите его в настройках источника"

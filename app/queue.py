@@ -12,6 +12,7 @@ import os
 import threading
 
 from . import downloader, repo, storages
+from .mesh import fetch as mesh_fetch
 from .util import human_size
 
 
@@ -126,26 +127,7 @@ class DownloadWorker:
         Фон не может спрашивать пользователя, поэтому отсутствие выбора -
         это тоже результат, который видно в списке очереди.
         """
-        target_id = row.get("target_storage_id")
-        if target_id:
-            storage = storages.get(conn, target_id)
-            if not storage or storage["status"] != "active":
-                return None, (f"хранилище отвязано или удалено "
-                              f"({(storage or {}).get('label', target_id)})")
-            if not storage.get("enabled", 1):
-                return None, f"хранилище отключено: {storage['label']}"
-            if not os.path.isdir(storage["path"]):
-                return None, f"нет хранилища: {storage['label']} не подключён"
-            return storage, None
-
-        storage = storages.resolve_target(
-            conn, settings, video_id=row.get("id"),
-            channel_id=row.get("channel_id"))
-        if storage and os.path.isdir(storage["path"]):
-            return storage, None
-        if storage:
-            return None, f"нет хранилища: {storage['label']} не подключён"
-        return None, "не выбрано хранилище - укажите его при постановке в очередь"
+        return storages.resolve_for_row(conn, row, settings)
 
     def _download_one(self, conn, row: dict, settings: dict) -> None:
         if not self._ffmpeg_warned and not downloader.find_ffmpeg():
@@ -210,7 +192,19 @@ class DownloadWorker:
             return
 
         if result.get("error"):
-            if downloader.unavailable_error(result["error"]):
+            classified = downloader.unavailable_error(result["error"])
+            needs_login = "требует вход" in str(result["error"])
+            # Mesh: участники могут дать файл, которого площадка больше не
+            # отдаёт (удалено) или не даёт без входа - пробуем, пока включён.
+            if (classified or needs_login) and settings.get("mesh_enabled"):
+                if mesh_fetch.restore(conn, row, settings, target["path"],
+                                      log=self._log, stop=self._stop,
+                                      reason=result["error"]):
+                    with self._lock:
+                        self._state["done"] += 1
+                        self._state["current"] = None
+                    return   # файл получен и проверен внутри попытки
+            if classified:
                 # Удалено/приватное: не «упадёт» и не пойдёт в «повторить
                 # упавшие» (бессмысленно) - строка помечается архивной,
                 # файл и последние данные остаются как были.
@@ -223,7 +217,7 @@ class DownloadWorker:
             repo.set_last_error(conn, row["id"], result["error"])
             with self._lock:
                 self._state["failed"] += 1
-                if "требует вход" in str(result["error"]):
+                if needs_login:
                     # Площандка просит сессию браузера - подсказываем про
                     # аккаунт (гаснет, как только куки появятся).
                     self._state["bot_hint"] = True
@@ -255,3 +249,4 @@ class DownloadWorker:
                      if kind == "video"), 0)
         self._log(f"Скачано: {row['title'] or row['key']} ({human_size(size)}, "
                   f"строк в индекс: {recorded})")
+
