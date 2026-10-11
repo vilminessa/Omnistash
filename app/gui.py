@@ -207,6 +207,8 @@ class Api:
         self._mesh_thread: threading.Thread | None = None
         self._announce_thread: threading.Thread | None = None
         self._nick_thread: threading.Thread | None = None
+        self._nick_dirty = False    # «ник меняли, пока объявляли»
+        self._nick_last: dict = {}  # последний результат объявления ника
         # UPnP-проброс (PortMapper): живёт только при включённом участии
         # и согласии на проброс; создаётся в _mesh_apply лениво.
         self._nat: mesh_nat.PortMapper | None = None
@@ -574,33 +576,51 @@ class Api:
     def _start_nick_announce(self) -> None:
         """Объявить ник в каталоге имён DHT (фоном, только при участии).
 
-        Даже если сеть сейчас не приняла адрес, запись ложится в
-        переобъявление узла (maintenance повторит сам) - тут важно
-        лишь не плодить потоки.
+        Смена ника во время объявления НЕ теряется: живой поток молча
+        отбрасывал новое значение (в профиле один ник, в DHT другой -
+        проверено на живой сессии). Теперь воркер после каждого
+        объявления перечитывает настройку и повторяет, пока ник не
+        стабилизируется.
         """
         if self._mesh_dht is None or not self._mesh_dht.running:
             return
-        config = self._current_settings()
-        nick = mesh_dht.clean_nick(config.get("mesh_nick"))
-        if not mesh_dht.nick_ok(nick):
-            return
+        self._nick_dirty = True
         if self._nick_thread is not None and self._nick_thread.is_alive():
-            return
+            return              # работающий воркер сам перечитает (dirty)
 
         def worker() -> None:
-            if not self._mesh_dht.running:
-                return
-            self._dht_prepare_announce()
-            if not self._mesh_dht.running:
-                return
-            accepted = self._mesh_dht.announce_name_sync(
-                nick, self._mesh_port)
-            if accepted:
-                self._log(f"DHT: ник «{nick}» объявлен (порт "
-                          f"{self._mesh_port}, приняли {accepted})")
-            else:
-                self._log(f"DHT: ник «{nick}» пока не объявился - повторит "
-                          "maintenance, когда сеть будет доступна")
+            announced = None
+            for _ in range(6):
+                self._nick_dirty = False
+                config = self._current_settings()
+                nick = mesh_dht.clean_nick(config.get("mesh_nick"))
+                if not mesh_dht.nick_ok(nick):
+                    self._log(f"DHT: ник «{nick}» не объявляется: не "
+                              "проходит правила (2-32 символа; буквы, цифры, "
+                              "пробел, дефис, подчёркивание)")
+                    return
+                if nick != announced:
+                    if not self._mesh_dht.running:
+                        return
+                    self._dht_prepare_announce()
+                    if not self._mesh_dht.running:
+                        return
+                    accepted = self._mesh_dht.announce_name_sync(
+                        nick, self._mesh_port)
+                    announced = nick
+                    self._nick_last = {"nick": nick,
+                                       "accepted": int(accepted or 0)}
+                    if accepted:
+                        self._log(f"DHT: ник «{nick}» объявлен (порт "
+                                  f"{self._mesh_port}, приняли {accepted})")
+                    else:
+                        self._log(f"DHT: ник «{nick}» пока не объявился - "
+                                  "повторит maintenance, когда сеть будет "
+                                  "доступна")
+                if not self._nick_dirty:
+                    return          # ник стабилен - всё объявлено
+            self._log("DHT: ник меняется слишком часто - сохраните его "
+                      "ещё раз, когда поиск успокоится")
 
         self._nick_thread = threading.Thread(
             target=worker, daemon=True, name="omnistash-mesh-nick")
@@ -613,6 +633,20 @@ class Api:
             return
 
         def worker() -> None:
+            # Страховка: ручные адреса (mesh_peers) - в таблицу контактов.
+            # Если multicast/DHT не помогает (заблокированный hello и
+            # т.п.), прямые запросы к известным адресам всё равно работают.
+            entries = [part.split("@", 1)[0].strip()
+                       for part in
+                       str(self._current_settings().get("mesh_peers") or "")
+                       .replace(";", ",").split(",") if part.strip()]
+            if entries:
+                try:
+                    added = self._mesh_dht.add_contacts_sync(entries)
+                    self._log(f"DHT: ручные адреса в таблице: "
+                              f"{added} из {len(entries)}")
+                except Exception:  # noqa: BLE001 - страховка не должна валить
+                    pass
             conn = self.db.conn
             rows = conn.execute(
                 """SELECT DISTINCT v.remote_id
@@ -2169,7 +2203,7 @@ class Api:
     # ------------------------------------------------------------------ #
 
     def peer_profile(self, request=None) -> dict:
-        """Мой профиль для диалога «Участники».
+        """Мой профиль для диалога «Участники» (+ статус для диагностики).
 
         Ключ идентичности создаётся здесь при первом открытии (а не при
         каждом старте окна): участнику, который никогда не включал mesh,
@@ -2178,13 +2212,25 @@ class Api:
         _key, pub = mesh_identity.get_identity()
         config = self._current_settings()
         nick = mesh_dht.clean_nick(config.get("mesh_nick"))
+        node = self._mesh_dht
+        status = {
+            "dht": bool(node is not None and node.running),
+            "nodes": len(node.table) if node is not None else 0,
+            "external_ip": (node.external_ip
+                            if node is not None else None) or "",
+            "hello_rx": int(getattr(node, "hello_rx", 0)
+                            if node is not None else 0),
+            "nick_last": dict(self._nick_last or {}),
+            "upnp": (self._nat.state().get("reason", "")
+                     if self._nat is not None else "выключен (настройка)"),
+        }
         return {"pubkey": pub.hex(),
                 "fingerprint": mesh_identity.fingerprint(pub),
                 "nick": nick,
                 "nick_valid": mesh_dht.nick_ok(nick),
                 "enabled": bool(config.get("mesh_enabled")),
-                "dht": bool(self._mesh_dht is not None
-                            and self._mesh_dht.running)}
+                "dht": status["dht"],
+                "status": status}
 
     def nick_search(self, request=None) -> dict:
         """Поиск участников по нику: каталог имён в DHT (B1).

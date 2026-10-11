@@ -417,11 +417,12 @@ class TestRestore(MeshNetCase):
         receiver = self.seed_receiver()
         row = {"id": receiver["vid"], "remote_id": "vid000000001",
                "title": "Клип"}
-        announcer = dht_mod.DHTNode(multicast=False, port=0)
-        listener = dht_mod.DHTNode(multicast=False, port=0)
-        import os as _os
-        announcer.own = _os.urandom(dht_mod.NODE_ID_LEN)
-        listener.own = _os.urandom(dht_mod.NODE_ID_LEN)
+        # own в конструкторе: подмена после создания оставила бы в
+        # RoutingTable устаревший id (самопроверка перестала бы ловить).
+        announcer = dht_mod.DHTNode(multicast=False, port=0,
+                                    own=os.urandom(dht_mod.NODE_ID_LEN))
+        listener = dht_mod.DHTNode(multicast=False, port=0,
+                                   own=os.urandom(dht_mod.NODE_ID_LEN))
         with mock.patch.object(dht_mod, "BOOTSTRAP", ()):
             pa = announcer.start_sync()
             pl = listener.start_sync()

@@ -354,14 +354,21 @@ class DHTNode:
 
     def __init__(self, log=None, port: int = 0,
                  multicast: bool = True,
-                 persist: str | None = None):
-        self.own = node_id()          # до выученного внешнего IP - временное
+                 persist: str | None = None,
+                 own: bytes | None = None):
+        # own - осознанно в конструкторе: подмена после создания оставит
+        # в RoutingTable устаревший id (самопроверка перестанет ловить
+        # собственные пакеты). В проде id меняется только через
+        # learn_external_ip - там таблица пересобирается.
+        self.own = own if own is not None else node_id()
         self.table = RoutingTable(self.own)
         self._log = log or (lambda message: None)
         self._port = int(port)
         self._multicast = multicast
         self._persist = persist
         self._transport = None
+        self._mc_transport = None    # приём multicast (фикс. MULTICAST_PORT)
+        self.hello_rx = 0            # сколько LAN-приветствий получили
         self._pending = {}
         self._peers = {}      # info_hash -> [(ip, port, ts)] - наши пиры
         self._mine = {}       # key -> (tcp-порт, срок переобъявления)
@@ -405,6 +412,32 @@ class DHTNode:
         transport, _ = await self._loop.create_datagram_endpoint(
             lambda: _Protocol(self), sock=sock)
         self._transport = transport
+        if self._multicast:
+            # ПРИЁМ multicast на фиксированном MULTICAST_PORT (38575):
+            # пакет доставляется сокету, привязанному к ПУНКТУ НАЗНАЧЕНИЯ,
+            # а все участники шлют приветствия именно на 38575 (свой
+            # mesh-порт у всех может быть разным!). Раньше мы слушали
+            # только свой mesh-порт - чужие приветствия не доходили ВООБЩЕ
+            # (ловушка пряталась за skip'ом теста hello) - обнаружение
+            # соседей по LAN было мертво.
+            try:
+                mc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                mc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                mc.bind(("", MULTICAST_PORT))
+                for iface in (local_ip(), "0.0.0.0"):
+                    try:
+                        membership = socket.inet_aton(MULTICAST_GROUP) + \
+                            socket.inet_aton(iface)
+                        mc.setsockopt(socket.IPPROTO_IP,
+                                      socket.IP_ADD_MEMBERSHIP, membership)
+                    except OSError:
+                        continue
+                transport, _ = await self._loop.create_datagram_endpoint(
+                    lambda: _Protocol(self), sock=mc)
+                self._mc_transport = transport
+            except OSError as exc:
+                self._log(f"DHT: multicast-приём недоступен "
+                          f"(порт {MULTICAST_PORT}): {exc}")
         if self._persist:
             for contact in load_peers(self._persist):
                 self.table.add(contact)
@@ -423,6 +456,10 @@ class DHTNode:
         self._transport = None
         if transport is not None:
             transport.close()
+        mc_transport = self._mc_transport
+        self._mc_transport = None
+        if mc_transport is not None:
+            mc_transport.close()
         for future in list(self._pending.values()):
             if not future.done():
                 future.cancel()
@@ -630,6 +667,9 @@ class DHTNode:
             # Любой запрос - уже контакт: узнали узла (и hello тоже).
             self.table.add(Contact(peer, addr[0], addr[1]))
         if query == b"omnistash-hello":
+            # контакт выше уже добавлен (id + адрес источника = его
+            # mesh-порт); просто считаем, что соседи живы в LAN.
+            self.hello_rx += 1
             return
         reply = {b"id": self.own}
         if query == b"ping":
@@ -867,10 +907,14 @@ class DHTNode:
         Локальная запись обязательна: узел обязан отдавать и свои
         значения (прямой запрос соседа и поиск на той же машине), иначе
         объявленное «невидимо» для всех, кто спрашивает нас самих.
+        Кладём ОБА адреса: LAN (соседям по сети достижим) и внешний
+        (интернету) - раньше вносился только внешний, и LAN-пиры,
+        спрашивая напрямую, получали мёртвый публичный адрес.
         """
         port = int(tcp_port)
         self._mine[key] = (port, time.time() + REANNOUNCE)
-        self._store_peer(key, self._announce_ip(), port)
+        for ip in self._announce_ips():
+            self._store_peer(key, ip, port)
         targets = await self.find_nodes(key)
         accepted = 0
         for contact in targets:
@@ -890,12 +934,52 @@ class DHTNode:
                 contact.last_seen = time.time()
         return accepted
 
-    def _announce_ip(self) -> str:
-        """Какой адрес объявляем под собой: внешний (выучен) или локальный."""
+    def _announce_ips(self) -> list:
+        """Адреса под собой: локальный (LAN) + внешний (интернет), без дублей.
+
+        LAN-соседям достижим только локальный адрес, интернету - только
+        внешний; кто спрашивает напрямую, должен получить достижимый для
+        СЕБЯ вариант (оба храним - выбор за спрашивающим, проба отсеет).
+        """
         with self._lock:
-            if self._external_ip:
-                return self._external_ip
-        return local_ip()
+            external = self._external_ip
+        local = local_ip()
+        ips = [local]
+        if external and external != local and not is_private_ip(external):
+            ips.append(external)
+        return ips
+
+    def add_contacts_sync(self, addrs: list, timeout: float = 20.0) -> int:
+        """Ручные адреса (mesh_peers) как постоянные контакты таблицы.
+
+        Страховка, когда multicast/DHT не помогает (заблокированный hello,
+        экзотическая сеть): ping берёт настоящий id узла, таблица узнаёт
+        соседа - прямые запросы и поиск по нику начинают работать.
+        """
+        if not self.running:
+            return 0
+        result = self._call(self._add_contacts(addrs), timeout)
+        return int(result or 0)
+
+    async def _add_contacts(self, addrs: list) -> int:
+        added = 0
+        for entry in (addrs or []):
+            host, sep, port = str(entry).rpartition(":")
+            if not sep or not host:
+                continue
+            try:
+                port = int(port)
+            except ValueError:
+                continue
+            if not (0 < port < 65536):
+                continue
+            reply = await self._query(host, port, "ping", {})
+            node = (reply or {}).get(b"id")
+            if isinstance(node, bytes) and len(node) == NODE_ID_LEN \
+                    and node != self.own:
+                self.table.add(Contact(node, host, port))
+                added += 1
+        return added
 
     # -- фоновые циклы -------------------------------------------------------
 

@@ -15,6 +15,7 @@
 
 import re
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
@@ -267,6 +268,27 @@ class TestPortMapper(RouterCase):
                                 "молча снимет его через аренду")
         mapper.stop()
         mapper.join(10)
+
+    def test_failed_setup_retries_without_log_spam(self):
+        """Неудача больше не приговор до перезапуска: попытки повторяются,
+        но одна и та же причина пишется в журнал один раз."""
+        logs = []
+        with mock.patch.object(nat.IGD, "discover",
+                               return_value=None) as discover:
+            mapper = nat.PortMapper(38574, log=logs.append, retry=0.05)
+            mapper.start()
+            deadline = time.time() + 3.0
+            while time.time() < deadline and discover.call_count < 3:
+                time.sleep(0.02)
+            self.assertGreaterEqual(discover.call_count, 3,
+                                    "попытка проброса должна повторяться")
+            mapper.stop()
+            mapper.join(5)
+        failures = [line for line in logs if "повтор" in line]
+        self.assertEqual(len(failures), 1,
+                         f"одна причина - одна строка, получили: {logs}")
+        self.assertIn("LAN", failures[0])
+        self.assertIn("UPnP", failures[0])
 
 
 class TestLocalIp(unittest.TestCase):

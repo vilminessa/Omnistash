@@ -12,6 +12,7 @@
 
 import os
 import socket
+import struct
 import tempfile
 import time
 import unittest
@@ -244,12 +245,14 @@ class DHTCase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-        self.a = dht.DHTNode(multicast=False, port=0)
-        self.b = dht.DHTNode(multicast=False, port=0)
         # Узлы должны РАЗЛИЧАТЬСЯ: общий профиль дал бы им один node_id,
         # и они приняли бы друг друга за себя (таблицы остались бы пусты).
-        self.a.own = os.urandom(dht.NODE_ID_LEN)
-        self.b.own = os.urandom(dht.NODE_ID_LEN)
+        # own задаём в конструкторе: подмена после создания оставила бы
+        # в RoutingTable устаревший id (самопроверка не ловит свои пакеты).
+        self.a = dht.DHTNode(multicast=False, port=0,
+                             own=os.urandom(dht.NODE_ID_LEN))
+        self.b = dht.DHTNode(multicast=False, port=0,
+                             own=os.urandom(dht.NODE_ID_LEN))
         self.port_a = self.a.start_sync()
         self.port_b = self.b.start_sync()
         self.addCleanup(self.a.stop_sync)
@@ -363,6 +366,29 @@ class DHTCase(unittest.TestCase):
                          {"127.0.0.1:5551", "127.0.0.1:5552"},
                          "разные адреса - разные участники")
 
+    def test_announce_stores_both_addresses(self):
+        """Под своим ключом лежат И локальный, И внешний адрес (P2).
+
+        Раньше клался только внешний: LAN-сосед, спрашивая напрямую,
+        получал публичный адрес, недостижимый из сети (UPnP может не
+        работать) - поиск по нику в одной LAN умирал.
+        """
+        self._wire()
+        self.a._external_ip = "203.0.113.9"     # выученный внешний
+        self.a.announce_sync("vid000000001", 4321)
+        peers = set(self.a._peers_for(dht.key_for("vid000000001")))
+        self.assertIn(("127.0.0.1", 4321), peers, "LAN-адрес обязателен")
+        self.assertIn(("203.0.113.9", 4321), peers, "внешний адрес обязателен")
+
+    def test_manual_contacts_added_via_ping(self):
+        """mesh_peers -> таблица контактов (страховка без multicast)."""
+        added = self.a.add_contacts_sync([f"127.0.0.1:{self.port_b}",
+                                          "кривой-адрес",
+                                          "127.0.0.1:1"])
+        self.assertEqual(added, 1, "живой адрес берётся, кривые отбрасываются")
+        self.assertTrue(any(c.node == self.b.own for c in self.a.table.all()),
+                        "настоящий id узла должен осесть в таблице")
+
     def test_start_stop_idempotent(self):
         self.assertEqual(self.a.port, self.port_a)
         self.assertEqual(self.a.start_sync(), self.port_a, "повтор - без вреда")
@@ -409,8 +435,16 @@ class TestPeerMemory(unittest.TestCase):
 
 class TestHello(unittest.TestCase):
     def test_multicast_discovery_or_skip(self):
-        """LAN-приветствие находит соседей; если multicast среда не даёт
-        (CI-раннер) - тест честно пропускается, а не фейлится."""
+        """Соседи видят друг друга по multicast; без multicast среда - skip.
+
+        Ключевой урок: приём идёт на MULTICAST_PORT (38575), куда все
+        УЗЛЫ И ШЛЮТ (свой mesh-порт у всех разный!) - раньше узлы
+        слушали только свой mesh-порт и чужие приветствия не принимали
+        ВООБЩЕ, а баг прятался за skip «multicast недоступен». Поэтому
+        сначала сами убеждаемся, что среда несёт multicast (слышим свой
+        же пакет на 38575), и только ПОТОМ требуем обнаружения: если
+        среда несёт, а узел соседа не увидел - это отказ КОДА, не skip.
+        """
         prof = tempfile.TemporaryDirectory()
         self.addCleanup(prof.cleanup)
         with mock.patch.object(identity, "profile_dir",
@@ -418,26 +452,61 @@ class TestHello(unittest.TestCase):
             identity.reset_cache()
             self.addCleanup(identity.reset_cache)
             with mock.patch.object(dht, "BOOTSTRAP", ()):
-                a = dht.DHTNode(port=0, multicast=True)
-                b = dht.DHTNode(port=0, multicast=True)
-                a.own = os.urandom(dht.NODE_ID_LEN)
-                b.own = os.urandom(dht.NODE_ID_LEN)
-                port_a = a.start_sync()
-                port_b = b.start_sync()
+                # Свой слушатель - честная проверка среды ДО теста узла.
+                probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 try:
-                    deadline = time.time() + 4
-                    while time.time() < deadline:
-                        if any(c.node == b.own for c in a.table.all()):
-                            break
-                        time.sleep(0.1)
-                    if not any(c.node == b.own for c in a.table.all()):
-                        self.skipTest("multicast недоступен в среде")
-                    self.assertTrue(
-                        any(c.node == a.own for c in b.table.all()))
-                    self.assertEqual(port_a > 0, True)
+                    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    probe.bind(("", dht.MULTICAST_PORT))
+                    mreq = struct.pack(
+                        "4s4s",
+                        socket.inet_aton(dht.MULTICAST_GROUP),
+                        socket.inet_aton("0.0.0.0"))
+                    probe.setsockopt(socket.IPPROTO_IP,
+                                     socket.IP_ADD_MEMBERSHIP, mreq)
+                except OSError:
+                    probe.close()
+                    self.skipTest("multicast-порт недоступен в среде")
+                probe.settimeout(0.5)
+
+                a = dht.DHTNode(port=0, multicast=True,
+                                own=os.urandom(dht.NODE_ID_LEN))
+                try:
+                    a.start_sync()
+                    # 1) среда несёт: ловим чьё-то приветствие на 38575.
+                    deadline = time.time() + 5
+                    heard = False
+                    while time.time() < deadline and not heard:
+                        try:
+                            probe.recvfrom(4096)
+                            heard = True
+                        except socket.timeout:
+                            pass
+                    if not heard:
+                        self.skipTest("multicast не расходится в среде")
+
+                    # 2) код принимает: поднимаем B - A обязан его увидеть.
+                    b = dht.DHTNode(port=0, multicast=True,
+                                    own=os.urandom(dht.NODE_ID_LEN))
+                    try:
+                        b.start_sync()
+                        deadline = time.time() + 5
+                        while time.time() < deadline:
+                            if any(c.node == b.own for c in a.table.all()):
+                                break
+                            time.sleep(0.1)
+                        self.assertTrue(
+                            any(c.node == b.own for c in a.table.all()),
+                            "приветствие дошло по сети (п.1 прошёл), но узел "
+                            "A его не принял - приём multicast сломан")
+                        self.assertGreater(a.hello_rx, 0,
+                                           "счётчик приветствий должен расти")
+                    finally:
+                        b.stop_sync()
+                        self.addCleanup(b.stop_sync)
                 finally:
+                    probe.close()
                     a.stop_sync()
-                    b.stop_sync()
+                    self.addCleanup(a.stop_sync)
 
 
 if __name__ == "__main__":

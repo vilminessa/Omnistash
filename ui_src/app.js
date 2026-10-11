@@ -604,6 +604,30 @@
     });
   }
 
+  function peerStatusText(p) {
+    // Строка диагностики: её и присылают вместо «не находит».
+    var s = p.status || {};
+    var parts = [];
+    parts.push("узлов в DHT: " + (s.nodes || 0));
+    if (s.external_ip) {
+      parts.push("внешний IP: " + s.external_ip);
+    } else if (s.dht) {
+      parts.push("внешний IP: ещё не выучен");
+    }
+    parts.push("UPnP: " + (s.upnp || "—"));
+    if (s.nick_last && s.nick_last.nick) {
+      parts.push("объявлен ник «" + s.nick_last.nick + "»" +
+        (s.nick_last.accepted > 0
+          ? " (приняли " + s.nick_last.accepted + ")"
+          : " (пока не приняли)"));
+    } else {
+      parts.push("ник ещё не объявлялся");
+    }
+    parts.push("LAN-приветствий получено: " + (s.hello_rx || 0) +
+      (s.hello_rx > 0 ? "" : " (соседи по сети не видны)"));
+    return parts.join(" · ");
+  }
+
   function renderPeerBody() {
     var p = peerState.profile;
     var html = "";
@@ -621,14 +645,17 @@
           ? (p.dht ? "" : " · участие включено, DHT поднимается…")
           : " · участие выключено: ник сохранится, но не объявится") +
         "</span></div>";
+      html += '<div class="muted" data-peer-status>' +
+        esc(peerStatusText(p)) + "</div>";
       html += '<div class="field"><div class="field-label">Мой отпечаток ключа</div>' +
         '<div class="field-hint">Ник НЕ доказывает личность - её доказывает ' +
         "отпечаток: сверьте его друг с другом при личном общении.</div>" +
         "<code>" + esc(p.fingerprint || "—") + "</code></div>";
       html += '<hr><div class="field"><div class="field-label">Найти участника по нику</div>' +
         '<div class="field-hint">Поиск точный (DHT не ищет по части ника): ' +
-        "впишите ник целиком. Один ник у разных ключей покажет всех - " +
-        "выбирайте по отпечатку.</div>" +
+        "собеседник набирает ваш ник <b>ровно</b> - как он сохранён здесь: " +
+        "<code>" + esc(p.nick || "—") + "</code>. Один ник у разных ключей " +
+        "покажет всех - выбирайте по отпечатку.</div>" +
         '<input type="text" id="peer-query" maxlength="32" placeholder="ник участника" value="' +
         esc(peerState.query) + '"> ' +
         '<button class="btn" data-peer="find"' +
@@ -642,7 +669,10 @@
       if (!peerState.results.length) {
         html += '<p class="muted">Ник не найден: либо такого ника нет у ' +
           "участников, либо запись ещё не объявилась (в сетях без своих " +
-          "серверов она живёт до суток и обновляется сама).</p>";
+          "серверов она живёт до суток и обновляется сама), либо адреса " +
+          "не проходят проверку. Поиск точный: наберите столь же, сколько " +
+          "собеседник сохранил у себя (регистр не важен) - сверьтесь со " +
+          "строкой «объявлен ник» выше и с его стороны.</p>";
       } else {
         html += '<div class="peer-list">' + peerState.results.map(function (r) {
           var probe = peerState.probes[r.addr];
@@ -4104,7 +4134,11 @@
         return Promise.resolve({
           pubkey: "ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34",
           fingerprint: "ab12 cd34 ef56 1379",
-          nick: "Иван Участников", nick_valid: true, enabled: true, dht: true
+          nick: "Иван Участников", nick_valid: true, enabled: true, dht: true,
+          status: { dht: true, nodes: 54, external_ip: "203.0.113.10",
+                    hello_rx: 3,
+                    nick_last: { nick: "Иван Участников", accepted: 7 },
+                    upnp: "проброс 38574 на 203.0.113.10" }
         });
       },
       nick_search: function (req) {

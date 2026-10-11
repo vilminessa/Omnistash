@@ -33,6 +33,7 @@ SOAP_TIMEOUT = 5.0
 GATEWAY_CANDIDATES = ("192.168.0.1", "192.168.1.1")
 DESCRIPTION_TIMEOUT = 3.0
 RENEW_INTERVAL = 1800.0     # обновление правила раз в 30 минут
+RETRY_INTERVAL = 300.0      # новая попытка проброса через 5 минут
 USER_AGENT = "OmnistashMesh/1.0"
 
 MSEARCH = (
@@ -237,11 +238,13 @@ class PortMapper:
     (причина пишется в итоговом состоянии для журнала).
     """
 
-    def __init__(self, port: int, log=None, renew: float = RENEW_INTERVAL):
+    def __init__(self, port: int, log=None, renew: float = RENEW_INTERVAL,
+                 retry: float = RETRY_INTERVAL):
         self.port = int(port)
         self.protocols = ("TCP", "UDP")
         self._log = log or (lambda message: None)
         self._renew = float(renew)
+        self._retry = float(retry)
         self.igd: IGD | None = None
         self.external_ip: str | None = None
         self.enabled = False
@@ -298,6 +301,34 @@ class PortMapper:
                     "external_ip": self.external_ip, "reason": self.reason}
 
     def _run(self) -> None:
+        """Попытки проброса с повторами: роутер/сеть поднимаются позже.
+
+        Раньше одна неудача означала «только LAN» до перезапуска
+        программы; теперь каждые RETRY_INTERVAL пробуем снова (лог —
+        только при СМЕНЕ состояния, не каждую попытку). Успешный
+        проброс переходит в продление; потеря правила - тоже не
+        приговор: идём на новую попытку, пока не выключат.
+        """
+        last_failure = None
+        while not self._stop.is_set():
+            if not self._setup():
+                reason = self.state()["reason"]
+                if reason != last_failure:
+                    last_failure = reason
+                    self._log(f"UPnP: {reason}; повтор через "
+                              f"{int(self._retry)}с")
+                if self._stop.wait(self._retry):
+                    return
+                continue
+            last_failure = None
+            if self._renew_until_gone() == "stopped":
+                return                      # вышли - снятие уже сделано
+            # Проброс потеряли: не сдаёмся до остановки маппера.
+            if self._stop.wait(self._retry):
+                return
+
+    def _setup(self) -> bool:
+        """Одна попытка: найти шлюз -> пробросить -> внешний адрес."""
         # 1. Найти шлюз.
         try:
             igd = IGD.discover()
@@ -306,11 +337,11 @@ class PortMapper:
         if igd is None:
             with self._lock:
                 self.enabled = False
-                self.reason = "роутер с UPnP не найден - только LAN"
-            self._log("UPnP: шлюз не найден, проброса нет (только LAN)")
-            return
+                self.reason = ("шлюз не найден (SSDP не отвечает) - "
+                               "проверьте UPnP на роутере; только LAN")
+            return False
         if self._stop.is_set():
-            return          # выключили, пока искали шлюз - проброса не было
+            return False      # выключили, пока искали шлюз
         with self._lock:
             self.igd = igd
         # 2. Пробросить оба протокола.
@@ -321,46 +352,55 @@ class PortMapper:
         external = igd.get_external_ip()
         with self._lock:
             self.external_ip = external
-            self.enabled = ok == len(self.protocols)
+            self.enabled = ok == len(self.protocols) and bool(external)
             if not self.enabled:
-                self.reason = (f"роутер отказал в пробросе "
-                               f"({ok}/{len(self.protocols)}) - только LAN")
-            elif not external:
-                self.enabled = False
-                self.reason = "внешний адрес роутер не сообщил - только LAN"
+                if ok != len(self.protocols):
+                    self.reason = (f"роутер отказал в пробросе "
+                                   f"({ok}/{len(self.protocols)}) - только LAN")
+                else:
+                    self.reason = "внешний адрес роутер не сообщил - только LAN"
             else:
                 self.reason = f"проброс {self.port} на {external}"
         if self.enabled:
             self._log(f"UPnP: проброс {self.port}/tcp+udp -> "
                       f"{external}:{self.port}")
-        else:
-            self._log(f"UPnP: {self.reason}")
-            return
-        # 3. Продление/проверка: роутер мог снять правило молча; при
-        # выключении - снимаем проброс сами (иначе роутер помнит наш порт).
+            return True
+        return False
+
+    def _renew_until_gone(self) -> str:
+        """Продление до выключения или потери правила.
+
+        'stopped' - выключили (проброс снят), 'lost' - потеряли (пойдём
+        на новую попытку).
+        """
+        igd = self.igd
         while True:
             if self._stop.wait(self._renew):
                 removed = 0
                 for protocol in self.protocols:
-                    if igd.remove_port(self.port, protocol):
+                    if igd is not None and igd.remove_port(self.port,
+                                                           protocol):
                         removed += 1
                 with self._lock:
                     self.enabled = False
                     self.reason = "проброс снят"
                 self._log(f"UPnP: проброс {self.port} снят "
                           f"({removed}/{len(self.protocols)})")
-                return
+                return "stopped"
             renewed = 0
             for protocol in self.protocols:
-                if igd.add_port(self.port, protocol):
+                if igd is not None and igd.add_port(self.port, protocol):
                     renewed += 1
             if renewed != len(self.protocols):
                 with self._lock:
                     self.enabled = False
-                    self.external_ip = igd.get_external_ip()
+                    try:
+                        self.external_ip = igd.get_external_ip()
+                    except Exception:  # noqa: BLE001 - шлюз уже молчит
+                        pass
                     self.reason = "проброс перестал обновляться - только LAN"
-                self._log("UPnP: проброс потерялся - работаем по LAN")
-                return
+                self._log("UPnP: проброс потерялся - попробуем снова")
+                return "lost"
 
     def announce_addr(self) -> str:
         """Адрес для DHT-заявлений: внешний (если проброс жив) или локальный."""

@@ -729,6 +729,48 @@ class TestPeerApi(GuiCase):
             {"addr": "127.0.0.1:38574", "pubkey": "ab" * 32})
         self.assertIn("настройках", res.get("error", ""))
 
+    def test_nick_change_during_announce_not_lost(self):
+        """Смена ника ПОКА идёт объявление - не теряется (P3).
+
+        Живой сбой: сохранён 'vilmi' -> объявляется ~50с -> сохранён
+        'vilm' -> старый код молча выходил («поток занят») -> в профиле
+        один ник, в DHT другой и поиск не находит.
+        """
+        api = self.make_api()
+        settings_box = {"mesh_enabled": True, "mesh_nick": "vilmi"}
+        api._current_settings = lambda: dict(settings_box)
+        calls = []
+
+        class SlowNode:
+            running = True
+            table = ["узел"]
+
+            def announce_name_sync(self, nick, port, **kwargs):
+                calls.append(nick)
+                time.sleep(0.3)          # объявляет «долго»
+                return 7
+
+            def ensure_ready(self, timeout=None):
+                return True
+
+            def learn_external_ip(self, ip):
+                return False
+
+            def stop_sync(self):
+                return None
+
+        api._mesh_dht = SlowNode()
+        api._start_nick_announce()       # объявляет 'vilmi'
+        time.sleep(0.05)
+        settings_box["mesh_nick"] = "vilm"
+        api._start_nick_announce()       # раньше это терялось!
+        self.assertIsNotNone(api._nick_thread)
+        api._nick_thread.join(timeout=10)
+        self.assertFalse(api._nick_thread.is_alive())
+        self.assertEqual(calls, ["vilmi", "vilm"],
+                         "второй ник обязан объявиться после первого")
+        self.assertEqual(api._nick_last, {"nick": "vilm", "accepted": 7})
+
 
 if __name__ == "__main__":
     unittest.main()
