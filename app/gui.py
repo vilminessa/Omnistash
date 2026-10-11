@@ -190,7 +190,8 @@ class Api:
         # участников» из карточки.
         config0 = self._current_settings()
         self._mesh_port = int(config0.get("mesh_port") or 38574)
-        self._mesh_server = mesh_server.PeerServer(self.db, self._mesh_port)
+        self._mesh_server = mesh_server.PeerServer(self.db, self._mesh_port,
+                                                   log=self._log)
         # UDP-узел DHT (тот же номер порта - другой транспорт): вход в
         # сеть через публичные bootstrap-роутеры + LAN-multicast; живые
         # соседи помнятся в профиле между запусками.
@@ -504,7 +505,8 @@ class Api:
             if self._mesh_dht.running:
                 self._mesh_dht.stop_sync()
             self._nat_stop()    # проброс старого порта нам больше не нужен
-            self._mesh_server = mesh_server.PeerServer(self.db, port)
+            self._mesh_server = mesh_server.PeerServer(self.db, port,
+                                                       log=self._log)
             self._mesh_dht = mesh_dht.DHTNode(
                 log=self._log, port=port,
                 persist=str(profile_dir() / mesh_dht.PEER_FILE))
@@ -525,8 +527,8 @@ class Api:
                 try:
                     opened = self._mesh_server.start()
                     self._log(f"Mesh-сервер поднят: порт {opened} "
-                              "(отдаёт только проверенные файлы)")
-                except OSError as exc:
+                              "(TLS, отдаёт только проверенные файлы)")
+                except Exception as exc:  # noqa: BLE001 - старта нет = LAN не тронут
                     self._log(f"Mesh-сервер не поднялся (порт {port}): {exc}")
             if not self._mesh_dht.running:
                 try:

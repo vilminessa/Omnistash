@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from app import db as db_mod, repo
+from app.mesh import channel as channel_mod
 from app.mesh import client, fetch as mesh_fetch, identity, manifest, server
 from app.mesh import verify as mesh_verify
 
@@ -25,12 +26,18 @@ class MeshNetCase(unittest.TestCase):
         # Идентичность - свежая на тестовый профиль (подписи манифестов).
         self._prof = tempfile.TemporaryDirectory()
         self.addCleanup(self._prof.cleanup)
-        patcher = mock.patch.object(identity, "profile_dir",
-                                    lambda: Path(self._prof.name))
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for module in (identity, channel_mod):
+            # Каждый модуль берёт profile_dir именем из paths - патчим
+            # оба: пины TLS (channel) не должны уезжать в настоящий профиль.
+            patcher = mock.patch.object(module, "profile_dir",
+                                        lambda: Path(self._prof.name))
+            patcher.start()
+            self.addCleanup(patcher.stop)
         identity.reset_cache()
         self.addCleanup(identity.reset_cache)
+        # Пины TLS-канала живут в профиле - между тестами не должны течь.
+        channel_mod.reset_cache()
+        self.addCleanup(channel_mod.reset_cache)
 
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -44,6 +51,29 @@ class MeshNetCase(unittest.TestCase):
     def tearDown(self):
         if self.server is not None:
             self.server.stop()
+
+    def raw_get(self, path: str, headers: dict | None = None,
+                addr: str | None = None):
+        """TLS-GET в обход пинов - прямая проверка ответов сервера.
+
+        (Пин-логику проверяет channel/collect_manifests отдельно; здесь
+        важны статусы, заголовки и тела.)
+        """
+        import http.client
+        import ssl
+        addr = addr or f"127.0.0.1:{self.port}"
+        host, _, port = addr.partition(":")
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        conn = http.client.HTTPSConnection(host, int(port), timeout=10,
+                                           context=context)
+        try:
+            conn.request("GET", path, headers=headers or {})
+            response = conn.getresponse()
+            return response.status, response.headers, response.read()
+        finally:
+            conn.close()
 
     def seed_holder(self) -> dict:
         """Узел А: файл лежит, хеш известен, строка синкована."""
@@ -86,10 +116,9 @@ class MeshNetCase(unittest.TestCase):
 class TestServer(MeshNetCase):
     def test_manifest_is_signed_and_truthful(self):
         holder = self.seed_holder()
-        import urllib.request
-        url = f"http://127.0.0.1:{self.port}/manifest/vid000000001"
-        with urllib.request.urlopen(url, timeout=10) as response:
-            item = json.loads(response.read())
+        status, _headers, body = self.raw_get("/manifest/vid000000001")
+        self.assertEqual(status, 200, "манифест должен отдаваться по TLS")
+        item = json.loads(body)
         self.assertIsNone(manifest.verify(item), "манифест должен подписываться")
         self.assertEqual(item["sha256"], holder["digest"])
         self.assertEqual(item["synced_at"], "2026-10-11T09:00:00")
@@ -105,39 +134,49 @@ class TestServer(MeshNetCase):
                          size=7, mtime=1.0, digest=None)
         self.server = server.PeerServer(self.db_a, port=0)
         self.port = self.server.start()
-        import urllib.error
-        with self.assertRaises(urllib.error.HTTPError) as caught:
-            urllib.request.urlopen(
-                f"http://127.0.0.1:{self.port}/manifest/vid000000009",
-                timeout=10)
-        self.assertEqual(caught.exception.code, 404)
-        caught.exception.close()   # тело отказа не читаем - fp закрыть
+        status, _headers, body = self.raw_get("/manifest/vid000000009")
+        self.assertEqual(status, 404)
+        self.assertIn("нет проверенного файла",
+                      json.loads(body).get("error", ""))
 
     def test_file_with_and_without_range(self):
         holder = self.seed_holder()
-        import urllib.request
-        base = f"http://127.0.0.1:{self.port}/file/vid000000001"
-        with urllib.request.urlopen(base, timeout=10) as response:
-            whole = response.read()
-        self.assertEqual(len(whole), os.path.getsize(holder["path"]))
+        total = os.path.getsize(holder["path"])
+        status, _headers, whole = self.raw_get("/file/vid000000001")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(whole), total)
 
-        request = urllib.request.Request(base, headers={"Range": "bytes=5-9"})
-        with urllib.request.urlopen(request, timeout=10) as response:
-            self.assertEqual(response.status, 206)
-            self.assertEqual(response.headers.get("Content-Range"),
-                             f"bytes 5-9/{os.path.getsize(holder['path'])}")
-            piece = response.read()
+        status, headers, piece = self.raw_get("/file/vid000000001",
+                                              headers={"Range": "bytes=5-9"})
+        self.assertEqual(status, 206)
+        self.assertEqual(headers.get("Content-Range"),
+                         f"bytes 5-9/{total}")
         self.assertEqual(piece, whole[5:10])
 
     def test_unknown_paths_404(self):
         self.seed_holder()
-        import urllib.error
         for path in ("/manifest/nope", "/file/nope", "/whatever"):
-            with self.assertRaises(urllib.error.HTTPError) as caught:
-                urllib.request.urlopen(
-                    f"http://127.0.0.1:{self.port}{path}", timeout=10)
-            self.assertEqual(caught.exception.code, 404, path)
-            caught.exception.close()   # fp отказа закрываем сразу
+            status, _headers, _body = self.raw_get(path)
+            self.assertEqual(status, 404, path)
+
+    def test_plaintext_client_gets_nothing(self):
+        """Старый клиент (http без TLS) не должен получить ни байта."""
+        self.seed_holder()
+        import socket
+        with socket.create_connection(("127.0.0.1", self.port),
+                                      timeout=5) as probe:
+            probe.sendall(b"GET /manifest/vid000000001 HTTP/1.1\r\n"
+                          b"Host: x\r\n\r\n")
+            probe.settimeout(3)
+            try:
+                data = probe.recv(64)
+            except OSError:
+                data = b""
+        self.assertTrue(not data or not data.startswith(b"HTTP/"),
+                        f"plaintext не должен получать HTTP: {data[:20]!r}")
+        # Сервер после такой попытки жив и отдаёт по TLS.
+        status, _h, _b = self.raw_get("/manifest/vid000000001")
+        self.assertEqual(status, 200)
 
 
 class TestClient(MeshNetCase):
@@ -147,6 +186,45 @@ class TestClient(MeshNetCase):
             "vid000000001", [self.seed_receiver()["addr"], "127.0.0.1:1"])
         self.assertEqual(len(pairs), 1, "мёртвый адрес просто выпадает")
         self.assertIsNone(manifest.verify(pairs[0][1]))
+
+    def test_expect_mismatch_rejected_before_request(self):
+        """Пин не совпал: запрос к серверу НЕ уходит (спайк: hits=0)."""
+        self.seed_holder()
+        addr = self.seed_receiver()["addr"]
+        from app.mesh import server as server_mod
+        hits: list = []
+        original = server_mod._Handler.do_GET
+
+        def counting(handler_self, *args, **kwargs):
+            hits.append(handler_self.path)
+            return original(handler_self, *args, **kwargs)
+
+        with mock.patch.object(server_mod._Handler, "do_GET", counting):
+            pairs = client.collect_manifests(
+                "vid000000001", [addr], expects={addr: "bb" * 32})
+        self.assertEqual(pairs, [], "чужой пин - пара не должна собраться")
+        self.assertEqual(hits, [], "сервер не должен увидеть запрос вообще")
+
+    def test_expect_match_returns_manifest_over_tls(self):
+        self.seed_holder()
+        addr = self.seed_receiver()["addr"]
+        own_pub = identity.get_identity()[1].hex()
+        pairs = client.collect_manifests(
+            "vid000000001", [addr], expects={addr: own_pub})
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0][1]["pubkey"], own_pub,
+                         "канал и манифест - один ключ")
+        # Пин первого контакта запомнился в профиле.
+        self.assertEqual(channel_mod.pin_get(addr), own_pub)
+
+    def test_manifest_key_must_match_channel(self):
+        """Манифест подписан не тем ключом, что открыл канал - отбрасывается."""
+        self.seed_holder()
+        addr = self.seed_receiver()["addr"]
+        with mock.patch.object(channel_mod, "verify_peer",
+                               return_value="ff" * 32):
+            pairs = client.collect_manifests("vid000000001", [addr])
+        self.assertEqual(pairs, [], "несовпадение ключа канала и подписи")
 
     def test_pick_digest_majority_and_filters(self):
         good = manifest.build("vid000000001", "sha256:" + "aa" * 32, 10)

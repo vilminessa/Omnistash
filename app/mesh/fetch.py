@@ -36,19 +36,38 @@ def restore(conn, row: dict, settings: dict, dest_dir, *,
         log(message)
         return False
 
-    addrs = [a.strip() for a in
-             str(settings.get("mesh_peers") or "").replace(";", ",").split(",")
-             if a.strip()]
+    # Адреса участников: "ip:port" или "ip:port@ключ" (ключ - сразу пин
+    # для TLS-канала: запрос id уйдёт только по подтверждённой личности).
+    expects: dict = {}
+    addrs: list = []
+    for entry in str(settings.get("mesh_peers") or "") \
+            .replace(";", ",").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        addr, _, expect = entry.partition("@")
+        addr = addr.strip()
+        if not addr:
+            continue
+        addrs.append(addr)
+        if expect.strip():
+            expects[addr] = expect.strip().lower()
     banned = feedback.banned_set(conn)
     # DHT: участники, заранее объявившие этот файл (плюс ручные адреса).
-    # Значение несёт20-байтный срез хеша - его и сверяем со стоп-листом.
+    # Значение несёт 20-байтный срез хеша - его и сверяем со стоп-листом;
+    # подписанный ключ из записи становится ожидаемым ключом канала.
     node = dht.current()
     if node is not None and node.running:
         banned_head = {b[len("sha256:"):][:40] for b in banned}
         for found in node.lookup_sync(row["remote_id"]):
             addr = str(found.get("addr") or "")
             head = bytes(found.get("hash") or b"").hex()
-            if not addr or addr in addrs or head in banned_head:
+            if not addr or head in banned_head:
+                continue
+            pubkey = str(found.get("pubkey") or "").strip().lower()
+            if pubkey:
+                expects.setdefault(addr, pubkey)
+            if addr in addrs:
                 continue
             addrs.append(addr)
     if not addrs:
@@ -69,7 +88,8 @@ def restore(conn, row: dict, settings: dict, dest_dir, *,
     log(f"Mesh: ищу «{row.get('title') or row.get('key')}» "
         f"у {len(addrs)} адресатов" + (f" (причина: {reason})" if reason else ""))
     try:
-        pairs = client.collect_manifests(row["remote_id"], addrs)
+        pairs = client.collect_manifests(row["remote_id"], addrs,
+                                         expects=expects or None)
     except Exception as exc:  # noqa: BLE001 - сбой не должен ронять поток
         return give_up(f"Mesh: манифесты не получены: {exc}")
 
@@ -108,7 +128,10 @@ def restore(conn, row: dict, settings: dict, dest_dir, *,
     log(f"Mesh: переношу с {peer} - {decision['level']}, "
         f"подтверждений {decision['consensus']}")
     try:
-        client.fetch(row["remote_id"], peer, part, stop=stop)
+        # expect = ключ манифеста, по которому выбрали адресата: канал
+        # должен открыться именно им (TOFU-пин подтвердится снаружи).
+        client.fetch(row["remote_id"], peer, part, stop=stop,
+                     expect=str(item.get("pubkey") or "") or None)
     except client.MeshCancelled:
         return give_up("Mesh: перенос остановлен")
     except Exception as exc:  # noqa: BLE001

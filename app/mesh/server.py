@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import json
 import socket
+import ssl
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import channel as channel_mod
 from . import manifest as manifest_mod
 
 # Отдаём только байты: тела файлов чанками, без чтения в память целиком.
@@ -24,20 +26,53 @@ CHUNK = 256 * 1024
 
 
 class _Server(ThreadingHTTPServer):
-    """TCPServer без socket.getfqdn в server_bind.
+    """TCPServer без socket.getfqdn в server_bind + TLS на приёме.
 
     Стандартный server_bind зовёт getfqdn(адрес): на Windows обратный
     DNS для 0.0.0.0 висит на таймаутах - замер на этой машине: 17 секунд
     на ПОДЪЁМ сервера. Имя хоста участнику не нужно - только порт.
+
+    Каждое входящее соединение заворачивается в TLS (см. mesh.channel):
+    handshake идёт здесь, с таймаутом - медленный/чужой клиент не держит
+    поток; сбой рукопожатия не валит сервер (handle_error глушит).
     """
 
     allow_reuse_address = True
+    ctx: ssl.SSLContext | None = None
+    log = staticmethod(lambda message: None)
 
     def server_bind(self) -> None:
         if self.allow_reuse_address:
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.socket.bind(self.server_address)
         self.server_address = self.socket.getsockname()
+
+    def get_request(self):
+        sock, addr = super().get_request()
+        try:
+            sock.settimeout(channel_mod.HANDSHAKE_TIMEOUT)
+            tls = self.ctx.wrap_socket(sock, server_side=True)
+            tls.settimeout(None)       # раздача файлов - без лимита
+            return tls, addr
+        except (OSError, ssl.SSLError) as exc:
+            try:
+                sock.close()
+            except OSError:
+                pass
+            raise
+
+    def handle_error(self, request, client_address) -> None:
+        """Отказ handshake (старый клиент, мусор) - не авария сервера.
+
+        Ошибки внутри do_GET ловятся самим обработчиком и уходят
+        участнику как HTTP-ответ; сюда попадает только то, что случилось
+        до/вне запроса - печатаем одну строку вместо стектрейса.
+        """
+        import sys
+        error = sys.exc_info()[1]
+        if error is not None:
+            self.log(f"Mesh-сервер: соединение от {client_address[0]} "
+                     f"отклонено: {type(error).__name__}: {error}")
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -157,11 +192,12 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class PeerServer:
-    """HTTP-сервер участника: start() - фоном, stop() - дожидается."""
+    """HTTPS-сервер участника: start() - фоном, stop() - дожидается."""
 
-    def __init__(self, database, port: int = 0):
+    def __init__(self, database, port: int = 0, log=None):
         self._database = database
         self._port = int(port)
+        self._log = log or (lambda message: None)
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -181,9 +217,19 @@ class PeerServer:
             return self.port
         handler = type("_BoundHandler", (_Handler,),
                        {"database": self._database})
-        self._httpd = _Server(("0.0.0.0", self._port), handler)
-        self._httpd.daemon_threads = True
-        self._thread = threading.Thread(target=self._httpd.serve_forever,
+        httpd = _Server(("0.0.0.0", self._port), handler)
+        httpd.daemon_threads = True
+        httpd.log = self._log
+        # TLS обязателен: материал эфемерный (память), аттестация - в
+        # сертификате; отказ здесь = сервер не поднимется (журнал скажет).
+        try:
+            httpd.ctx = channel_mod.server_context()
+        except Exception as exc:  # noqa: BLE001 - нет идентичности/профиля
+            httpd.server_close()
+            self._log(f"Mesh-сервер не поднялся (нет TLS-материала): {exc}")
+            raise
+        self._httpd = httpd
+        self._thread = threading.Thread(target=httpd.serve_forever,
                                         daemon=True,
                                         name="omnistash-mesh-server")
         self._thread.start()
