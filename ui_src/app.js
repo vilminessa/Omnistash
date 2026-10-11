@@ -587,6 +587,88 @@
     renderFfmpegBody();
   }
 
+  /* --------------------- Участники (B1): профиль и поиск ------------- */
+
+  var peerState = { profile: null, query: "", results: null, error: null,
+                    busy: false, probes: {} };
+
+  function openPeerOverlay() {
+    $("peer-overlay").hidden = false;
+    renderPeerBody();
+    call("peer_profile").then(function (res) {
+      peerState.profile = res || null;
+      renderPeerBody();
+    }).catch(function () {
+      peerState.error = "Не удалось прочитать профиль";
+      renderPeerBody();
+    });
+  }
+
+  function renderPeerBody() {
+    var p = peerState.profile;
+    var html = "";
+    if (!p) {
+      html = '<p class="muted">Читаю профиль…</p>';
+    } else {
+      html += '<div class="field"><div class="field-label">Мой никнейм</div>' +
+        '<div class="field-hint">Объявляется в каталоге имён DHT: другие ' +
+        "участники, знающие ник, найдут ваш адрес и ключ (списка ваших " +
+        "видео в записи нет). Регистр не важен; старое имя живёт до суток.</div>" +
+        '<input type="text" id="peer-nick" maxlength="32" value="' +
+        esc(p.nick || "") + '" placeholder="например Иван Петров"> ' +
+        '<button class="btn primary" data-peer="nick-save">Сохранить и объявить</button>' +
+        '<span class="muted">' + (p.enabled
+          ? (p.dht ? "" : " · участие включено, DHT поднимается…")
+          : " · участие выключено: ник сохранится, но не объявится") +
+        "</span></div>";
+      html += '<div class="field"><div class="field-label">Мой отпечаток ключа</div>' +
+        '<div class="field-hint">Ник НЕ доказывает личность - её доказывает ' +
+        "отпечаток: сверьте его друг с другом при личном общении.</div>" +
+        "<code>" + esc(p.fingerprint || "—") + "</code></div>";
+      html += '<hr><div class="field"><div class="field-label">Найти участника по нику</div>' +
+        '<div class="field-hint">Поиск точный (DHT не ищет по части ника): ' +
+        "впишите ник целиком. Один ник у разных ключей покажет всех - " +
+        "выбирайте по отпечатку.</div>" +
+        '<input type="text" id="peer-query" maxlength="32" placeholder="ник участника" value="' +
+        esc(peerState.query) + '"> ' +
+        '<button class="btn" data-peer="find"' +
+        (peerState.busy ? " disabled" : "") + ">" +
+        (peerState.busy ? "Ищу…" : "Найти") + "</button></div>";
+    }
+    if (peerState.error) {
+      html += '<div class="field-hint warn">' + esc(peerState.error) + "</div>";
+    }
+    if (peerState.results) {
+      if (!peerState.results.length) {
+        html += '<p class="muted">Ник не найден: либо такого ника нет у ' +
+          "участников, либо запись ещё не объявилась (в сетях без своих " +
+          "серверов она живёт до суток и обновляется сама).</p>";
+      } else {
+        html += '<div class="peer-list">' + peerState.results.map(function (r) {
+          var probe = peerState.probes[r.addr];
+          var row = '<div class="peer-row"><div><b>' + esc(r.nick) + "</b>" +
+            '<div class="muted">' + esc(r.fingerprint) +
+            (r.pinned ? " · ключ запомнен" : "") + "</div>" +
+            '<div class="muted">' + esc(r.addr) + "</div></div><div>" +
+            '<button class="btn ghost" data-peer="probe" data-addr="' +
+            esc(r.addr) + '" data-pub="' + esc(r.pubkey) + '">Проверить адрес</button>';
+          if (probe) {
+            row += probe.error
+              ? '<div class="field-hint warn">' + esc(probe.error) + "</div>"
+              : '<div class="field-hint">канал открыт, ключ ' +
+                esc(probe.fingerprint) +
+                (probe.new_pin ? " (первый контакт - запомнен)" : "") + "</div>";
+          }
+          return row + "</div></div>";
+        }).join("") + "</div>";
+        html += '<p class="muted">«Проверить адрес» открывает шифрованный ' +
+          "канал и сверяет ключ участника - никаких запросов о видео. " +
+          "После проверки адрес работает и в восстановлении файлов.</p>";
+      }
+    }
+    $("peer-body").innerHTML = html;
+  }
+
   function updateFfmpegOffer() {
     // Предложение поставить ffmpeg (как в Synfronia): при каждом запуске,
     // пока его нет, - но сначала стартовый диалог «Где хранить видео?».
@@ -2532,6 +2614,7 @@
       document.querySelectorAll("#settings-body [data-action]"), function (btn) {
         btn.addEventListener("click", function () {
           if (btn.dataset.action === "ffmpeg-install") openFfmpegOverlay();
+          if (btn.dataset.action === "peer-dialog") openPeerOverlay();
           if (btn.dataset.action === "refresh-meta") {
             call("refresh_meta_start").then(function (res) {
               if (!res) return;
@@ -3324,6 +3407,57 @@
       $("ffmpeg-overlay").hidden = true;
     }
     $("ffmpeg-close").addEventListener("click", dismissFfmpegOffer);
+    // Участники (B1): кнопки диалога - делегированием (тело перерисовывается).
+    $("peer-close").addEventListener("click", function () {
+      $("peer-overlay").hidden = true;
+    });
+    $("peer-body").addEventListener("click", function (event) {
+      var btn = event.target && event.target.closest
+        ? event.target.closest("[data-peer]") : null;
+      if (!btn) return;
+      var action = btn.dataset.peer;
+      if (action === "nick-save") {
+        var nick = ($("peer-nick") || {}).value || "";
+        call("save_setting", { key: "mesh_nick", value: nick })
+          .then(function (res) {
+            if (res && res.error) { toast(res.error, true); return; }
+            toast("Ник сохранён" +
+              (state.settings.mesh_enabled ? " и объявлен в каталоге" : ""));
+            openPeerOverlay();       // перечитать профиль (мог измениться)
+          });
+        return;
+      }
+      if (action === "find") {
+        peerState.query = ($("peer-query") || {}).value || "";
+        peerState.busy = true;
+        peerState.error = null;
+        renderPeerBody();
+        call("nick_search", { query: peerState.query }).then(function (res) {
+          peerState.busy = false;
+          if (!res || res.error) {
+            peerState.error = res && res.error ? res.error : "Поиск не удался";
+            peerState.results = null;
+          } else {
+            peerState.results = res.results || [];
+          }
+          renderPeerBody();
+        }).catch(function () {
+          peerState.busy = false;
+          peerState.error = "Поиск не удался (сеть)";
+          renderPeerBody();
+        });
+        return;
+      }
+      if (action === "probe") {
+        var addr = btn.dataset.addr;
+        call("nick_probe", { addr: addr, pubkey: btn.dataset.pub })
+          .then(function (res) {
+            peerState.probes[addr] = (res && res.error)
+              ? { error: res.error } : (res || { error: "нет ответа" });
+            renderPeerBody();
+          });
+      }
+    });
     $("ffmpeg-body").addEventListener("click", function (event) {
       var btn = event.target && event.target.closest
         ? event.target.closest("[data-ffmpeg]") : null;
@@ -3541,6 +3675,7 @@
       col_views: true, col_likes: true, col_comments: true, col_sync: true,
       sort_col: "", sort_dir: "desc",
       mesh_enabled: false, mesh_peers: "", mesh_port: 38574, mesh_upnp: true,
+      mesh_nick: "",
       dest_dir: "D:\\видео\\downloads",
       output_template: "%(channel)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s",
       quality: "high", subtitles: "none", transcode: "none",
@@ -3735,6 +3870,19 @@
               "настройки роутера; внешний адрес берём у него же. Без " +
               "проброса участникам доступна только ваша сеть (LAN).",
         default: true },
+      { key: "mesh_nick", type: "str", section: "Mesh",
+        label: "Ваш никнейм",
+        hint: "Объявляется в каталоге имён DHT (ник, адрес, ключ - без " +
+              "списка видео). Регистр не важен, 2-32 символа; старое " +
+              "имя живёт до суток. Пусто = не объявляться.",
+        default: "" },
+      { key: "_peers", type: "action", section: "Mesh",
+        label: "Участники",
+        hint: "Мой никнейм и отпечаток ключа, поиск участников по нику " +
+              "(каталог в DHT) и проверка адреса.",
+        action: "peer-dialog",
+        action_label: "Профиль и поиск участников…",
+        transient: true, default: [] },
       { key: "dest_dir", type: "path", section: "Загрузка",
         label: "Куда скачивать", hint: "нет - заменено хранилищами",
         hidden: true, default: "D:\\видео\\downloads" },
@@ -3951,6 +4099,39 @@
       },
       mesh_reject: function () {
         return Promise.resolve({ ok: true, removed: true });
+      },
+      peer_profile: function () {
+        return Promise.resolve({
+          pubkey: "ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34",
+          fingerprint: "ab12 cd34 ef56 1379",
+          nick: "Иван Участников", nick_valid: true, enabled: true, dht: true
+        });
+      },
+      nick_search: function (req) {
+        var nick = ((req || {}).query || "Участник").slice(0, 32);
+        return Promise.resolve({
+          ok: true, query: nick,
+          results: [
+            { nick: nick, addr: "192.168.1.5:38574",
+              pubkey: "cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34",
+              fingerprint: "cd34 beef 1122 3344", pinned: false,
+              announced: 1760000000 },
+            // Второй кандидат - та же демонстрация коллизии ника.
+            { nick: nick, addr: "203.0.113.7:38574",
+              pubkey: "ef56ef56ef56ef56ef56ef56ef56ef56ef56ef56ef56ef56ef56ef56ef56ef56",
+              fingerprint: "ef56 0000 dead beef", pinned: true,
+              announced: 1760000100 }
+          ]
+        });
+      },
+      nick_probe: function (req) {
+        var pinned = (req || {}).addr === "203.0.113.7:38574";
+        return Promise.resolve({
+          ok: true,
+          identity: (req || {}).pubkey || "",
+          fingerprint: pinned ? "ef56 0000 dead beef" : "cd34 beef 1122 3344",
+          pinned: pinned, new_pin: !pinned
+        });
       },
       enqueue: function (req) {
         return Promise.resolve({ queued: ((req || {}).ids || []).length });

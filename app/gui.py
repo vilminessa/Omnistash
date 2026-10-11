@@ -31,8 +31,11 @@ from . import settings_schema, sources
 from . import storages as storages_mod
 from . import verify as verify_mod
 from .mesh import dht as mesh_dht
+from .mesh import channel as mesh_channel
+from .mesh import client as mesh_client
 from .mesh import feedback as mesh_feedback
 from .mesh import fetch as mesh_fetch
+from .mesh import identity as mesh_identity
 from .mesh import nat as mesh_nat
 from .mesh import server as mesh_server
 from .db import SYNC_MODES, Database
@@ -203,6 +206,7 @@ class Api:
         self._mesh_stop = threading.Event()
         self._mesh_thread: threading.Thread | None = None
         self._announce_thread: threading.Thread | None = None
+        self._nick_thread: threading.Thread | None = None
         # UPnP-проброс (PortMapper): живёт только при включённом участии
         # и согласии на проброс; создаётся в _mesh_apply лениво.
         self._nat: mesh_nat.PortMapper | None = None
@@ -537,6 +541,7 @@ class Api:
                     self._log(f"DHT-узел поднят: udp {udp} "
                               "(вход через публичные роутеры + LAN)")
                     self._start_announce()
+                    self._start_nick_announce()
                 except RuntimeError as exc:
                     self._log(f"DHT-узел не поднялся: {exc}")
         else:
@@ -554,6 +559,49 @@ class Api:
         if mapper is not None:
             mapper.stop()
 
+    def _announce_addr(self) -> str:
+        """Адрес для всех DHT-заявлений: внешний (проброс жив) или LAN."""
+        mapper = self._nat
+        if mapper is not None:
+            # Проброс у роутера ещё уточняется: дождаться итога, чтобы
+            # объявить внешний адрес, а не локальный (без проброса он
+            # адресатам недоступен - announce_addr честно вернёт LAN).
+            mapper.wait(15.0)
+            return mapper.announce_addr()
+        return f"{mesh_dht.local_ip()}:{self._mesh_port}"
+
+    def _start_nick_announce(self) -> None:
+        """Объявить ник в каталоге имён DHT (фоном, только при участии).
+
+        Даже если сеть сейчас не приняла значение, оно ложится в
+        переобъявление узла (maintenance повторит сам) - тут важно
+        лишь не плодить потоки.
+        """
+        if self._mesh_dht is None or not self._mesh_dht.running:
+            return
+        config = self._current_settings()
+        nick = mesh_dht.clean_nick(config.get("mesh_nick"))
+        if not mesh_dht.nick_ok(nick):
+            return
+        if self._nick_thread is not None and self._nick_thread.is_alive():
+            return
+
+        def worker() -> None:
+            addr = self._announce_addr()
+            if not self._mesh_dht.running:
+                return
+            accepted = self._mesh_dht.announce_name_sync(nick, addr)
+            if accepted:
+                self._log(f"DHT: ник «{nick}» объявлен (адрес {addr}, "
+                          f"приняли {accepted})")
+            else:
+                self._log(f"DHT: ник «{nick}» пока не объявился - повторит "
+                          "maintenance, когда сеть будет доступна")
+
+        self._nick_thread = threading.Thread(
+            target=worker, daemon=True, name="omnistash-mesh-nick")
+        self._nick_thread.start()
+
     def _start_announce(self) -> None:
         """Объявить имеющиеся файлы в DHT - фоном, один раз за включение."""
         if (self._announce_thread is not None
@@ -568,15 +616,7 @@ class Api:
                     WHERE f.kind='video' AND f.missing=0
                       AND f.hash IS NOT NULL AND v.platform <> 'local'
                     ORDER BY f.id""").fetchall()
-            mapper = self._nat
-            if mapper is not None:
-                # Проброс у роутера ещё уточняется: дождаться итога, чтобы
-                # объявить внешний адрес, а не локальный (без проброса он
-                # адресатам недоступен - announce_addr честно вернёт LAN).
-                mapper.wait(15.0)
-                addr = mapper.announce_addr()
-            else:
-                addr = f"{mesh_dht.local_ip()}:{self._mesh_port}"
+            addr = self._announce_addr()
             done = 0
             for row in rows:
                 if not self._mesh_dht.running:
@@ -620,6 +660,10 @@ class Api:
         if key in ("mesh_enabled", "mesh_port", "mesh_upnp"):
             # Согласие дано/снято или сменился порт - сервер тут же следует.
             self._mesh_apply()
+        if key == "mesh_nick":
+            # Смена ника объявляется сразу (при включённом участии):
+            # другие участники увидят новый адрес без перезапуска.
+            self._start_nick_announce()
         if key in ("scan_interval_min", "sync_interval_min"):
             # Смена интервала переносит срок сразу: не ждём старого.
             self.sched.apply_settings(
@@ -2116,6 +2160,98 @@ class Api:
                   + remove_note)
         return {"ok": True, "title": row["title"], "removed": not remove_note,
                 "hash": shown}
+
+    # ------------------------------------------------------------------ #
+    #  B1: профиль участника и поиск по нику (каталог имён DHT)
+    # ------------------------------------------------------------------ #
+
+    def peer_profile(self, request=None) -> dict:
+        """Мой профиль для диалога «Участники».
+
+        Ключ идентичности создаётся здесь при первом открытии (а не при
+        каждом старте окна): участнику, который никогда не включал mesh,
+        файл ключа не нужен.
+        """
+        _key, pub = mesh_identity.get_identity()
+        config = self._current_settings()
+        nick = mesh_dht.clean_nick(config.get("mesh_nick"))
+        return {"pubkey": pub.hex(),
+                "fingerprint": mesh_identity.fingerprint(pub),
+                "nick": nick,
+                "nick_valid": mesh_dht.nick_ok(nick),
+                "enabled": bool(config.get("mesh_enabled")),
+                "dht": bool(self._mesh_dht is not None
+                            and self._mesh_dht.running)}
+
+    def nick_search(self, request=None) -> dict:
+        """Поиск участников по нику: каталог имён в DHT (B1).
+
+        Точное совпадение без регистра - DHT не умеет частичных
+        запросов (UI об этом пишет). Коллизии (одни ник у разных
+        ключей) отдаются списком: выбирают по отпечатку, а не по
+        написанию ника. Поиск идёт по сети - секунды, не миллисекунды.
+        """
+        request = request or {}
+        query = mesh_dht.clean_nick(request.get("query"))
+        if not mesh_dht.nick_ok(query):
+            return {"error": f"Введите ник от {mesh_dht.NICK_MIN} до "
+                             f"{mesh_dht.NICK_MAX} символов: буквы, цифры, "
+                             "пробел, дефис, подчёркивание"}
+        if not self._current_settings().get("mesh_enabled"):
+            return {"error": "Участие в mesh выключено в настройках "
+                             "(секция Mesh)"}
+        node = self._mesh_dht
+        if node is None or not node.running:
+            return {"error": "DHT-узел не поднят: включите участие и "
+                             "дождитесь старта (журнал)"}
+        found = node.name_lookup_sync(query)
+        results = []
+        for item in found:
+            addr = str(item.get("addr") or "")
+            pubkey = str(item.get("pubkey") or "")
+            results.append({
+                "nick": item.get("nick"),
+                "addr": addr,
+                "pubkey": pubkey,
+                "fingerprint": mesh_identity.fingerprint(pubkey),
+                "pinned": bool(addr) and mesh_channel.pin_get(addr) == pubkey,
+                "announced": item.get("ts"),
+            })
+        self._log(f"Mesh: поиск «{query}» по каталогу имён - "
+                  f"найдено {len(results)}")
+        return {"ok": True, "query": query, "results": results}
+
+    def nick_probe(self, request=None) -> dict:
+        """Проверить адрес кандидата: TLS-канал + аттестация ключа (B1).
+
+        Ничего не качаем и id не отправляем: проверка в connect идёт до
+        первого байта. Если ключа адресата раньше не было - первый
+        контакт запомнит его (TOFU, mesh_pins.json). Полная сверка «12
+        словами» - этап B2.
+        """
+        request = request or {}
+        addr = str(request.get("addr") or "").strip()
+        pubkey = str(request.get("pubkey") or "").strip().lower()
+        if not addr or ":" not in addr:
+            return {"error": "Адрес не указан (ожидается ip:порт)"}
+        if not self._current_settings().get("mesh_enabled"):
+            return {"error": "Участие в mesh выключено в настройках "
+                             "(секция Mesh)"}
+        had_pin = bool(mesh_channel.pin_get(addr))
+        try:
+            identity_hex = mesh_client.probe(addr, expect=pubkey or None)
+        except mesh_channel.ChannelError as exc:
+            return {"error": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - адрес мог умереть
+            return {"error": f"{addr} не отвечает: {exc}"}
+        pinned = mesh_channel.pin_get(addr) == identity_hex
+        self._log(f"Mesh: {addr} - канал открыт, ключ "
+                  f"{identity_hex[:16]}… "
+                  + ("(первый контакт - запомнен)" if not had_pin
+                     else "(ключ запомнен)"))
+        return {"ok": True, "identity": identity_hex,
+                "fingerprint": mesh_identity.fingerprint(identity_hex),
+                "pinned": pinned, "new_pin": pinned and not had_pin}
 
     def _mesh_worker(self, row: dict, config: dict, dest_dir: str) -> None:
         try:

@@ -12,6 +12,9 @@ from app import settings as settings_mod
 from app import ui
 from app.db import Database
 from app.gui import MAX_LOG_BYTES, Api
+from app.mesh import channel as mesh_channel
+from app.mesh import identity as mesh_identity
+from app.mesh import server as mesh_server
 
 
 def wait_until(predicate, timeout=10.0, message="условие не наступило"):
@@ -574,6 +577,129 @@ class TestMeshReject(GuiCase):
         api = self.make_api()
         self.assertIn("error", api.mesh_reject({"id": 99999}))
         self.assertIn("error", api.mesh_reject({"id": "не число"}))
+
+
+class TestPeerApi(GuiCase):
+    """B1: профиль участника, поиск по нику, проверка адреса.
+
+    Сеть минимальная: только тестовый TLS-сервер на localhost; настоящий
+    DHT в офлайн-тестах не поднимается (ошибки «узел не поднят» - тоже
+    проверяемое поведение).
+    """
+
+    def setUp(self):
+        super().setUp()
+        # Профиль для ключа идентичности и пинов - строго тестовый.
+        self._prof = tempfile.TemporaryDirectory()
+        self.addCleanup(self._prof.cleanup)
+        prof = Path(self._prof.name)
+        for module in (mesh_identity, mesh_channel):
+            patcher = mock.patch.object(module, "profile_dir",
+                                        lambda: prof)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        mesh_identity.reset_cache()
+        self.addCleanup(mesh_identity.reset_cache)
+        mesh_channel.reset_cache()
+        self.addCleanup(mesh_channel.reset_cache)
+
+    def _api(self, *, enabled=True, nick="Иван Тест") -> Api:
+        """Api с подменёнными настройками: без реального старта mesh."""
+        api = self.make_api()
+        api._current_settings = lambda: {"mesh_enabled": enabled,
+                                         "mesh_nick": nick}
+        return api
+
+    def test_peer_profile_key_and_fingerprint(self):
+        api = self._api()
+        profile = api.peer_profile()
+        self.assertEqual(len(profile["pubkey"]), 64)
+        self.assertEqual(profile["fingerprint"],
+                         mesh_identity.fingerprint(profile["pubkey"]))
+        self.assertEqual(profile["nick"], "Иван Тест")
+        self.assertTrue(profile["nick_valid"])
+        self.assertTrue(profile["enabled"])
+        self.assertFalse(profile["dht"],
+                         "DHT в офлайн-тесте не должен считаться поднятым")
+        # Ключ создан В тестовом профиле (не в настоящем).
+        self.assertTrue((Path(self._prof.name) / "mesh_key.bin").is_file())
+
+    def test_nick_search_validates_before_network(self):
+        api = self._api()
+        for bad in ({"query": ""}, {"query": "a"}, {},
+                    {"query": "x" * 33}, {"query": "ник<script>"}):
+            res = api.nick_search(bad)
+            self.assertIn("error", res, bad)
+        # Участие выключено - про настройки, а не про пустой результат.
+        res = self._api(enabled=False).nick_search({"query": "Друг"})
+        self.assertIn("настройках", res.get("error", ""))
+        # Включено, но узел не поднят - честная ошибка про DHT.
+        res = self._api(enabled=True).nick_search({"query": "Друг"})
+        self.assertIn("DHT", res.get("error", ""))
+
+    def test_nick_search_results_shape(self):
+        api = self._api()
+
+        class FakeNode:
+            running = True
+
+            def name_lookup_sync(self, nick, *args, **kwargs):
+                return [{"nick": nick, "addr": "127.0.0.1:38574",
+                         "pubkey": "ab" * 32, "ts": 1760000000},
+                        {"nick": nick, "addr": "10.0.0.9:38574",
+                         "pubkey": "cd" * 32, "ts": 1760000500}]
+
+            def stop_sync(self, *args, **kwargs):
+                # api.close() останавливает узел - заглушка для фейка.
+                return None
+
+        api._mesh_dht = FakeNode()
+        mesh_channel.pin_set("127.0.0.1:38574", "ab" * 32)
+        res = api.nick_search({"query": "Друг"})
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res["query"], "Друг")
+        self.assertEqual(len(res["results"]), 2, "коллизии - списком")
+        first, second = res["results"]
+        self.assertEqual(first["nick"], "Друг")
+        self.assertEqual(first["fingerprint"],
+                         mesh_identity.fingerprint("ab" * 32))
+        self.assertTrue(first["pinned"], "запомненный адрес помечается")
+        self.assertFalse(second["pinned"])
+
+    def test_nick_probe_tls_pin_cycle(self):
+        api = self._api()
+        server = mesh_server.PeerServer(api.db, 0)
+        port = server.start()
+        self.addCleanup(server.stop)
+        addr = f"127.0.0.1:{port}"
+        own = mesh_identity.get_identity()[1].hex()
+
+        res = api.nick_probe({"addr": addr, "pubkey": own})
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res["identity"], own)
+        self.assertTrue(res["pinned"])
+        self.assertTrue(res["new_pin"], "первый контакт запоминает ключ")
+        self.assertEqual(res["fingerprint"],
+                         mesh_identity.fingerprint(own))
+
+        res = api.nick_probe({"addr": addr, "pubkey": own})
+        self.assertTrue(res.get("ok"))
+        self.assertFalse(res["new_pin"], "повтор - ключ уже известен")
+
+        # Пин есть, но заявлЕн чужой ключ - отказ (канал открылся не тем).
+        res = api.nick_probe({"addr": addr, "pubkey": "ff" * 32})
+        self.assertIn("error", res)
+        self.assertIn("пин", res.get("error", ""))
+
+        # Мёртвый адрес и кривая строка адреса - честные ошибки.
+        res = api.nick_probe({"addr": "127.0.0.1:1", "pubkey": own})
+        self.assertIn("error", res)
+        self.assertIn("error", api.nick_probe({"addr": "без-порта"}))
+
+    def test_nick_probe_requires_mesh_enabled(self):
+        res = self._api(enabled=False).nick_probe(
+            {"addr": "127.0.0.1:38574", "pubkey": "ab" * 32})
+        self.assertIn("настройках", res.get("error", ""))
 
 
 if __name__ == "__main__":

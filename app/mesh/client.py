@@ -136,6 +136,21 @@ def pick_digest(pairs: list[tuple], banned=frozenset()) -> str | None:
     return counts.most_common(1)[0][0] if counts else None
 
 
+def probe(addr: str, expect: str | None = None,
+          timeout: float = CONNECT_TIMEOUT) -> str:
+    """Открыть канал и тут же закрыть: проверка адреса/ключа без запросов.
+
+    Кнопка «Проверить адрес» в поиске участников: handshake + аттестация
+    (в connect - ДО первого байта), никаких id наружу. Возвращает ключ,
+    открывший канал; отказы - ChannelError/OSError наверх.
+    """
+    conn = _connect(addr, timeout, expect)
+    try:
+        return str(getattr(conn, "mesh_identity", ""))
+    finally:
+        conn.close()
+
+
 def fetch(remote_id: str, addr: str, part_path, *, progress=None,
           stop=None, expect: str | None = None) -> dict:
     """Загрузка (или дозагрузка) в part_path. Возвращает

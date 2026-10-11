@@ -86,6 +86,79 @@ class TestValues(IdentityCase):
         self.assertIsNone(dht.parse_value("не bencode".encode("utf-8")))
 
 
+class TestNameRecords(IdentityCase):
+    """Каталог имён (B1): ключ, подпись, разбор, правила ника."""
+
+    def test_name_key_casefold_and_separate_space(self):
+        self.assertEqual(dht.name_key("Nick"), dht.name_key(" nick "),
+                         "регистр и края не важны")
+        self.assertNotEqual(dht.name_key("nick"), dht.name_key("nick2"))
+        self.assertEqual(len(dht.name_key("Участник")), 20)
+        self.assertNotEqual(dht.name_key("vid000000001"),
+                            dht.key_for("vid000000001"),
+                            "имена живут в своём пространстве ключей")
+
+    def test_nick_rules(self):
+        self.assertTrue(dht.nick_ok("Иван Петров"))
+        self.assertTrue(dht.nick_ok("a-b_c"))
+        self.assertFalse(dht.nick_ok("a"), "слишком короткий")
+        self.assertFalse(dht.nick_ok("x" * 33), "слишком длинный")
+        self.assertFalse(dht.nick_ok("ник<script>"), "лишние символы")
+        self.assertFalse(dht.nick_ok("  "))
+        self.assertEqual(dht.clean_nick("  Иван   Петров  "), "Иван Петров")
+
+    def test_name_value_roundtrip(self):
+        raw = dht.make_name_value("Тест Участник", "127.0.0.1:38574")
+        parsed = dht.parse_name_value(raw)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["nick"], "Тест Участник")
+        self.assertEqual(parsed["addr"], "127.0.0.1:38574")
+        self.assertEqual(parsed["pubkey"], identity.get_identity()[1].hex())
+        self.assertLess(abs(parsed["ts"] - int(time.time())), 5)
+
+    def test_tampered_name_value_rejected(self):
+        raw = dht.make_name_value("Честный", "127.0.0.1:1")
+        original = bencode.decode_dict(raw)
+        # Подмена адреса после подписи.
+        forged = dict(original)
+        forged[b"addr"] = b"evil.example:666"
+        self.assertIsNone(dht.parse_name_value(bencode.encode(forged)))
+        # Нулевая подпись (дегенерат, который ловит identity.verify).
+        forged = dict(original)
+        forged[b"sig"] = bytes(64)
+        self.assertIsNone(dht.parse_name_value(bencode.encode(forged)))
+        # Не bencode вовсе.
+        self.assertIsNone(dht.parse_name_value("просто строка".encode("utf-8")))
+
+    def test_signed_but_bad_nick_not_parsed(self):
+        # Подпись ВАЛИДНА, но ник мусорный (1 символ) - в каталог не идёт.
+        payload = {"nick": "a", "addr": "127.0.0.1:1",
+                   "pubkey": identity.get_identity()[1],
+                   "ts": int(time.time())}
+        payload_b = {"nick": b"a", "addr": b"127.0.0.1:1",
+                     "pubkey": identity.get_identity()[1],
+                     "ts": payload["ts"]}
+        sig = identity.sign(bencode.encode(payload_b))
+        raw = bencode.encode(dict(payload, sig=sig))
+        self.assertIsNone(dht.parse_name_value(raw))
+
+    def test_missing_fields_rejected(self):
+        payload = {"nick": "Норм Ник", "addr": "127.0.0.1:1",
+                   "pubkey": identity.get_identity()[1],
+                   "ts": int(time.time())}
+        sig = identity.sign(bencode.encode(
+            {"nick": "Норм Ник".encode("utf-8"),
+             "addr": b"127.0.0.1:1",
+             "pubkey": payload["pubkey"], "ts": payload["ts"]}))
+        full = bencode.encode(dict(payload, sig=sig))
+        self.assertIsNotNone(dht.parse_name_value(full))
+        for drop in ("nick", "addr", "pubkey", "ts", "sig"):
+            broken = dict(payload)
+            broken.pop(drop, None)
+            self.assertIsNone(dht.parse_name_value(bencode.encode(broken)),
+                              f"без {drop} - не наш формат")
+
+
 class TestRoutingTable(unittest.TestCase):
     def test_add_closest_and_self_rejected(self):
         own = bytes(20)
@@ -192,6 +265,41 @@ class DHTCase(unittest.TestCase):
         self.b._accept_put(args)
         self.assertEqual(self.b._values_for(dht.key_for("vid000000001")),
                          [], "BEP5: больше 1000 байт не принимаем")
+
+    def test_name_announce_and_lookup(self):
+        """Объявление ника живым узлом -> поиск по регистронезависимому ключу."""
+        self._wire()
+        accepted = self.a.announce_name_sync(
+            "Друг", f"127.0.0.1:{self.port_a}")
+        self.assertGreater(accepted, 0, "B обязан принять запись имени")
+        found = self.b.name_lookup_sync("друг")
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["nick"], "Друг")
+        self.assertEqual(found[0]["addr"], f"127.0.0.1:{self.port_a}")
+        self.assertEqual(found[0]["pubkey"],
+                         identity.get_identity()[1].hex())
+        self.assertEqual(self.b.name_lookup_sync("никого-нет"), [],
+                         "пустой ключ - пусто")
+
+    def test_nick_collision_lists_both_keys(self):
+        """Один ник у разных идентичностей: оба кандидата честно списком."""
+        self._wire()
+        self.a.announce_name_sync("Общий", f"127.0.0.1:{self.port_a}")
+        # Другая идентичность (смена профиля) объявляет ТОТ ЖЕ ник.
+        other = tempfile.TemporaryDirectory()
+        self.addCleanup(other.cleanup)
+        with mock.patch.object(identity, "profile_dir",
+                               lambda: Path(other.name)):
+            identity.reset_cache()
+            self.b.announce_name_sync("Общий", f"127.0.0.1:{self.port_b}")
+        identity.reset_cache()
+        found = self.b.name_lookup_sync("ОБЩИЙ")
+        self.assertEqual(len(found), 2, "коллизия обязана показаться списком")
+        self.assertEqual({f["addr"] for f in found},
+                         {f"127.0.0.1:{self.port_a}",
+                          f"127.0.0.1:{self.port_b}"})
+        self.assertEqual(len({f["pubkey"] for f in found}), 2,
+                         "разные ключи - разные участники")
 
     def test_start_stop_idempotent(self):
         self.assertEqual(self.a.port, self.port_a)

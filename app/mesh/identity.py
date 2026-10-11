@@ -104,6 +104,25 @@ def verify(public_raw: bytes, message: bytes, signature: bytes) -> bool:
         return False
 
 
+def fingerprint(public) -> str:
+    """Короткий отпечаток ключа: первые 8 байт hex, группы по 4.
+
+    Ник в сети НЕ идентифицирует (коллизии и подмена возможны) -
+    идентифицирует отпечаток; он же показывается в поиске участников.
+    Принимает сырой 32-байтный ключ или hex-строку.
+    """
+    if isinstance(public, str):
+        try:
+            public = bytes.fromhex(public.strip())
+        except ValueError:
+            return ""
+    raw = bytes(public or b"")
+    if len(raw) < 8:
+        return ""
+    head = raw[:8].hex()
+    return " ".join(head[i:i + 4] for i in range(0, 16, 4))
+
+
 def reset_cache() -> None:
     """Сброс кэша (тесты подменяют профиль - идентичность не должна
     тащиться между тестами)."""
