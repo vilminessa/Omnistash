@@ -35,6 +35,7 @@ from .mesh import channel as mesh_channel
 from .mesh import client as mesh_client
 from .mesh import feedback as mesh_feedback
 from .mesh import fetch as mesh_fetch
+from .mesh import firewall as mesh_firewall
 from .mesh import identity as mesh_identity
 from .mesh import nat as mesh_nat
 from .mesh import server as mesh_server
@@ -209,6 +210,7 @@ class Api:
         self._nick_thread: threading.Thread | None = None
         self._nick_dirty = False    # «ник меняли, пока объявляли»
         self._nick_last: dict = {}  # последний результат объявления ника
+        self._fw_port_done: int | None = None  # правило брандмауэра: пытался
         # UPnP-проброс (PortMapper): живёт только при включённом участии
         # и согласии на проброс; создаётся в _mesh_apply лениво.
         self._nat: mesh_nat.PortMapper | None = None
@@ -529,6 +531,14 @@ class Api:
         else:
             self._nat_stop()
         if want:
+            # Входящее правило брандмауэра (согласие дано при включении
+            # mesh): без него сосед не откроет канал - фоном, один раз
+            # за порт, отказ = готовая команда в журнале.
+            if self._fw_port_done != port:
+                self._fw_port_done = port
+                threading.Thread(target=self._firewall_ensure,
+                                 args=(port,), daemon=True,
+                                 name="omnistash-firewall").start()
             if not self._mesh_server.running:
                 try:
                     opened = self._mesh_server.start()
@@ -560,6 +570,14 @@ class Api:
         mapper, self._nat = self._nat, None
         if mapper is not None:
             mapper.stop()
+
+    def _firewall_ensure(self, port: int) -> None:
+        """Правило входящего (фоном; сбой - строка в журнале, не авария)."""
+        try:
+            mesh_firewall.ensure_rules(port, self._log)
+        except Exception:  # noqa: BLE001 - брандмауэр не должен валить
+            self._log("Брандмауэр: проверка правил не удалась (см. "
+                      "инструкцию в журнале выше, если она была)")
 
     def _dht_prepare_announce(self) -> None:
         """Перед анонсом: дать узлу увидеть внешний IP (нужен BEP42).

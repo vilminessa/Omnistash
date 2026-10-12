@@ -383,6 +383,7 @@ class DHTNode:
         self._external_ip: str | None = None
         self._ip_learned = threading.Event()
         self._last_bootstrap = 0.0
+        self._last_local_ip: str | None = None
 
     @property
     def running(self) -> bool:
@@ -685,8 +686,18 @@ class DHTNode:
                 if _looks_ipv4(c.host))
             if query == b"get_peers":
                 reply[b"token"] = self._token(target)
-                values = [ip.encode("ascii") + port.to_bytes(2, "big")
-                          for ip, port in self._peers_for(target)]
+                # Значения - СТАНДАРТНЫЙ компакт (4 байта ip + 2 порта):
+                # раньше отдавали ip текстом + порт (14 байт) - ни один
+                # приёмник этого не парсил, включая наш собственный, и
+                # прямые запросы к узлу возвращали «пустоту» (замечено
+                # живым разбором: самозапись есть, а её никто не видит).
+                values = []
+                for ip, port in self._peers_for(target):
+                    try:
+                        values.append(socket.inet_aton(ip)
+                                      + int(port).to_bytes(2, "big"))
+                    except OSError:
+                        continue
                 if values:
                     reply[b"values"] = values
         elif query == b"announce_peer":
@@ -831,6 +842,20 @@ class DHTNode:
                 out.append((ip, port))
         return out
 
+    def _shortlist(self, key: bytes) -> dict:
+        """Начальный короткий список: ближайшие + ВСЕ LAN-контакты.
+
+        Только ближайшие по XOR - ошибка: держатель LAN-адресов (сам
+        сосед) может быть далёк от ключа и не попасть в опрос, тогда
+        поиск вернёт лишь интернет-адреса (часто недостижимые). LAN-
+        контактов единицы - опрашиваем их всегда.
+        """
+        entries = {c.node: c for c in self.table.closest(key, k=K * 2)}
+        for contact in self.table.all():
+            if is_private_ip(contact.host):
+                entries.setdefault(contact.node, contact)
+        return entries
+
     async def _iterative(self, key: bytes, deadline: float, want: int):
         """Итеративный обход к ключу: короткий список ВНЕ таблицы.
 
@@ -841,9 +866,7 @@ class DHTNode:
         по RFC-шному паттерну), а таблица пополняется как получится.
         Возвращает (адреса [(ip, port)], ближайшие контакты).
         """
-        entries: dict = {}
-        for contact in self.table.closest(key, k=K * 2):
-            entries[contact.node] = contact
+        entries: dict = self._shortlist(key)
         queried = set()
         found = list(self._peers_for(key))       # и свои значения
         seen = set(found)
@@ -1006,11 +1029,32 @@ class DHTNode:
             self._log("DHT: поднялся: ответили %d, известно узлов %d"
                       % (alive, len(self.table)))
 
+    def _refresh_on_ip_change(self) -> bool:
+        """Локальный адрес сменился (DHCP) - пора переобъявиться сразу.
+
+        Смена IP реально случается (замер: .30 -> .31 за ночь): до
+        следующего 20-минутного maintenance соседи держат устаревший
+        LAN-адрес. Возвращает True, если адрес изменился (вызывающий
+        переобъявляет _mine).
+        """
+        current = local_ip()
+        with self._lock:
+            last = self._last_local_ip
+            self._last_local_ip = current
+        if last is None or last == current:
+            return False
+        self._log(f"DHT: локальный адрес сменился {last} -> {current} "
+                  "- переобъявляю свои ключи")
+        return True
+
     async def _maintenance_loop(self) -> None:
         while True:
             await asyncio.sleep(MAINTENANCE)
             try:
                 now = time.time()
+                if self._refresh_on_ip_change():
+                    for key, (port, _due) in list(self._mine.items()):
+                        await self._announce(key, port)
                 for key, (port, due) in list(self._mine.items()):
                     if now >= due:
                         await self._announce(key, port)

@@ -389,6 +389,78 @@ class DHTCase(unittest.TestCase):
         self.assertTrue(any(c.node == self.b.own for c in self.a.table.all()),
                         "настоящий id узла должен осесть в таблице")
 
+    def test_direct_get_peers_values_are_standard_compact(self):
+        """Прямой запрос к узлу обязан отдать СТАНДАРТНЫЕ 6-байтовые значения.
+
+        Живой дефект B1.6: отдавали ip текстом + порт (14 байт) - наш же
+        приёмник это не парсил, и самозапись была невидима для любого,
+        кто спрашивал напрямую.
+        """
+        self._wire()
+        self.a.announce_sync("vid000000001", 4321)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.settimeout(3)
+        try:
+            packet = bencode.encode(
+                {b"t": b"\x11\x22\x33", b"y": b"q", b"q": b"get_peers",
+                 b"a": {b"id": os.urandom(20),
+                        b"info_hash": dht.key_for("vid000000001")}})
+            sock.sendto(packet, ("127.0.0.1", self.port_a))
+            data, _ = sock.recvfrom(4096)
+        finally:
+            sock.close()
+        reply = bencode.decode_dict(data)
+        values = (reply.get(b"r") or {}).get(b"values") or []
+        self.assertTrue(values, "объявленное обязано отдаваться")
+        for item in values:
+            self.assertEqual(len(item), 6,
+                             f"компакт обязан быть 6 байт, получено "
+                             f"{len(item)}: {item!r}")
+        parsed = dht.DHTNode._parse_values(values)
+        self.assertIn(("127.0.0.1", 4321), parsed,
+                      "наш приёмник обязан разобрать собственные значения")
+
+    def test_shortlist_always_includes_lan_contacts(self):
+        """LAN-контакт опрашивается всегда, даже вне ближайших K*2.
+
+        Держатель LAN-адресов (сосед) может быть далёк от ключа - раньше
+        он выпадал из опроса и поиск приносил лишь недостижимые
+        публичные адреса (замерено живым поиском).
+        """
+        key = dht.key_for("vid000000001")
+        # own = key: тогда бакеты (расстояние ДО own) детерминированы и
+        #16 «ближайших» ложатся по одному в бакет, без вытеснений.
+        node = dht.DHTNode(multicast=False, port=0, own=key)
+        # id = key XOR (1<<i): ближайшие с явно растущим расстоянием,
+        # по одному на бакет - все K*2 помещаются без вытеснения.
+        for i in range(dht.K * 2):
+            node_id = int.from_bytes(key, "big") ^ (1 << i)
+            node.table.add(dht.Contact(node_id.to_bytes(20, "big"),
+                                       "8.8.4.4", 1000 + i))
+        far_private = b"\xff" * 20
+        node.table.add(dht.Contact(far_private, "192.168.1.9", 38574))
+        closest = node.table.closest(key, k=dht.K * 2)
+        self.assertNotIn(far_private, [c.node for c in closest],
+                         "предусловие: дальний LAN-контакт вне ближайших")
+        shortlist = node._shortlist(key)
+        self.assertIn(far_private, [c.node for c in shortlist.values()],
+                      "LAN-контакт обязан входить в шортлист всегда")
+
+    def test_ip_change_detected(self):
+        """Смена локального адреса (DHCP) ловится сразу, не через 20 минут."""
+        node = dht.DHTNode(multicast=False, port=0,
+                           own=os.urandom(dht.NODE_ID_LEN))
+        node._last_local_ip = "192.168.0.30"
+        logs = []
+        node._log = logs.append
+        with mock.patch.object(dht, "local_ip", lambda: "192.168.0.31"):
+            self.assertTrue(node._refresh_on_ip_change(),
+                            "новый адрес должен быть замечен")
+            self.assertFalse(node._refresh_on_ip_change(),
+                             "повторно не переобъявляем")
+        self.assertTrue(any("сменился" in line for line in logs), logs)
+
     def test_start_stop_idempotent(self):
         self.assertEqual(self.a.port, self.port_a)
         self.assertEqual(self.a.start_sync(), self.port_a, "повтор - без вреда")
