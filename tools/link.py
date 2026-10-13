@@ -1019,6 +1019,9 @@ class Link:
             if msg.get("cmd") == "tail" and msg.get("follow") is True:
                 self._ctrl_follow(sock, reader, msg)
                 return
+            if msg.get("cmd") == "wait":
+                self._ctrl_wait_other(sock)
+                return
             for answer in self._ctrl_answers(msg):
                 self._ctrl_send(sock, answer)
         except OSError:
@@ -1095,6 +1098,39 @@ class Link:
                 self._ctrl_send(sock, {"e": entry})
         except OSError:
             pass
+        finally:
+            self.unsubscribe(sub)
+
+    def _ctrl_wait_other(self, sock: socket.socket) -> None:
+        """Ждать первую запись от ПИРА (не свою) и завершиться.
+
+        На этой механике держится автоматическое пробуждение агента: CLI
+        `wait` блокируется здесь, а по записи пира уходит {"done": True},
+        клиент выходит с кодом 0 - хост агента (opencode) получает
+        уведомление о завершении фоновой команды. Это и есть сигнал
+        «есть почта», не требующий ручной проверки. Свои записи (те, что
+        агент сам написал через log) НЕ будят - иначе петля.
+        """
+        sub = self.subscribe()
+        try:
+            while not self.stop.is_set():
+                try:
+                    entry = sub.get(timeout=30.0)
+                except queue.Empty:
+                    try:
+                        self._ctrl_send(sock, {"t": "tick"})
+                    except OSError:
+                        break               # клиент умер - выходим сразу
+                    continue
+                if entry is None:
+                    break                   # демон останавливается
+                if entry.get("o") == self.peer_id:
+                    continue                # своя запись - не будим
+                self._ctrl_send(sock, {"e": entry})
+                self._ctrl_send(sock, {"ok": True, "done": True})
+                return
+        except OSError:
+            pass                            # клиент оборвал - не беда
         finally:
             self.unsubscribe(sub)
 
@@ -1396,6 +1432,54 @@ def _cmd_tail(args) -> int:
         return 2
 
 
+def _cmd_wait(args) -> int:
+    """Заблокироваться до первой записи пира (не своей); код 0 = есть почта.
+
+    Это пробуждение агента без «тыканья»: команда висит в фоне хоста, а
+    когда пир пишет - демон шлёт done, клиент выходит с 0, и хост сам
+    подаёт уведомление о завершении фонового процесса. Дальше агент
+    читает журнал (--last) и отвечает. Свои записи не будят (иначе
+    петля); таймаут --timeout заканчивается кодом 3 (перезапусти wait).
+    """
+    control = _ctrl_port_of(args)
+    try:
+        with socket.create_connection(("127.0.0.1", control),
+                                      timeout=CTRL_TIMEOUT) as sock:
+            sock.settimeout(args.timeout if args.timeout > 0 else None)
+            sock.sendall((json.dumps({"cmd": "wait"},
+                                     ensure_ascii=False) + "\n")
+                         .encode("utf-8"))
+            reader = sock.makefile("rb")
+            while True:
+                line = reader.readline()
+                if not line:
+                    print("link: демон оборвал ожидание", file=sys.stderr)
+                    return 1
+                try:
+                    msg = json.loads(line.decode("utf-8"))
+                except ValueError:
+                    continue
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get("t") == "tick":
+                    continue
+                entry = msg.get("e")
+                if isinstance(entry, dict):
+                    print(_fmt_entry(entry, args.json), flush=True)
+                if msg.get("done"):
+                    return 0
+    except socket.timeout:
+        print("link: wait - таймаут, новых записей от пира нет "
+              "(перезапустите wait)", file=sys.stderr)
+        return 3
+    except KeyboardInterrupt:
+        return 0
+    except OSError as exc:
+        print(f"link: wait требует запущенного демона "
+              f"(127.0.0.1:{control}): {exc}", file=sys.stderr)
+        return 2
+
+
 def _cmd_status(args) -> int:
     answer = _ctrl_call(_ctrl_port_of(args), {"cmd": "status"})
     print(json.dumps(answer, ensure_ascii=False, indent=1))
@@ -1465,13 +1549,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("status", help="пир, seq, задержки, заметки")
     common(status)
+
+    wait = sub.add_parser(
+        "wait",
+        help="ждать первую запись пира и выйти (код 0); для фонового "
+             "пробуждения агента без ручной проверки")
+    common(wait)
+    wait.add_argument("--timeout", type=float, default=0.0,
+                      help="секунд ожидания; 0 - ждать вечно "
+                           "(таймаут = код 3)")
+    wait.add_argument("--json", action="store_true",
+                      help="NDJSON вместо человекочитаемых строк")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     handlers = {"serve": _cmd_serve, "log": _cmd_log, "state": _cmd_state,
-                "tail": _cmd_tail, "status": _cmd_status}
+                "tail": _cmd_tail, "status": _cmd_status,
+                "wait": _cmd_wait}
     try:
         return handlers[args.cmd](args)
     except ControlError as exc:
