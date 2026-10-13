@@ -72,12 +72,22 @@ class _Server(ThreadingHTTPServer):
         Ошибки внутри do_GET ловятся самим обработчиком и уходят
         участнику как HTTP-ответ; сюда попадает только то, что случилось
         до/вне запроса - печатаем одну строку вместо стектрейса.
+        Разрыв соединения (клиент открыл канал и закрыл без запроса -
+        ровно так делает «Проверить адрес») это НОРМА: молчим, а то
+        журнал пугал строкой «соединение отклонено» на каждой пробе.
         """
         import sys
         error = sys.exc_info()[1]
-        if error is not None:
-            self.log(f"Mesh-сервер: соединение от {client_address[0]} "
-                     f"отклонено: {type(error).__name__}: {error}")
+        if error is None:
+            return
+        if isinstance(error, (ConnectionResetError, BrokenPipeError,
+                              ConnectionAbortedError, TimeoutError)):
+            return
+        if isinstance(error, OSError) and getattr(error, "winerror", None) in (
+                10053, 10054, 10060):
+            return
+        self.log(f"Mesh-сервер: соединение от {client_address[0]} "
+                 f"отклонено: {type(error).__name__}: {error}")
 
 
 class _Handler(BaseHTTPRequestHandler):

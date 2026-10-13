@@ -663,6 +663,9 @@ class TestPeerApi(GuiCase):
             res = api.nick_search({"query": "Друг"})
         self.assertTrue(res.get("ok"), res)
         self.assertEqual(res["query"], "Друг")
+        self.assertEqual(res.get("found"), 2,
+                         "счётчик «адресов в DHT» нужен для диагностики: "
+                         "пусто-в-DHT и отсеянный-каналом - разные болезни")
         self.assertEqual(len(res["results"]), 2, "коллизии - списком")
         first, second = res["results"]
         self.assertEqual(first["nick"], "Друг")
@@ -854,6 +857,7 @@ class TestPeerApi(GuiCase):
         class SlowNode:
             running = True
             table = ["узел"]
+            publish_public = False    # gui выставляет по факту проброса
 
             def announce_name_sync(self, nick, port, **kwargs):
                 calls.append(nick)
@@ -865,6 +869,9 @@ class TestPeerApi(GuiCase):
 
             def learn_external_ip(self, ip):
                 return False
+
+            def set_publish_public(self, ok):
+                return None
 
             def stop_sync(self):
                 return None

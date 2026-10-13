@@ -662,15 +662,24 @@ class Api:
                       + (f" (ник {nick})" if nick else ""))
 
     def _dht_prepare_announce(self) -> None:
-        """Перед анонсом: дать узлу увидеть внешний IP (нужен BEP42).
+        """Перед анонсом: внешний IP для BEP42 И решение о публикации.
 
         UPnP уже знает внешний адрес - подсказываем сразу; остальное
-        узел выучит из поля ip в ответах соседей. Без комплиантного id
-        сеть анонсы молча отбрасывает (проверено пробами на живой сети).
+        узел выучит из поля ip в ответах соседей (для BEP42-ид). Но
+        ПУБЛИКОВАТЬ адрес посторонним можно только при живом пробросе:
+        без него публичный адрес мёртв, а у машин за одним NAT он
+        одинаков (пара vilmpc/vilmnote = обе 2.60.152.240:38574) -
+        чужой поиск пошёл бы на чужой порт.
         """
         mapper = self._nat
-        if mapper is not None and mapper.external_ip:
-            self._mesh_dht.learn_external_ip(mapper.external_ip)
+        if mapper is not None:
+            if mapper.external_ip:
+                self._mesh_dht.learn_external_ip(mapper.external_ip)
+            state = mapper.state()
+            self._mesh_dht.set_publish_public(
+                bool(state.get("enabled") and state.get("external_ip")))
+        else:
+            self._mesh_dht.set_publish_public(False)
         self._mesh_dht.ensure_ready(timeout=15.0)
 
     def _start_nick_announce(self) -> None:
@@ -713,6 +722,11 @@ class Api:
                     if accepted:
                         self._log(f"DHT: ник «{nick}» объявлен (порт "
                                   f"{self._mesh_port}, приняли {accepted})")
+                    elif not self._mesh_dht.publish_public:
+                        self._log(f"DHT: ник «{nick}» объявлен только "
+                                  "локально (UPnP не поднялся - публичный "
+                                  "адрес не разбрасываем, LAN-соседи видят "
+                                  "напрямую)")
                     else:
                         self._log(f"DHT: ник «{nick}» пока не объявился - "
                                   "повторит maintenance, когда сеть будет "
@@ -2390,7 +2404,11 @@ class Api:
             })
         self._log(f"Mesh: поиск «{query}» по каталогу имён - "
                   f"адресов {len(found)}, с ключом {len(results)}")
-        return {"ok": True, "query": query, "results": results}
+        # found - сколько вернула сеть (включая мусор публичного DHT):
+        # без этого числа «ничего не найдено» не отличить от «адреса
+        # есть, но канал/TLS их отсеял» - две РАЗНЫЕ болезни.
+        return {"ok": True, "query": query, "results": results,
+                "found": len(found)}
 
     def nick_probe(self, request=None) -> dict:
         """Проверить адрес кандидата: TLS-канал + аттестация ключа (B1).

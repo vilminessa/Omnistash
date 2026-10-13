@@ -812,12 +812,21 @@
     }
     if (peerState.results) {
       if (!peerState.results.length) {
-        html += '<p class="muted">Ник не найден: либо такого ника нет у ' +
-          "участников, либо запись ещё не объявилась (в сетях без своих " +
-          "серверов она живёт до суток и обновляется сама), либо адреса " +
-          "не проходят проверку. Поиск точный: наберите столь же, сколько " +
-          "собеседник сохранил у себя (регистр не важен) - сверьтесь со " +
-          "строкой «объявлен ник» выше и с его стороны.</p>";
+        if (peerState.found > 0) {
+          // Две РАЗНЫЕ болезни не должны выглядеть одинаково:
+          // адреса ДАЛИ, но ни один не прошёл проверку канала.
+          html += '<p class="muted">DHT нашла адресов: ' +
+            esc(String(peerState.found)) + " - но ни один не прошёл " +
+            "проверку канала (TLS). На машине собеседника проверьте: " +
+            "приложение ЗАПУЩЕНО, версия b0.1.10, порт входящий открыт " +
+            "(строка «Брандмауэр» в журнале), участие включено.</p>";
+        } else {
+          html += '<p class="muted">Адресов в сети нет: собеседник, ' +
+            "вероятно, не запущен (LAN-адрес живёт в памяти работающего " +
+            "приложения) либо ник не объявлен - у него в этом же диалоге " +
+            "строка «объявлен ник … (приняли N)». Поиск точный: наберите " +
+            "столь же, сколько он сохранил (регистр не важен).</p>";
+        }
       } else {
         html += '<div class="peer-list">' + peerState.results.map(function (r) {
           var probe = peerState.probes[r.addr];
@@ -3620,6 +3629,7 @@
             peerState.results = null;
           } else {
             peerState.results = res.results || [];
+            peerState.found = res.found || 0;
           }
           renderPeerBody();
         }).catch(function () {
@@ -4425,7 +4435,7 @@
       nick_search: function (req) {
         var nick = ((req || {}).query || "Участник").slice(0, 32);
         return Promise.resolve({
-          ok: true, query: nick,
+          ok: true, query: nick, found: 4,
           results: [
             { nick: nick, addr: "192.168.1.5:38574",
               pubkey: "cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34cd34",

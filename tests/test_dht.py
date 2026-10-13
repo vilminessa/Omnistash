@@ -461,6 +461,33 @@ class DHTCase(unittest.TestCase):
                              "повторно не переобъявляем")
         self.assertTrue(any("сменился" in line for line in logs), logs)
 
+    def test_publish_public_gate(self):
+        """Без UPnP-проброса посторонним не разбрасываем адрес (Ф6).
+
+        Парная ловушка: у машин за ОДНИМ НАТОМ публичный IP одинаковый
+        (vilmpc/vilmnote = обе 2.60.152.240, порт 38574) - запись узла
+        без проброса указывала бы на ЧУЖОЙ порт. С флагом выкл - только
+        локальная самозапись (LAN-соседи читают её напрямую).
+        """
+        self._wire()
+        self.a.set_publish_public(False)
+        accepted = self.a.announce_sync("vid000000001", 4321)
+        self.assertEqual(accepted, 0, "посторонним в сеть не отправляем")
+        # Лан-сосед напрямую ВСЁ равно видит самозапись (это и цель):
+        direct = self.b.lookup_sync("vid000000001")
+        self.assertEqual([f["addr"] for f in direct],
+                         ["127.0.0.1:4321"],
+                         "прямой запрос LAN-соседа читает самозапись")
+        self.assertEqual(
+            self.a._peers_for(dht.key_for("vid000000001")),
+            [("127.0.0.1", 4321)],
+            "в самозаписи только локальный адрес (публичный не ложим)")
+        # Проброс подтверждён - публикуем как раньше.
+        self.a.set_publish_public(True)
+        accepted = self.a.announce_sync("vid000000001", 4321)
+        self.assertGreater(accepted, 0)
+        self.assertEqual(len(self.b.lookup_sync("vid000000001")), 1)
+
     def test_start_stop_idempotent(self):
         self.assertEqual(self.a.port, self.port_a)
         self.assertEqual(self.a.start_sync(), self.port_a, "повтор - без вреда")

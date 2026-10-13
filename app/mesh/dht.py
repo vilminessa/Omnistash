@@ -384,6 +384,12 @@ class DHTNode:
         self._ip_learned = threading.Event()
         self._last_bootstrap = 0.0
         self._last_local_ip: str | None = None
+        # Публиковать ли адрес ПОСТОРОННИМ узлам: только при живом
+        # UPnP-пробросе (gui выставляет перед анонсом); без проброса
+        # публичный адрес заведомо мёртв, а у машин за ОДНИМ НАТОМ он
+        # к тому же одинаковый (замер пары: обе 2.60.152.240, порт один) -
+        # чужой поиск подключался бы к ЧУЖОМУ порту.
+        self._publish_public = True
 
     @property
     def running(self) -> bool:
@@ -938,6 +944,11 @@ class DHTNode:
         self._mine[key] = (port, time.time() + REANNOUNCE)
         for ip in self._announce_ips():
             self._store_peer(key, ip, port)
+        if not self.publish_public:
+            # Проброса нет: публичный адрес заведомо мёртв (а у машин
+            # за одним NAT он совпадает с чужим!) - посторонним не
+            # разбрасываем, хватает локальной самозаписи для LAN.
+            return 0
         targets = await self.find_nodes(key)
         accepted = 0
         for contact in targets:
@@ -957,15 +968,41 @@ class DHTNode:
                 contact.last_seen = time.time()
         return accepted
 
+    def set_publish_public(self, ok: bool) -> None:
+        """Публиковать ли свой адрес посторонним узлам (сетевой announce).
+
+        Без подтверждённого UPnP-проброса публичный адрес мёртв, а у
+        машин за одним NAT он ИДЕНТИЧЕН (пара vilmpc/vilmnote = обе на
+        2.60.152.240:38574) - чужой поиск приходил бы на ЧУЖОЙ порт.
+        Не пробросили -> объявляем только локально (LAN-соседи читают
+        самозапись напрямую). Вызывается gui перед каждым анонсом.
+        """
+        wanted = bool(ok)
+        with self._lock:
+            changed = self._publish_public != wanted
+            self._publish_public = wanted
+        if changed:
+            self._log("DHT: публичные объявления "
+                      + ("включены (проброс подтверждён)" if wanted
+                         else "выключены - только локальная самозапись "
+                              "(UPnP не поднялся)"))
+
+    @property
+    def publish_public(self) -> bool:
+        with self._lock:
+            return self._publish_public
+
     def _announce_ips(self) -> list:
-        """Адреса под собой: локальный (LAN) + внешний (интернет), без дублей.
+        """Адреса под собой: локальный (LAN) + внешний - если он ПУБЛИЧНЫЙ.
 
         LAN-соседям достижим только локальный адрес, интернету - только
-        внешний; кто спрашивает напрямую, должен получить достижимый для
-        СЕБЯ вариант (оба храним - выбор за спрашивающим, проба отсеет).
+        внешний; внешний берём лишь при разрешённой публикации (см.
+        set_publish_public) - иначе в самозапись попадает заведомо
+        мёртвый адрес, а у машин за одним NAT он ещё и чужой порт.
         """
         with self._lock:
-            external = self._external_ip
+            external = (self._external_ip if self._publish_public
+                        else None)
         local = local_ip()
         ips = [local]
         if external and external != local and not is_private_ip(external):
