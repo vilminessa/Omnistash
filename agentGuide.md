@@ -38,7 +38,8 @@ python tools/link.py serve --id vilmnote --token <ТОКЕН> --peer 100.101.230
 > `python tools/link.py status` (пир онлайн?) и
 > `python tools/link.py state get` (что уже сделано). Пиши свои события:
 > `python tools/link.py log "..."`, состояние теста —
-> `python tools/link.py state set <ключ> '<JSON>'`. Следи за чужими
+> `'<JSON>' | python tools/link.py state set <ключ>` (в PowerShell JSON
+> только пайпом: кавычки в аргументе он съедает). Следи за чужими
 > сообщениями: `python tools/link.py tail --follow`.
 
 На vilmnote — то же с id `vilmnote`.
@@ -49,7 +50,7 @@ python tools/link.py serve --id vilmnote --token <ТОКЕН> --peer 100.101.230
 |---|---|
 | `status` | пир онлайн/RTT/задержка, последние заметки |
 | `log "текст" [--level warn]` | строка в журнал (видна паре) |
-| `state set ключ '<JSON>'` | своё состояние (LWW, паре видно сразу) |
+| `state set ключ [JSON]` | своё состояние (LWW, паре видно сразу). **В PowerShell JSON передавайте пайпом**: `'{...}' \| python tools/link.py state set ключ` — PS 5.1 съедает кавычки в аргументах (JSON доедет как `{a:1}`), пайп их не портит |
 | `state get [ключ] [--verbose]` | сведённое состояние обоих ПК |
 | `tail [--last N] [--follow] [--json]` | журнал; `--follow` — живой поток |
 

@@ -15,6 +15,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 
@@ -223,7 +224,12 @@ class TestCli(LinkCase):
         self.assertEqual(status["next_seq"], 2)   # одна запись сделана
 
     def test_state_get_offline(self):
-        """Демон упал - состояние читается с диска (с честной пометкой)."""
+        """Демон упал - состояние читается с диска (с честной пометкой).
+
+        --ctrl указывает на остановленный порт демона теста: без этого
+        тест молча достучится до ЛЮБОГО демона на машине (на живой паре
+        там вечно работает vilmpc/vilmnote).
+        """
         a = self.make("pcA")
         a.add_state("queue", [1])
         a.stop_link()
@@ -231,10 +237,36 @@ class TestCli(LinkCase):
         with contextlib.redirect_stdout(out), \
                 contextlib.redirect_stderr(err):
             code = link.main(["state", "get", "queue",
+                              "--ctrl", str(a.ctrl_port),
                               "--dir", str(self.root / "pcA")])
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out.getvalue()), [1])
         self.assertIn("state.json", err.getvalue())
+
+    def test_state_set_reads_stdin_when_no_value(self):
+        """Значение из stdin: путь, который PowerShell не портит.
+
+        PS 5.1 съедает кавычки в аргументах консольных программ -
+        JSON доезжает как {a:1}; пайп не трогает кавычки.
+        """
+        a = self.make("pcA")
+        out = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO('{"a": 1, "имя": "ПК"}')):
+            with contextlib.redirect_stdout(out):
+                code = link.main(["state", "set", "fromstdin",
+                                  "--ctrl", str(a.ctrl_port)])
+        self.assertEqual(code, 0)
+        self.assertTrue(wait_for(
+            lambda: a.state_merged().get("fromstdin") == {"a": 1,
+                                                          "имя": "ПК"}))
+        # пустой stdin без позиционного значения - честная ошибка
+        with mock.patch("sys.stdin", io.StringIO("")):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                code = link.main(["state", "set", "x",
+                                  "--ctrl", str(a.ctrl_port)])
+        self.assertEqual(code, 2)
+        self.assertIn("значение", err.getvalue())
 
     def test_tail_offline_and_json(self):
         a = self.make("pcA")

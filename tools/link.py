@@ -1286,7 +1286,22 @@ def _cmd_log(args) -> int:
 def _cmd_state(args) -> int:
     ctrl = _ctrl_port_of(args)
     if args.op == "set":
+        # Значение: позиционно ИЛИ из stdin. Stdin - не прихоть: PowerShell
+        # 5.1 при вызове консольных программ съедает кавычки внутри
+        # аргумента (JSON превращается в {a:1}) - пайп этого не портит:
+        #   echo {"a":1} | python tools/link.py state set stage
         raw = args.value
+        if raw is None:
+            if sys.stdin is None or sys.stdin.isatty():
+                print("link: значение не указано (и stdin пуст) - передайте "
+                      "JSON позиционно или пайпом: "
+                      "echo '{\"a\":1}' | python tools/link.py state set k",
+                      file=sys.stderr)
+                return 2
+            raw = sys.stdin.read().strip()
+        if not raw:
+            print("link: пустое значение", file=sys.stderr)
+            return 2
         try:
             value = json.loads(raw)
         except ValueError:
@@ -1428,7 +1443,10 @@ def build_parser() -> argparse.ArgumentParser:
     state_set = state_sub.add_parser("set", help="записать ключ")
     common(state_set)
     state_set.add_argument("key", help="ключ состояния")
-    state_set.add_argument("value", help="JSON или просто строка")
+    state_set.add_argument("value", nargs="?",
+                           help="JSON или строка; без значения - читается "
+                                "stdin (надёжный путь в PowerShell: кавычки "
+                                "в аргументе он съедает)")
     state_get = state_sub.add_parser("get", help="снять ключи (свои+чужие)")
     common(state_get)
     state_get.add_argument("key", nargs="?", default=None,
