@@ -3971,7 +3971,7 @@
       sync_depth: "full",
       col_views: true, col_likes: true, col_comments: true, col_sync: true,
       sort_col: "", sort_dir: "desc",
-      mesh_enabled: false, mesh_peers: "", mesh_port: 38574, mesh_upnp: true,
+      mesh_enabled: false, mesh_peers: "", mesh_port: 1000, mesh_upnp: true,
       mesh_encrypt: false, mesh_mdns: true, mesh_nick: "",
       mesh_max_mb: 10, mesh_rate_mbit: 10,
       dest_dir: "D:\\видео\\downloads",
@@ -4161,7 +4161,10 @@
       { key: "mesh_port", type: "int", section: "Mesh",
         label: "Порт своего mesh-сервера",
         hint: "Отдаёт только проверенные файлы; адрес стабилен между " +
-              "перезапусками.", min: 1024, max: 65535, default: 38574 },
+              "перезапусками. Вне зоны перехвата DPI-утилит (zapret и " +
+              "подобные: 1024-65535/80/443) - рекомендуется 444-1023, " +
+              "по умолчанию 1000; выключать DPI-программу не нужно.",
+        min: 100, max: 65535, default: 1000 },
       { key: "mesh_upnp", type: "bool", section: "Mesh",
         label: "Проброс порта через роутер (UPnP)",
         hint: "Роутер откроет ваш порт наружу (TCP и UDP) - это меняет " +

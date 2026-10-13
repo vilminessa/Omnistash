@@ -993,21 +993,53 @@ class DHTNode:
             return self._publish_public
 
     def _announce_ips(self) -> list:
-        """Адреса под собой: локальный (LAN) + внешний - если он ПУБЛИЧНЫЙ.
+        """Адреса под собой: LAN + VPN-класс + внешний (если публиковать).
 
-        LAN-соседям достижим только локальный адрес, интернету - только
-        внешний; внешний берём лишь при разрешённой публикации (см.
-        set_publish_public) - иначе в самозапись попадает заведомо
-        мёртвый адрес, а у машин за одним NAT он ещё и чужой порт.
+        Совместимость (F-этап): пользователи живут за zapret/DPI-фильтрами
+        и VPN (Tailscale и подобные) - поэтому объявляем СРАЗУ ВСЕ
+        достижимые варианты, а выбор рабочего отдаём пробе адресата:
+        * локальные приватные (10/8, 172.16/12, 192.168/16) - обычный LAN;
+        * класс ZeroTier/Tailscale (100.64/10) - если пара по VPN;
+        * внешний - только при разрешённой публикации (UPnP-проброс):
+          без проброса он заведомо мёртв, а у машин за одним NAT ещё и
+          совпадает с чужим портом (см. set_publish_public).
+        Источник локальных - getaddrinfo(hostname): на Windows отдаёт
+        адреса всех интерфейсов (проверено: LAN + Tailscale + Radmin);
+        APIPA (169.254) и служебные виртуалки не объявляем - отсеивались
+        бы пробой, но засоряли список.
         """
         with self._lock:
             external = (self._external_ip if self._publish_public
                         else None)
-        local = local_ip()
-        ips = [local]
-        if external and external != local and not is_private_ip(external):
+        ips: list = []
+        for addr in self._local_ips():
+            if addr not in ips:
+                ips.append(addr)
+        if external and not is_private_ip(external) and external not in ips:
             ips.append(external)
-        return ips
+        return ips or [local_ip()]
+
+    def _local_ips(self) -> list:
+        """Локальные/VPN адреса этого хоста (LAN + класс Tailscale)."""
+        found: list = []
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None,
+                                           family=socket.AF_INET):
+                addr = info[4][0]
+                if addr not in found:
+                    found.append(addr)
+        except OSError:
+            pass
+        fallback = local_ip()
+        if fallback not in found:
+            found.append(fallback)
+        usable = []
+        for addr in found:
+            if addr.startswith("169.254."):
+                continue                    # APIPA - не достижим для других
+            if is_private_ip(addr) or addr.startswith("100."):
+                usable.append(addr)
+        return usable
 
     def add_contacts_sync(self, addrs: list, timeout: float = 20.0) -> int:
         """Ручные адреса (mesh_peers) как постоянные контакты таблицы.

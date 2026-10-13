@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import __version__, indexer, migrate as migrate_mod, repo, settings
@@ -221,6 +222,7 @@ class Api:
         self._nick_dirty = False    # «ник меняли, пока объявляли»
         self._nick_last: dict = {}  # последний результат объявления ника
         self._fw_port_done: int | None = None  # правило брандмауэра: пытался
+        self._dpi_hinted = False    # предупреждение про зону перехвата: раз
         # UPnP-проброс (PortMapper): живёт только при включённом участии
         # и согласии на проброс; создаётся в _mesh_apply лениво.
         self._nat: mesh_nat.PortMapper | None = None
@@ -572,6 +574,14 @@ class Api:
                 threading.Thread(target=self._firewall_ensure,
                                  args=(port,), daemon=True,
                                  name="omnistash-firewall").start()
+            # F2: порт в зоне типового DPI-перехвата + обнаружен
+            # перехватчик - честное предупреждение (НЕ выключать его, а
+            # сменить порт/добавить исключение).
+            if mesh_firewall.in_dpi_zone(port) and not self._dpi_hinted:
+                self._dpi_hinted = True
+                threading.Thread(target=self._dpi_warn, args=(port,),
+                                 daemon=True,
+                                 name="omnistash-dpi-hint").start()
             if not self._mesh_server.running:
                 try:
                     opened = self._mesh_server.start()
@@ -613,6 +623,25 @@ class Api:
         except Exception:  # noqa: BLE001 - брандмауэр не должен валить
             self._log("Брандмауэр: проверка правил не удалась (см. "
                       "инструкцию в журнале выше, если она была)")
+
+    def _dpi_warn(self, port: int) -> None:
+        """Порт в зоне перехвата DPI-утилит? Сказать честно, не мешая.
+
+        Пользователи в России живут с zapret-подобными программами -
+        мы НЕ просим их выключать: сообщаем, что порт вне зоны
+        перехвата (1000) или исключение в их программе решает вопрос.
+        """
+        try:
+            if mesh_firewall.dpi_running():
+                self._log(
+                    f"Совместимость: обнаружен DPI-перехватчик "
+                    f"(zapret/winws), а ваш порт {port} - в зоне их "
+                    "перехвата (1024-65535/80/443). Выключать программу "
+                    f"НЕ нужно: либо смените порт на 1000 (вне зоны, "
+                    "настройка «Порт mesh-сервера»), либо добавьте наш "
+                    "порт в исключения её конфига.")
+        except Exception:  # noqa: BLE001 - подсказка не должна валить
+            pass
 
     # ------------------------------------------------------------------ #
     #  B4: mDNS-объявление и поиск участников в LAN
@@ -2381,27 +2410,38 @@ class Api:
             return {"error": "DHT ещё набирает узлов (первые секунды "
                              "после старта) - повторите поиск"}
         found = node.name_lookup_sync(query)
-        results = []
-        for item in found[:8]:
+        # F1b: пробы ПАРАЛЛЕЛЬНО и с коротким таймаутом - адресов теперь
+        # несколько (LAN + VPN + публичный), мёртвые не должны копить
+        # секунды последовательного ожидания (8x6с = 48с было).
+        def check(item):
             addr = str(item.get("addr") or "")
             if not addr:
-                continue
+                return None
             try:
                 # pin=False: поиск НЕ пишет пины - их оставляет явная
                 # кнопка «Проверить адрес» (файл знакомств не растёт от
                 # одного лишь любопытства).
-                ident = mesh_client.probe(addr, expect=None, pin=False)
+                ident = mesh_client.probe(addr, expect=None, pin=False,
+                                          timeout=2.5)
             except Exception:  # noqa: BLE001 - не отвечает/не наш канал
-                continue
+                return None
             if not ident:
-                continue
-            results.append({
+                return None
+            return {
                 "nick": query,
                 "addr": addr,
                 "pubkey": ident,
                 "fingerprint": mesh_identity.fingerprint(ident),
                 "pinned": mesh_channel.pin_get(addr) == ident,
-            })
+            }
+
+        results = []
+        batch = found[:8]
+        if batch:
+            with ThreadPoolExecutor(max_workers=min(8, len(batch))) as pool:
+                for res in pool.map(check, batch):
+                    if res:
+                        results.append(res)
         self._log(f"Mesh: поиск «{query}» по каталогу имён - "
                   f"адресов {len(found)}, с ключом {len(results)}")
         # found - сколько вернула сеть (включая мусор публичного DHT):
@@ -2431,6 +2471,14 @@ class Api:
             identity_hex = mesh_client.probe(addr, expect=pubkey or None)
         except mesh_channel.ChannelError as exc:
             return {"error": str(exc)}
+        except TimeoutError:
+            # F3: молчание ≠ отказ - это отдельная диагноз-ветка.
+            return {"error": f"{addr} молчит: приложение на той стороне "
+                             "не запущено ИЛИ трафик фильтруется "
+                             "(DPI/zapret/брандмауэр). Выключать их не "
+                             "нужно: попробуйте VPN-адрес пира "
+                             "(Tailscale) или добавьте исключение для "
+                             "нашего порта в DPI-программе."}
         except Exception as exc:  # noqa: BLE001 - адрес мог умереть
             return {"error": f"{addr} не отвечает: {exc}"}
         pinned = mesh_channel.pin_get(addr) == identity_hex

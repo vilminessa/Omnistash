@@ -244,6 +244,12 @@ class DHTCase(unittest.TestCase):
         patcher = mock.patch.object(dht, "local_ip", lambda: "127.0.0.1")
         patcher.start()
         self.addCleanup(patcher.stop)
+        # _local_ips ходит в getaddrinfo(hostname): без патча он дал бы
+        # РЕАЛЬНЫЕ адреса машины (LAN/VPN), и объявления были бы
+        # непредсказуемы. Пустой список → fallback на local_ip выше.
+        patcher = mock.patch.object(socket, "getaddrinfo", return_value=[])
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
         # Узлы должны РАЗЛИЧАТЬСЯ: общий профиль дал бы им один node_id,
         # и они приняли бы друг друга за себя (таблицы остались бы пусты).
@@ -366,19 +372,33 @@ class DHTCase(unittest.TestCase):
                          {"127.0.0.1:5551", "127.0.0.1:5552"},
                          "разные адреса - разные участники")
 
-    def test_announce_stores_both_addresses(self):
-        """Под своим ключом лежат И локальный, И внешний адрес (P2).
+    def test_announce_stores_all_addresses(self):
+        """Под своим ключом: LAN + VPN-класс + внешний (F1-многоадресность).
 
         Раньше клался только внешний: LAN-сосед, спрашивая напрямую,
         получал публичный адрес, недостижимый из сети (UPnP может не
-        работать) - поиск по нику в одной LAN умирал.
+        работать). Источник локальных - getaddrinfo(hostname); APIPA и
+        чужие классы (Radmin) не объявляем.
         """
         self._wire()
         self.a._external_ip = "203.0.113.9"     # выученный внешний
-        self.a.announce_sync("vid000000001", 4321)
-        peers = set(self.a._peers_for(dht.key_for("vid000000001")))
-        self.assertIn(("127.0.0.1", 4321), peers, "LAN-адрес обязателен")
-        self.assertIn(("203.0.113.9", 4321), peers, "внешний адрес обязателен")
+        # getaddrinfo отдаёт 5-элементные кортежи (с canonname).
+        def entry(addr):
+            return (socket.AF_INET, socket.SOCK_STREAM, 0, "", (addr, 0))
+        fake = [entry("192.168.9.9"), entry("100.64.0.9"),
+                entry("169.254.7.7"), entry("26.201.28.9")]
+        with mock.patch.object(socket, "getaddrinfo", return_value=fake):
+            self.a.announce_sync("vid000000001", 4321)
+            peers = set(self.a._peers_for(dht.key_for("vid000000001")))
+        self.assertIn(("127.0.0.1", 4321), peers,
+                      "fallback local_ip обязателен")
+        self.assertIn(("192.168.9.9", 4321), peers, "LAN-адрес")
+        self.assertIn(("100.64.0.9", 4321), peers,
+                      "VPN-класс Tailscale/ZeroTier объявляем")
+        self.assertIn(("203.0.113.9", 4321), peers, "внешний при пробросе")
+        self.assertNotIn(("169.254.7.7", 4321), peers, "APIPA не объявляем")
+        self.assertNotIn(("26.201.28.9", 4321), peers,
+                         "Radmin-класс не объявляем")
 
     def test_manual_contacts_added_via_ping(self):
         """mesh_peers -> таблица контактов (страховка без multicast)."""

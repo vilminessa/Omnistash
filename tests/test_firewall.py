@@ -61,5 +61,29 @@ class TestFirewallRules(unittest.TestCase):
                 ps.assert_not_called()
 
 
+class TestDpiCompat(unittest.TestCase):
+    """F-этап: обход DPI-утилит (zapret и подобные) БЕЗ их отключения."""
+
+    def test_dpi_zone_membership(self):
+        # Зона типового перехвата: 1024-65535 + 80/443/2053/.../8443.
+        for port in (38574, 1024, 65535, 80, 443, 8443, 2053):
+            self.assertTrue(firewall.in_dpi_zone(port), port)
+        # Вне зоны - обход: дефолтный1000 и весь класс 444-1023.
+        for port in (1000, 444, 999, 1023, 445, 777):
+            self.assertFalse(firewall.in_dpi_zone(port), port)
+
+    def test_dpi_running_detection(self):
+        with mock.patch.object(firewall, "_powershell",
+                               return_value="yes"):
+            self.assertTrue(firewall.dpi_running())
+        with mock.patch.object(firewall, "_powershell",
+                               return_value="no"):
+            self.assertFalse(firewall.dpi_running())
+        with mock.patch.object(firewall, "_powershell",
+                               side_effect=RuntimeError("нет прав")):
+            self.assertFalse(firewall.dpi_running(),
+                             "недоступность проверки - не паника")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -59,6 +59,33 @@ def manual_command(port: int) -> str:
             + "; ".join(parts) + "\"")
 
 
+# Зона перехвата стандартных DPI-утилит (zapret и родня): их --wf-списки
+# - «80,443,2053,2083,2087,2096,8443,1024-65535». Порт ВНЕ зоны (например
+# 1000 или 444-1023) такой программой физически не перехватывается -
+# это главный обход «работаем параллельно, ничего не выключая».
+_DPI_ZONE_HIGH = frozenset((80, 443, 2053, 2083, 2087, 2096, 8443))
+
+
+def in_dpi_zone(port: int) -> bool:
+    """Попадает ли порт под типовой перехват DPI-утилит?"""
+    port = int(port)
+    return port >= 1024 or port in _DPI_ZONE_HIGH
+
+
+def dpi_running() -> bool:
+    """Обнаружен ли DPI-перехватчик (zapret/winws и подобные) - Windows."""
+    if os.name != "nt":
+        return False
+    script = ("if (Get-Process -Name winws,winwsx,wfp -ErrorAction "
+              "SilentlyContinue) { 'yes' } elseif (Get-Service -Name zapret,"
+              " winws -ErrorAction SilentlyContinue | Where-Object "
+              "{$_.Status -eq 'Running'}) { 'yes' } else { 'no' }")
+    try:
+        return "yes" in _powershell(script).lower()
+    except RuntimeError:
+        return False
+
+
 def ensure_rules(port: int, log) -> bool:
     """Правила входящего на месте? True - да (создали или уже были).
 
