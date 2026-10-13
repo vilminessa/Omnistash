@@ -4,6 +4,9 @@ library/
 staging/
 *.jsonl
 
+# Данные тестового канала link (tools/link.py): журнал + состояние
+link_data/
+
 # Приватные настройки и ключи
 settings.json
 config.local.*
