@@ -337,6 +337,40 @@ class TestRestore(MeshNetCase):
         self.assertTrue(any("стоп-листе" in line or
                             "пригодных" in line for line in logs), logs)
 
+    def test_revoked_device_is_refused_and_restorable(self):
+        """Отзыв доверия (truststore) отсекает манифесты и будущие файлы.
+
+        Ключ держателя известен (в тестах оба узла в одном процессе) -
+        отзываем его у восстанавливающего и проверяем, что путь закрыт,
+        а снятие отзыва открывает его снова.
+        """
+        self.seed_holder()
+        receiver = self.seed_receiver()
+        pubkey = identity.get_identity()[1].hex()
+        repo.truststore_revoke(self.db_b.conn, pubkey)
+        row = {"id": receiver["vid"], "remote_id": "vid000000001",
+               "title": "Клип"}
+        dest = self.root / "out-revoked"
+        logs = []
+        ok = mesh_fetch.restore(self.db_b.conn, row, self._settings(),
+                                str(dest), log=logs.append, reason="")
+        self.assertFalse(ok, "отзыв обязан отсекать и будущие файлы")
+        self.assertTrue(any("отозванным доверием" in line for line in logs),
+                        logs)
+        self.assertTrue(any("нет пригодных манифестов" in line
+                            for line in logs), logs)
+        self.assertFalse(list(dest.glob("*.mp4")))
+
+        # Снятие отзыва возвращает путь восстановления
+        repo.truststore_restore(self.db_b.conn, pubkey)
+        with mock.patch.object(mesh_verify, "probe",
+                               return_value={"checked": True, "ok": None,
+                                             "duration": 213.0,
+                                             "errors": [], "skipped": "тест"}):
+            ok = mesh_fetch.restore(self.db_b.conn, row, self._settings(),
+                                    str(dest), reason="")
+        self.assertTrue(ok, "после снятия отзыва файл должен дойти")
+
     def test_missing_own_metadata_refused(self):
         self.seed_holder()
         row = {"id": 777, "remote_id": "vid000000001", "title": "Без меты"}

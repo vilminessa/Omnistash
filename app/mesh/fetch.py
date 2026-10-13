@@ -22,6 +22,25 @@ from ..util import human_size, sanitize_name
 from . import client, dht, feedback, manifest, verify
 
 
+def _drop_revoked(conn, pairs, log):
+    """Манифесты отозванных устройств (truststore) не участвуют дальше.
+
+    Отзыв обязан касаться и будущих файлов: и мажоритарный хеш, и выбор
+    адресата считаются только по незабаненным устройствам - иначе
+    «отозвать доверие» было бы чисто декоративным жестом.
+    """
+    from .. import repo
+    revoked = repo.truststore_revoked(conn)
+    if not revoked:
+        return pairs
+    kept = [(addr, item) for addr, item in pairs
+            if str(item.get("pubkey") or "") not in revoked]
+    dropped = len(pairs) - len(kept)
+    if dropped:
+        log(f"Mesh: пропущено адресатов с отозванным доверием: {dropped}")
+    return kept
+
+
 def restore(conn, row: dict, settings: dict, dest_dir, *,
             log=None, stop=None, reason: str = "") -> bool:
     """Попытка получить файл строки у участников. True - файл получен,
@@ -86,6 +105,7 @@ def restore(conn, row: dict, settings: dict, dest_dir, *,
                                          expects=expects or None)
     except Exception as exc:  # noqa: BLE001 - сбой не должен ронять поток
         return give_up(f"Mesh: манифесты не получены: {exc}")
+    pairs = _drop_revoked(conn, pairs, log)
 
     digest = client.pick_digest(pairs, banned)
     if not digest:

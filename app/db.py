@@ -438,9 +438,38 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v6(conn: sqlite3.Connection) -> None:
+    """Хранилище доверия устройствам mesh (B0).
+
+    Одна таблица вместо трёх источников правды: TOFU-пинов адресов,
+    плановой таблицы friends (B2+S: дружба = подтверждённый ключ) и
+    разрозненных пометок в журнале. mesh_pins.json остаётся ТРАНСПОРТНЫМ
+    кэшем «адрес -> ключ» (он про адрес, который может меняться); здесь -
+    решение человека об УСТРОЙСТВЕ, а устройство = его Ed25519-ключ:
+
+      * verified_at заполняется только человеком (сверка отпечатка) -
+        без него ключ просто запомненный TOFU-контакт;
+      * revoked_at - «не принимать от этого ключа манифесты и файлы»:
+        барьер стоит в mesh.fetch, отзыв действует и на будущее.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS truststore (
+            pubkey      TEXT PRIMARY KEY,   -- Ed25519 identity, hex
+            label       TEXT NOT NULL DEFAULT '',  -- имя устройства (человека)
+            verified_at TEXT,               -- NULL = TOFU-контакт
+            verified_via TEXT NOT NULL DEFAULT 'tofu',  -- tofu|manual
+            revoked_at  TEXT,               -- не NULL = доверие отозвано
+            created_at  TEXT NOT NULL,
+            last_addr   TEXT NOT NULL DEFAULT ''  -- последний рабочий адрес
+        );
+        """
+    )
+
+
 # Порядок важен: номер версии = индекс + 1.
 MIGRATIONS = (_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4,
-               _migrate_v5)
+               _migrate_v5, _migrate_v6)
 
 
 class Database:

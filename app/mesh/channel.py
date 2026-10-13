@@ -228,6 +228,45 @@ def pin_set(addr: str, pubkey_hex: str) -> None:
             pass                # профиль недоступен - пин живёт в памяти
 
 
+def pin_del(addr: str) -> bool:
+    """Забыть ключ адреса; True - строка была. (Забыть устройство целиком
+    - это pin_del_key: один узел может быть найден по разным адресам.)"""
+    with _pins_lock:
+        pins = _load()
+        if addr not in pins:
+            return False
+        del pins[addr]
+        try:
+            _pins_path().write_text(
+                json.dumps(pins, indent=1, ensure_ascii=False),
+                encoding="utf-8")
+        except OSError:
+            pass
+        return True
+
+
+def pin_del_key(pubkey_hex: str) -> int:
+    """Снять пины ВСЕХ адресов, ведущих на ключ; возвращает число.
+
+    Нужно кнопке «Забыть устройство» в хранилище доверия: без этого пин
+    в файле высевал бы устройство заново при каждом открытии диалога.
+    """
+    key = str(pubkey_hex or "").strip().lower()
+    with _pins_lock:
+        pins = _load()
+        doomed = [addr for addr, pinned in pins.items() if pinned == key]
+        for addr in doomed:
+            del pins[addr]
+        if doomed:
+            try:
+                _pins_path().write_text(
+                    json.dumps(pins, indent=1, ensure_ascii=False),
+                    encoding="utf-8")
+            except OSError:
+                pass
+    return len(doomed)
+
+
 def pins() -> dict:
     """Снимок кэша (для диагностики/тестов)."""
     with _pins_lock:

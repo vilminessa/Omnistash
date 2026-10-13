@@ -202,6 +202,9 @@ class Api:
         self._mesh_dht = mesh_dht.DHTNode(
             log=self._log, port=self._mesh_port,
             persist=str(profile_dir() / mesh_dht.PEER_FILE))
+        # Хранилище доверия (B0): TOFU-пины адресов переносим в список
+        # устройств (идемпотентно; решения человека не трогает).
+        self._truststore_seed()
         self._mesh: dict = {"running": False, "video_id": None,
                             "title": "", "error": None, "summary": None}
         self._mesh_stop = threading.Event()
@@ -2228,6 +2231,7 @@ class Api:
         файл ключа не нужен.
         """
         _key, pub = mesh_identity.get_identity()
+        self._truststore_seed()      # пины могли прийти с прошлого раза
         config = self._current_settings()
         nick = mesh_dht.clean_nick(config.get("mesh_nick"))
         node = self._mesh_dht
@@ -2248,6 +2252,7 @@ class Api:
                 "nick_valid": mesh_dht.nick_ok(nick),
                 "enabled": bool(config.get("mesh_enabled")),
                 "dht": status["dht"],
+                "devices": repo.truststore_list(self.db.conn),
                 "status": status}
 
     def nick_search(self, request=None) -> dict:
@@ -2326,13 +2331,79 @@ class Api:
         except Exception as exc:  # noqa: BLE001 - адрес мог умереть
             return {"error": f"{addr} не отвечает: {exc}"}
         pinned = mesh_channel.pin_get(addr) == identity_hex
+        # Ключ, открывший канал, - устройство в хранилище доверия: свежий
+        # адрес запоминается всегда, а решения человека (сверка/отзыв)
+        # переписываются только им.
+        device = repo.truststore_add(self.db.conn, identity_hex, addr=addr)
         self._log(f"Mesh: {addr} - канал открыт, ключ "
                   f"{identity_hex[:16]}… "
                   + ("(первый контакт - запомнен)" if not had_pin
-                     else "(ключ запомнен)"))
+                     else "(ключ запомнен)")
+                  + f" [доверие: {device['status']}]")
         return {"ok": True, "identity": identity_hex,
                 "fingerprint": mesh_identity.fingerprint(identity_hex),
-                "pinned": pinned, "new_pin": pinned and not had_pin}
+                "pinned": pinned, "new_pin": pinned and not had_pin,
+                "trust": device["status"], "label": device["label"],
+                "revoked": bool(device["revoked_at"])}
+
+    def _truststore_seed(self) -> None:
+        """Перенос TOFU-пинов адресов в устройства (идемпотентно, один раз).
+
+        mesh_pins.json остаётся транспортным кэшем «адрес -> ключ», но
+        человеку нужен список устройств - заводим его из уже запомненного.
+        Сбой посева не должен мешать старту окна.
+        """
+        try:
+            imported = repo.truststore_import_pins(self.db.conn,
+                                                   mesh_channel.pins())
+            if imported:
+                self._log(f"Mesh: перенесено пинов в хранилище доверия "
+                          f"(устройства): {imported}")
+        except Exception as exc:  # noqa: BLE001 - старт окна важнее посева
+            self._log(f"Mesh: перенос пинов в устройства не удался: {exc}")
+
+    def trust_op(self, request=None) -> dict:
+        """Операции над устройством: verify / revoke / restore / label / forget.
+
+        «Подтвердить» - решение ЧЕЛОВЕКА после сверки отпечатка (при
+        личном общении или по видеосвязи): программа личность не
+        доказывает, она фиксирует решение и держит барьер в mesh.fetch
+        (отзыв отсекает манифесты и файлы устройства, включая будущие).
+        """
+        request = request or {}
+        op = str(request.get("op") or "")
+        pubkey = str(request.get("pubkey") or "")
+        labels = {"verify": "подтверждено", "revoke": "доверие отозвано",
+                  "restore": "отзыв снят (TOFU)", "label": "имя изменено"}
+        try:
+            if op == "verify":
+                device = repo.truststore_verify(self.db.conn, pubkey)
+            elif op == "revoke":
+                device = repo.truststore_revoke(self.db.conn, pubkey)
+            elif op == "restore":
+                device = repo.truststore_restore(self.db.conn, pubkey)
+            elif op == "label":
+                device = repo.truststore_set_label(
+                    self.db.conn, pubkey, str(request.get("label") or ""))
+            elif op == "forget":
+                forgotten = repo.truststore_forget(self.db.conn, pubkey)
+                # Пины адресов этого ключа снимаем тоже: иначе файл
+                # знакомств высевал бы устройство заново при каждом
+                # открытии диалога.
+                pins_dropped = (mesh_channel.pin_del_key(pubkey)
+                                if forgotten else 0)
+                if forgotten:
+                    self._log(f"Mesh: устройство {pubkey[:16]}… забыто "
+                              f"(снято пинов: {pins_dropped}); при новом "
+                              "контакте вернётся как TOFU")
+                return {"ok": True, "forgotten": forgotten,
+                        "pins_dropped": pins_dropped}
+            else:
+                return {"error": f"Неизвестная операция: {op!r}"}
+        except ValueError as exc:
+            return {"error": str(exc)}
+        self._log(f"Mesh: устройство {pubkey[:16]}… - {labels.get(op, op)}")
+        return {"ok": True, "device": device}
 
     def _mesh_worker(self, row: dict, config: dict, dest_dir: str) -> None:
         try:

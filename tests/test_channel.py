@@ -201,6 +201,26 @@ class TestPinStore(ChannelCase):
         channel.pin_set("1.1.1.1:1", "ee" * 32)
         self.assertEqual(channel.pin_get("1.1.1.1:1"), "ee" * 32)
 
+    def test_pin_del_and_del_key(self):
+        """Удаление пинов: точечно и «забыть устройство целиком»."""
+        channel.pin_set("2.2.2.2:1", "aa" * 32)
+        channel.pin_set("2.2.2.2:2", "aa" * 32)   # тот же узел, другой адрес
+        channel.pin_set("3.3.3.3:1", "bb" * 32)
+
+        self.assertFalse(channel.pin_del("2.2.2.2:9"), "нет пина - нет работы")
+        self.assertTrue(channel.pin_del("2.2.2.2:1"))
+        self.assertEqual(channel.pin_get("2.2.2.2:1"), "")
+        self.assertEqual(channel.pin_get("2.2.2.2:2"), "aa" * 32,
+                         "второй адрес того же узла не тронут")
+
+        # Кнопка «Забыть устройство» снимает ВСЕ его адреса, чужие - нет
+        self.assertEqual(channel.pin_del_key("aa" * 32), 1)
+        self.assertEqual(channel.pin_get("2.2.2.2:2"), "")
+        self.assertEqual(channel.pin_get("3.3.3.3:1"), "bb" * 32)
+        self.assertEqual(channel.pin_del_key("aa" * 32), 0, "повтор - пусто")
+        channel.reset_cache()                    # удаление живёт в файле
+        self.assertEqual(channel.pins(), {"3.3.3.3:1": "bb" * 32})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -881,6 +881,160 @@ def mesh_file(conn: sqlite3.Connection, video_id: int) -> dict | None:
     return None
 
 
+# --------------------------------------------------------------------------- #
+#  Mesh: хранилище доверия устройствам (B0)
+# --------------------------------------------------------------------------- #
+
+TRUST_STATUSES = ("tofu", "verified", "revoked")
+
+
+def _trust_key(pubkey) -> str:
+    """Валидация ключа: 64 символа hex - иначе в таблицу не пишем."""
+    key = str(pubkey or "").strip().lower()
+    if len(key) != 64 or any(c not in "0123456789abcdef" for c in key):
+        raise ValueError("ключ устройства - 64 символа hex "
+                         "(отпечаток берите в карточке участника)")
+    return key
+
+
+def _trust_row(row) -> dict:
+    data = dict(row)
+    data["status"] = ("revoked" if data.get("revoked_at")
+                      else "verified" if data.get("verified_at")
+                      else "tofu")
+    return data
+
+
+def truststore_list(conn: sqlite3.Connection) -> list[dict]:
+    """Все устройства: подтверждённые и живые первыми, отозванные - в конце.
+
+    Пустой label не вылезает вверх - сортируем названия по nlow (юникод-
+    регистронезависимо, как и весь остальной список).
+    """
+    rows = [dict(row) for row in conn.execute(
+        "SELECT pubkey, label, verified_at, verified_via, revoked_at, "
+        "created_at, last_addr FROM truststore "
+        "ORDER BY revoked_at IS NOT NULL, label = '', nlow(label), pubkey")]
+    return [_trust_row(row) for row in rows]
+
+
+def truststore_get(conn: sqlite3.Connection, pubkey) -> dict | None:
+    row = conn.execute("SELECT * FROM truststore WHERE pubkey=?",
+                       (_trust_key(pubkey),)).fetchone()
+    return _trust_row(row) if row else None
+
+
+def truststore_add(conn: sqlite3.Connection, pubkey, *, label: str = "",
+                   addr: str = "", via: str = "tofu") -> dict:
+    """Запомнить устройство (первый контакт); свежий адрес - всегда.
+
+    INSERT OR IGNORE: повторный контакт НЕ переписывает решения человека -
+    подтверждение и отзыв живут до ручного изменения.
+    """
+    key = _trust_key(pubkey)
+    if via not in ("tofu", "manual"):
+        raise ValueError(f"неизвестный способ проверки: {via!r}")
+    conn.execute(
+        "INSERT OR IGNORE INTO truststore (pubkey, label, verified_via, "
+        "created_at, last_addr) VALUES (?,?,?,?,?)",
+        (key, str(label or ""), via, now_iso(), str(addr or "")))
+    if addr:
+        conn.execute("UPDATE truststore SET last_addr=? WHERE pubkey=?",
+                     (str(addr), key))
+    device = truststore_get(conn, key)
+    assert device is not None            # строку только что завели
+    return device
+
+
+def truststore_verify(conn: sqlite3.Connection, pubkey,
+                      label: str | None = None) -> dict:
+    """Человек сверил отпечаток - ключ становится подтверждённым."""
+    key = _trust_key(pubkey)
+    if not conn.execute("SELECT 1 FROM truststore WHERE pubkey=?",
+                        (key,)).fetchone():
+        truststore_add(conn, key)
+    if label is None:
+        conn.execute("UPDATE truststore SET verified_at=?, "
+                     "verified_via='manual', revoked_at=NULL WHERE pubkey=?",
+                     (now_iso(), key))
+    else:
+        conn.execute("UPDATE truststore SET verified_at=?, "
+                     "verified_via='manual', revoked_at=NULL, label=? "
+                     "WHERE pubkey=?",
+                     (now_iso(), str(label or "").strip()[:64], key))
+    return truststore_get(conn, key)
+
+
+def truststore_set_label(conn: sqlite3.Connection, pubkey,
+                         label: str) -> dict:
+    key = _trust_key(pubkey)
+    if not conn.execute("SELECT 1 FROM truststore WHERE pubkey=?",
+                        (key,)).fetchone():
+        truststore_add(conn, key)
+    conn.execute("UPDATE truststore SET label=? WHERE pubkey=?",
+                 (str(label or "").strip()[:64], key))
+    return truststore_get(conn, key)
+
+
+def truststore_revoke(conn: sqlite3.Connection, pubkey) -> dict:
+    """Отозвать доверие: манифесты и файлы этого ключа больше не принимаем."""
+    key = _trust_key(pubkey)
+    if not conn.execute("SELECT 1 FROM truststore WHERE pubkey=?",
+                        (key,)).fetchone():
+        truststore_add(conn, key)
+    conn.execute("UPDATE truststore SET revoked_at=? WHERE pubkey=?",
+                 (now_iso(), key))
+    return truststore_get(conn, key)
+
+
+def truststore_restore(conn: sqlite3.Connection, pubkey) -> dict:
+    """Снять отзыв: устройство возвращается в TOFU (сверку повторит человек)."""
+    key = _trust_key(pubkey)
+    conn.execute("UPDATE truststore SET revoked_at=NULL, "
+                 "verified_at=NULL, verified_via='tofu' WHERE pubkey=?",
+                 (key,))
+    device = truststore_get(conn, key)
+    assert device is not None
+    return device
+
+
+def truststore_forget(conn: sqlite3.Connection, pubkey) -> bool:
+    """Забыть устройство совсем (строка уходит; TOFU вернётся при новом
+    контакте). Возвращает True, если строка была."""
+    cursor = conn.execute("DELETE FROM truststore WHERE pubkey=?",
+                          (_trust_key(pubkey),))
+    return bool(cursor.rowcount)
+
+
+def truststore_revoked(conn: sqlite3.Connection) -> set:
+    """Множество отозванных ключей - горячий путь барьера в mesh.fetch."""
+    return {row["pubkey"] for row in
+            conn.execute("SELECT pubkey FROM truststore "
+                         "WHERE revoked_at IS NOT NULL")}
+
+
+def truststore_import_pins(conn: sqlite3.Connection, pins: dict) -> int:
+    """Перенос TOFU-пинов «адрес -> ключ» в устройства (идемпотентно).
+
+    mesh_pins.json живёт как транспортный кэш (адрес может меняться), но
+    человеку нужен список устройств - завести его из уже запомненных
+    пинов один раз и не трогать дальше: повторный импорт ничего не
+    дублирует и не переписывает подтверждения/отзывы (INSERT OR IGNORE).
+    """
+    imported = 0
+    for addr, key in dict(pins or {}).items():
+        try:
+            key = _trust_key(key)
+        except ValueError:
+            continue                        # мусор в файле не должен валить
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO truststore (pubkey, verified_via, "
+            "created_at, last_addr) VALUES (?, 'tofu', ?, ?)",
+            (key, now_iso(), str(addr or "")))
+        imported += int(cursor.rowcount or 0)
+    return imported
+
+
 def queue_rows(conn: sqlite3.Connection) -> list[dict]:
     """Очередь загрузки: ожидающие, качающиеся и упавшие - в порядке постановки.
 

@@ -729,6 +729,46 @@ class TestPeerApi(GuiCase):
             {"addr": "127.0.0.1:38574", "pubkey": "ab" * 32})
         self.assertIn("настройках", res.get("error", ""))
 
+    def test_trust_op_cycle_and_devices_in_profile(self):
+        """B0: probe заводит устройство, человек вершит цикл доверия."""
+        api = self._api()
+        server = mesh_server.PeerServer(api.db, 0)
+        port = server.start()
+        self.addCleanup(server.stop)
+        addr = f"127.0.0.1:{port}"
+        own = mesh_identity.get_identity()[1].hex()
+
+        res = api.nick_probe({"addr": addr, "pubkey": own})
+        self.assertEqual(res["trust"], "tofu", "первый контакт - TOFU")
+        devices = api.peer_profile()["devices"]
+        self.assertEqual(devices[0]["pubkey"], own)
+        self.assertEqual(devices[0]["status"], "tofu")
+        self.assertEqual(devices[0]["last_addr"], addr)
+
+        res = api.trust_op({"op": "verify", "pubkey": own})
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res["device"]["status"], "verified")
+        res = api.nick_probe({"addr": addr, "pubkey": own})
+        self.assertEqual(res["trust"], "verified", "probe видит отметку")
+
+        res = api.trust_op({"op": "revoke", "pubkey": own})
+        self.assertEqual(res["device"]["status"], "revoked")
+        res = api.nick_probe({"addr": addr, "pubkey": own})
+        self.assertTrue(res["revoked"], "probe честно пишет об отзыве")
+
+        res = api.trust_op({"op": "restore", "pubkey": own})
+        self.assertEqual(res["device"]["status"], "tofu",
+                         "снятие отзыва возвращает в TOFU")
+
+        self.assertIn("error",
+                      api.trust_op({"op": "label", "pubkey": "кривой"}))
+        self.assertIn("error",
+                      api.trust_op({"op": "не знаю", "pubkey": own}))
+
+        res = api.trust_op({"op": "forget", "pubkey": own})
+        self.assertTrue(res["forgotten"])
+        self.assertEqual(api.peer_profile()["devices"], [])
+
     def test_nick_change_during_announce_not_lost(self):
         """Смена ника ПОКА идёт объявление - не теряется (P3).
 

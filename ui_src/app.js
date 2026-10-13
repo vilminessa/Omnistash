@@ -628,6 +628,57 @@
     return parts.join(" · ");
   }
 
+  function meshFp(pubkey) {
+    // Отпечаток как в Python identity.fingerprint: первые 8 байт hex,
+    // группы по 4. Считаем здесь, чтобы тащить из бэка только ключ.
+    if (!pubkey || String(pubkey).length < 16) return "—";
+    var head = String(pubkey).slice(0, 16).toLowerCase();
+    return head.slice(0, 4) + " " + head.slice(4, 8) + " " +
+      head.slice(8, 12) + " " + head.slice(12, 16);
+  }
+
+  function deviceRowsHtml(devices) {
+    if (!devices.length) {
+      return '<p class="muted">Пока никого: устройства появятся после первого ' +
+        "контакта (поиск, проверка адреса, восстановление) или переноса " +
+        "уже запомненных адресов.</p>";
+    }
+    return '<div class="peer-list">' + devices.map(function (d) {
+      var badge;
+      if (d.status === "verified") {
+        badge = "<b>подтверждено</b>" + (d.verified_at
+          ? " " + esc(String(d.verified_at).slice(0, 10)) : "");
+      } else if (d.status === "revoked") {
+        badge = "<b>отозвано</b> - манифесты и файлы не принимаем";
+      } else {
+        badge = "запомнено автоматически (TOFU)";
+      }
+      var row = '<div class="peer-row"><div>' + badge +
+        '<div class="muted">' + esc(d.label || "без имени") + "</div>" +
+        "<code>" + esc(meshFp(d.pubkey)) + "</code>" +
+        (d.last_addr ? '<div class="muted">' + esc(d.last_addr) + "</div>" : "") +
+        "</div><div>" +
+        '<input type="text" data-peer-label="' + esc(d.pubkey) +
+        '" maxlength="32" placeholder="имя устройства" value="' +
+        esc(d.label || "") + '" style="max-width:150px"> ' +
+        '<button class="btn ghost" data-peer="trust-label" data-pub="' +
+        esc(d.pubkey) + '">Имя</button><br>';
+      if (d.status === "tofu") {
+        row += '<button class="btn" data-peer="trust-verify" data-pub="' +
+          esc(d.pubkey) + '">Подтвердить…</button>';
+      } else if (d.status === "verified") {
+        row += '<button class="btn" data-peer="trust-revoke" data-pub="' +
+          esc(d.pubkey) + '">Отозвать доверие…</button>';
+      } else {
+        row += '<button class="btn" data-peer="trust-restore" data-pub="' +
+          esc(d.pubkey) + '">Вернуть доверие</button>';
+      }
+      row += ' <button class="btn ghost" data-peer="trust-forget" data-pub="' +
+        esc(d.pubkey) + '">Забыть</button>';
+      return row + "</div></div>";
+    }).join("") + "</div>";
+  }
+
   function renderPeerBody() {
     var p = peerState.profile;
     var html = "";
@@ -651,6 +702,13 @@
         '<div class="field-hint">Ник НЕ доказывает личность - её доказывает ' +
         "отпечаток: сверьте его друг с другом при личном общении.</div>" +
         "<code>" + esc(p.fingerprint || "—") + "</code></div>";
+      html += '<hr><div class="field"><div class="field-label">Доверенные устройства</div>' +
+        '<div class="field-hint">Устройство = его ключ. «Подтвердить» - ' +
+        "вы сверили отпечаток лично (или по видеосвязи) и ставите отметку " +
+        "сами; отзыв отсекает манифесты и файлы этого устройства при " +
+        "восстановлении. Без отметки ключ - просто запомненный контакт " +
+        "(TOFU).</div>" +
+        deviceRowsHtml(p.devices || []) + "</div>";
       html += '<hr><div class="field"><div class="field-label">Найти участника по нику</div>' +
         '<div class="field-hint">Поиск точный (DHT не ищет по части ника): ' +
         "собеседник набирает ваш ник <b>ровно</b> - как он сохранён здесь: " +
@@ -685,9 +743,11 @@
           if (probe) {
             row += probe.error
               ? '<div class="field-hint warn">' + esc(probe.error) + "</div>"
-              : '<div class="field-hint">канал открыт, ключ ' +
-                esc(probe.fingerprint) +
-                (probe.new_pin ? " (первый контакт - запомнен)" : "") + "</div>";
+              : '<div class="field-hint' + (probe.revoked ? " warn" : "") +
+                '">' + "канал открыт, ключ " + esc(probe.fingerprint) +
+                (probe.new_pin ? " (первый контакт - запомнен)" : "") +
+                (probe.trust === "verified" ? " · подтверждён" : "") +
+                (probe.revoked ? " · ДОВЕРИЕ ОТОЗВАНО" : "") + "</div>";
           }
           return row + "</div></div>";
         }).join("") + "</div>";
@@ -3489,6 +3549,42 @@
             peerState.probes[addr] = (res && res.error)
               ? { error: res.error } : (res || { error: "нет ответа" });
             renderPeerBody();
+          });
+        return;
+      }
+      if (action === "trust-verify" || action === "trust-revoke" ||
+          action === "trust-restore" || action === "trust-forget") {
+        var trustOp = action.replace("trust-", "");
+        var trustKey = btn.dataset.pub;
+        if (trustOp === "verify" &&
+            !confirm("Вы сверили отпечаток этого устройства лично (или по " +
+              "видеосвязи)?\n\nПодтверждение - ваше решение: программа " +
+              "сама личность доказать не может, она только запомнит " +
+              "отметку.")) return;
+        if (trustOp === "revoke" &&
+            !confirm("Отозвать доверие устройству?\n\nЕго манифесты и " +
+              "файлы перестанут приниматься при восстановлении (включая " +
+              "будущие).")) return;
+        if (trustOp === "forget" &&
+            !confirm("Забыть устройство совсем?\n\nПри новом контакте оно " +
+              "вернётся как запомненное автоматически (TOFU).")) return;
+        call("trust_op", { op: trustOp, pubkey: trustKey })
+          .then(function (res) {
+            if (res && res.error) { toast(res.error, true); return; }
+            toast("Готово");
+            openPeerOverlay();       // перечитать список устройств
+          });
+        return;
+      }
+      if (action === "trust-label") {
+        var labelRow = btn.closest(".peer-row");
+        var labelInput = labelRow
+          ? labelRow.querySelector("input[data-peer-label]") : null;
+        call("trust_op", { op: "label", pubkey: btn.dataset.pub,
+                           label: (labelInput || {}).value || "" })
+          .then(function (res) {
+            if (res && res.error) { toast(res.error, true); return; }
+            openPeerOverlay();
           });
       }
     });
