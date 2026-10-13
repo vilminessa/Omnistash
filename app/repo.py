@@ -1035,6 +1035,128 @@ def truststore_import_pins(conn: sqlite3.Connection, pins: dict) -> int:
     return imported
 
 
+# --------------------------------------------------------------------------- #
+#  Mesh: зеркало каталогов участников (B3, синхронизация индекса)
+# --------------------------------------------------------------------------- #
+
+def catalog_apply(conn: sqlite3.Connection, origin: str,
+                  entries: list, addr: str = "") -> dict:
+    """Применить подписанный снапшот участника: LWW + чистка ушедших.
+
+    origin - ключ автора (его подпись уже проверена в mesh.client).
+    Версия строки - updated_at САМОГО узла: чужие шкалы времени не
+    сравниваются (иначе перевод часов одного ПК «побеждал» бы записи
+    другого). Снимок авторитетен для своего origin: строк, которых в нём
+    больше нет, в зеркале не остаётся - отдельные тамбстоуны не нужны.
+    """
+    origin = _trust_key(origin)
+    now = now_iso()
+    added = updated = unchanged = 0
+    seen: set[str] = set()
+    for entry in entries or []:
+        remote_id = str(entry.get("remote_id") or "")
+        if not remote_id or remote_id in seen:
+            continue
+        seen.add(remote_id)
+        duration = entry.get("duration_s")
+        title = str(entry.get("title") or "")[:500]
+        row = conn.execute(
+            "SELECT updated_at FROM mesh_catalog WHERE origin=? "
+            "AND remote_id=?", (origin, remote_id)).fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO mesh_catalog (origin, remote_id, title, "
+                "duration_s, sha256, synced_at, updated_at, addr, "
+                "fetched_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (origin, remote_id, title,
+                 int(duration) if isinstance(duration, int) else None,
+                 str(entry.get("sha256") or ""),
+                 str(entry.get("synced_at") or ""),
+                 str(entry.get("updated_at") or ""), str(addr or ""), now))
+            added += 1
+        elif str(entry.get("updated_at") or "") > str(row["updated_at"] or ""):
+            conn.execute(
+                "UPDATE mesh_catalog SET title=?, duration_s=?, sha256=?, "
+                "synced_at=?, updated_at=?, addr=?, fetched_at=? "
+                "WHERE origin=? AND remote_id=?",
+                (title,
+                 int(duration) if isinstance(duration, int) else None,
+                 str(entry.get("sha256") or ""),
+                 str(entry.get("synced_at") or ""),
+                 str(entry.get("updated_at") or ""), str(addr or ""), now,
+                 origin, remote_id))
+            updated += 1
+        else:
+            # его же более старая версия - не качаем назад, но факт
+            # «видели недавно» обновляем
+            unchanged += 1
+            conn.execute(
+                "UPDATE mesh_catalog SET addr=?, fetched_at=? "
+                "WHERE origin=? AND remote_id=?",
+                (str(addr or ""), now, origin, remote_id))
+    if seen:
+        marks = ",".join("?" * len(seen))
+        cursor = conn.execute(
+            f"DELETE FROM mesh_catalog WHERE origin=? "
+            f"AND remote_id NOT IN ({marks})", (origin, *sorted(seen)))
+    else:
+        cursor = conn.execute("DELETE FROM mesh_catalog WHERE origin=?",
+                              (origin,))
+    return {"origin": origin, "added": added, "updated": updated,
+            "unchanged": unchanged, "removed": int(cursor.rowcount or 0)}
+
+
+def catalog_list(conn: sqlite3.Connection, query: str = "",
+                 limit: int = 200) -> list[dict]:
+    """Зеркало для UI: автор (устройство/статус) и признак «есть у меня».
+
+    Поиск - подстрока без регистра через nlow (кириллица: встроенный
+    LIKE NOCASE её не понимает).
+    """
+    needle = str(query or "").strip()
+    rows = conn.execute(
+        """SELECT c.origin, c.remote_id, c.title, c.duration_s, c.sha256,
+                  c.synced_at, c.updated_at, c.addr, c.fetched_at,
+                  t.label, t.verified_at, t.revoked_at,
+                  (SELECT COUNT(*) FROM videos v
+                    WHERE v.remote_id = c.remote_id
+                      AND v.platform <> 'local') AS own
+             FROM mesh_catalog c
+             LEFT JOIN truststore t ON t.pubkey = c.origin
+            WHERE ? = '' OR instr(nlow(c.title), nlow(?)) > 0
+               OR instr(nlow(c.remote_id), nlow(?)) > 0
+            ORDER BY c.fetched_at DESC, c.title
+            LIMIT ?""",
+        (needle, needle, needle, int(limit)))
+    return [dict(row) for row in rows]
+
+
+def catalog_own(conn: sqlite3.Connection, remote_id: str) -> dict | None:
+    """Наша строка по remote_id - восстановление идёт только по ней."""
+    row = conn.execute(
+        "SELECT id, title, status FROM videos WHERE remote_id=? "
+        "AND platform <> 'local' ORDER BY id LIMIT 1",
+        (str(remote_id),)).fetchone()
+    return dict(row) if row else None
+
+
+def catalog_origins(conn: sqlite3.Connection) -> list[dict]:
+    """Откуда есть зеркала: ключ, число строк, устройство и его статус."""
+    return [dict(row) for row in conn.execute(
+        "SELECT c.origin, COUNT(*) AS entries, "
+        "MAX(c.fetched_at) AS fetched_at, "
+        "t.label, t.verified_at, t.revoked_at "
+        "FROM mesh_catalog c LEFT JOIN truststore t ON t.pubkey = c.origin "
+        "GROUP BY c.origin ORDER BY MAX(c.fetched_at) DESC")]
+
+
+def catalog_clear(conn: sqlite3.Connection, origin: str) -> int:
+    """Забыть зеркало участника; возвращает число удалённых строк."""
+    cursor = conn.execute("DELETE FROM mesh_catalog WHERE origin=?",
+                          (_trust_key(origin),))
+    return int(cursor.rowcount or 0)
+
+
 def queue_rows(conn: sqlite3.Connection) -> list[dict]:
     """Очередь загрузки: ожидающие, качающиеся и упавшие - в порядке постановки.
 

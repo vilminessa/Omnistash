@@ -15,7 +15,9 @@ from unittest import mock
 
 from app import db as db_mod, repo
 from app.mesh import channel as channel_mod
+from app.mesh import catalog as catalog_mod
 from app.mesh import client, fetch as mesh_fetch, identity, manifest, server
+from app.mesh import crypt as crypt_mod
 from app.mesh import verify as mesh_verify
 
 
@@ -483,6 +485,142 @@ class TestRestore(MeshNetCase):
                 dht_mod.set_current(None)
                 announcer.stop_sync()
                 listener.stop_sync()
+
+
+class TestCatalog(MeshNetCase):
+    """B3: каталог держателя - подпись, канал, зеркало, восстановление."""
+
+    def test_catalog_endpoint_signed_and_truthful(self):
+        holder = self.seed_holder()
+        status, _headers, body = self.raw_get("/catalog")
+        self.assertEqual(status, 200)
+        snapshot = json.loads(body)
+        self.assertEqual(snapshot["pubkey"],
+                         identity.get_identity()[1].hex())
+        entries, error = catalog_mod.verify(snapshot)
+        self.assertIsNone(error, error)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["remote_id"], "vid000000001")
+        self.assertEqual(entries[0]["sha256"], holder["digest"])
+        self.assertTrue(entries[0]["title"])
+
+    def test_tampered_catalog_refused_by_client(self):
+        """Подмена тела после подписи ловится проверкой каталога."""
+        self.seed_holder()
+        status, _headers, body = self.raw_get("/catalog")
+        snapshot = json.loads(body)
+        snapshot["entries"][0]["sha256"] = "sha256:" + "ff" * 32
+        entries, error = catalog_mod.verify(snapshot)
+        self.assertIsNone(entries)
+        self.assertIn("подпись", error)
+        self.assertEqual(status, 200, "сам сервер отвечает честно")
+
+    def test_collect_and_apply_lww_snapshot(self):
+        self.seed_holder()
+        receiver = self.seed_receiver()
+        found = client.collect_catalogs([receiver["addr"]])
+        self.assertEqual(len(found), 1)
+        addr, pubkey, entries = found[0]
+        self.assertEqual(pubkey, identity.get_identity()[1].hex())
+
+        stats = repo.catalog_apply(self.db_b.conn, pubkey, entries,
+                                   addr=addr)
+        self.assertEqual(stats["added"], 1)
+        rows = repo.catalog_list(self.db_b.conn)
+        self.assertEqual(rows[0]["remote_id"], "vid000000001")
+        self.assertEqual(rows[0]["own"], 1, "строка есть и в моём индексе")
+
+        stats = repo.catalog_apply(self.db_b.conn, pubkey, entries,
+                                   addr=addr)
+        self.assertEqual((stats["added"], stats["updated"]), (0, 0),
+                         "повторный снапшот без изменений - тихо")
+
+        stats = repo.catalog_apply(self.db_b.conn, pubkey, [], addr=addr)
+        self.assertEqual(stats["removed"], 1,
+                         "снимок без строки = файл у участника ушёл")
+        self.assertEqual(repo.catalog_list(self.db_b.conn), [])
+
+    def test_restore_from_catalog_with_pinned_key(self):
+        """Зеркало -> своя строка -> восстановление с expect=origin."""
+        self.seed_holder()
+        receiver = self.seed_receiver()
+        found = client.collect_catalogs([receiver["addr"]])
+        addr, pubkey, entries = found[0]
+        repo.catalog_apply(self.db_b.conn, pubkey, entries, addr=addr)
+
+        own = repo.catalog_own(self.db_b.conn, "vid000000001")
+        self.assertIsNotNone(own)
+        row = {"id": own["id"], "remote_id": "vid000000001",
+               "title": own["title"]}
+        # Канал обязан открыться ключом автора каталога
+        settings = {"mesh_enabled": True,
+                    "mesh_peers": f"{addr}@{pubkey}"}
+        dest = self.root / "out-catalog"
+        with mock.patch.object(mesh_verify, "probe",
+                               return_value={"checked": True, "ok": None,
+                                             "duration": 213.0,
+                                             "errors": [], "skipped": "тест"}):
+            ok = mesh_fetch.restore(self.db_b.conn, row, settings,
+                                    str(dest), reason="каталог")
+        self.assertTrue(ok, "восстановление из зеркала должно пройти")
+        self.assertTrue((dest / "Клип [vid000000001].mp4").is_file())
+
+
+class TestEncryptedFetch(MeshNetCase):
+    """B2: файл уходит шифроблоками под ключ получателя."""
+
+    def test_encrypted_fetch_roundtrip(self):
+        holder = self.seed_holder()
+        self.seed_receiver()
+        part = self.root / "enc.part"
+        result = client.fetch(
+            "vid000000001", f"127.0.0.1:{self.port}", str(part),
+            encrypt_to=crypt_mod.own_x25519_public())
+        self.assertEqual(result["resumed_from"], 0,
+                         "шифрованный путь начинается с нуля")
+        self.assertEqual(result["written"], os.path.getsize(holder["path"]))
+        from app.indexer import file_hash
+        self.assertEqual(file_hash(str(part)), holder["digest"],
+                         "расшифрованный файл должен сходиться по хешу")
+
+    def test_range_with_encryption_refused(self):
+        self.seed_holder()
+        key = crypt_mod.own_x25519_public().hex()
+        status, _headers, body = self.raw_get(
+            f"/file/vid000000001?enc=v1&pk={key}",
+            headers={"Range": "bytes=10-"})
+        self.assertEqual(status, 400, "дозапись шифропотока не поддержана")
+        self.assertIn("дозапись", json.loads(body).get("error", ""))
+
+    def test_plaintext_still_works_beside_encryption(self):
+        """Старый клиент (без ?enc) не замечен - обратная совместимость."""
+        holder = self.seed_holder()
+        status, _headers, body = self.raw_get("/file/vid000000001")
+        self.assertEqual(status, 200)
+        from app.indexer import file_hash
+        part = self.root / "plain.bin"
+        part.write_bytes(body)
+        self.assertEqual(file_hash(str(part)), holder["digest"])
+
+    def test_restore_with_mesh_encrypt_setting(self):
+        self.seed_holder()
+        receiver = self.seed_receiver()
+        row = {"id": receiver["vid"], "remote_id": "vid000000001",
+               "title": "Клип"}
+        settings = {"mesh_enabled": True,
+                    "mesh_peers": f"127.0.0.1:{self.port}",
+                    "mesh_encrypt": True}
+        logs = []
+        dest = self.root / "out-enc"
+        with mock.patch.object(mesh_verify, "probe",
+                               return_value={"checked": True, "ok": None,
+                                             "duration": 213.0,
+                                             "errors": [], "skipped": "тест"}):
+            ok = mesh_fetch.restore(self.db_b.conn, row, settings,
+                                    str(dest), log=logs.append, reason="")
+        self.assertTrue(ok, logs)
+        self.assertTrue(any("под мой ключ" in line for line in logs), logs)
+        self.assertTrue((dest / "Клип [vid000000001].mp4").is_file())
 
 
 if __name__ == "__main__":

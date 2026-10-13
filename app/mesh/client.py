@@ -23,13 +23,16 @@ import ssl
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
+from . import catalog as catalog_mod
 from . import channel as channel_mod
+from . import crypt as crypt_mod
 from . import manifest as manifest_mod
 
 CONNECT_TIMEOUT = 6.0
 READ_TIMEOUT = 60.0          # большие файлы читаем чанками долго
 CHUNK = 256 * 1024
 MAX_MANIFEST_BYTES = 64 * 1024
+MAX_CATALOG_BYTES = 4 * 1024 * 1024
 USER_AGENT = "OmnistashMesh/1"
 
 
@@ -138,6 +141,51 @@ def pick_digest(pairs: list[tuple], banned=frozenset()) -> str | None:
     return counts.most_common(1)[0][0] if counts else None
 
 
+def collect_catalogs(addrs: list[str],
+                     expects: dict | None = None) -> list[tuple]:
+    """Каталоги адресатов (B3): [(addr, pubkey, чистые записи)].
+
+    Сбой одного адресата не валит остальных (как в манифестах). Ключ
+    канала обязан совпасть с ключом подписи каталога: чужой каталог,
+    подсунутый по нашему каналу, отбрасывается.
+    """
+    expects = expects or {}
+
+    def one(addr: str):
+        conn, response = _request(addr, "/catalog",
+                                  timeout=CONNECT_TIMEOUT,
+                                  expect=expects.get(addr))
+        try:
+            if response.status != 200:
+                response.read()
+                raise RuntimeError(f"участник ответил {response.status}")
+            raw = response.read(MAX_CATALOG_BYTES)
+        finally:
+            conn.close()
+        try:
+            snapshot = json.loads(raw.decode("utf-8"))
+        except ValueError as exc:
+            raise RuntimeError("каталог пришёл не JSON") from exc
+        channel_key = str(getattr(conn, "mesh_identity", "") or "")
+        if str((snapshot or {}).get("pubkey") or "") != channel_key:
+            raise RuntimeError("каталог подписан другим ключом, чем канал")
+        entries, error = catalog_mod.verify(snapshot)
+        if error:
+            raise RuntimeError(f"каталог не прошёл проверку: {error}")
+        return addr, channel_key, entries or []
+
+    out: list[tuple] = []
+    if not addrs:
+        return out
+    with ThreadPoolExecutor(max_workers=min(8, len(addrs))) as pool:
+        for future in [pool.submit(one, addr) for addr in addrs]:
+            try:
+                out.append(future.result())
+            except Exception:  # noqa: BLE001 - участник недоступен/соврал
+                continue
+    return out
+
+
 def probe(addr: str, expect: str | None = None,
           timeout: float = CONNECT_TIMEOUT, pin: bool = True) -> str:
     """Открыть канал и тут же закрыть: проверка адреса/ключа без запросов.
@@ -155,29 +203,52 @@ def probe(addr: str, expect: str | None = None,
 
 
 def fetch(remote_id: str, addr: str, part_path, *, progress=None,
-          stop=None, expect: str | None = None) -> dict:
+          stop=None, expect: str | None = None,
+          encrypt_to: bytes | None = None) -> dict:
     """Загрузка (или дозагрузка) в part_path. Возвращает
     {resumed_from, written, total} - хеш считает вызывающая сторона.
 
     expect - ключ, которым открыт канал (обычно pubkey из манифеста,
     по которому выбрали этого адресата): запрос id идёт только после
     прохождения аттестации.
+    encrypt_to - X25519-ключ (32 байта): файл уходит шифроблоками под
+    него (B2), читается только нашим ключом; в этом режиме дозапись
+    не поддерживается - начинается с нуля.
     """
     import os
     existing = 0
-    if os.path.exists(part_path):
+    path = f"/file/{remote_id}"
+    if encrypt_to:
+        path += f"?enc=v1&pk={bytes(encrypt_to).hex()}"
+    elif os.path.exists(part_path):
         existing = os.path.getsize(part_path)
     headers = {"Range": f"bytes={existing}-"} if existing else {}
     mode = "wb"
     conn = None
     try:
-        conn, response = _request(addr, f"/file/{remote_id}",
+        conn, response = _request(addr, path,
                                   timeout=CONNECT_TIMEOUT, headers=headers,
                                   expect=expect)
         status = getattr(response, "status", 200)
         if status not in (200, 206):
             detail = response.read(300).decode("utf-8", "replace")
             raise RuntimeError(f"участник ответил {status}: {detail[:120]}")
+        if encrypt_to:
+            envelope = crypt_mod.parse_envelope(
+                response.headers.get(crypt_mod.HEADER))
+            if envelope is None:
+                raise RuntimeError("участник не поддержал шифрование "
+                                   "(старая версия?)")
+
+            def enc_progress(done: int, _total: int) -> None:
+                if stop is not None and stop.is_set():
+                    raise MeshCancelled("остановлено пользователем")
+                if progress:
+                    progress(done, _total)
+
+            written = crypt_mod.open_stream(part_path, response, envelope,
+                                            progress=enc_progress)
+            return {"resumed_from": 0, "written": written}
         if existing and status != 206:
             # Участник проигнорировал Range: начинаем заново.
             existing = 0

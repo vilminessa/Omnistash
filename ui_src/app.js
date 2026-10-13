@@ -590,7 +590,8 @@
   /* --------------------- Участники (B1): профиль и поиск ------------- */
 
   var peerState = { profile: null, query: "", results: null, error: null,
-                    busy: false, probes: {} };
+                    busy: false, probes: {},
+                    catalogRows: null, catalogQuery: "" };
 
   function openPeerOverlay() {
     $("peer-overlay").hidden = false;
@@ -602,6 +603,10 @@
       peerState.error = "Не удалось прочитать профиль";
       renderPeerBody();
     });
+    call("wormhole_status").then(function (res) {
+      peerState.wormhole = res || null;
+      renderPeerBody();
+    }).catch(function () {});
   }
 
   function peerStatusText(p) {
@@ -625,6 +630,13 @@
     }
     parts.push("LAN-приветствий получено: " + (s.hello_rx || 0) +
       (s.hello_rx > 0 ? "" : " (соседи по сети не видны)"));
+    if (s.mdns) {
+      parts.push(s.mdns.available
+        ? (s.mdns.running
+            ? "mDNS: ищем, найдено " + (s.mdns.found || 0)
+            : "mDNS: выключен")
+        : "mDNS: zeroconf не установлена (pip install zeroconf)");
+    }
     return parts.join(" · ");
   }
 
@@ -679,6 +691,79 @@
     }).join("") + "</div>";
   }
 
+  function catalogRowsHtml() {
+    var rows = peerState.catalogRows;
+    if (!rows) return "";
+    if (!rows.length) {
+      return '<p class="muted">В зеркалах ничего не найдено (обновите ' +
+        "каталоги или измените запрос).</p>";
+    }
+    return '<div class="peer-list">' + rows.slice(0, 60).map(function (r) {
+      var who = r.label || meshFp(r.origin);
+      var line = '<div class="peer-row"><div><b>' +
+        esc(r.title || r.remote_id) + "</b>" +
+        '<div class="muted">' + esc(who) +
+        (r.synced_at
+          ? " · синк " + esc(String(r.synced_at).slice(0, 10)) : "") +
+        (r.own_id ? "" : " · нет в моём индексе") + "</div></div><div>";
+      if (r.own_id) {
+        line += '<button class="btn" data-peer="catalog-restore" data-remote="' +
+          esc(r.remote_id) + '" data-origin="' + esc(r.origin) +
+          '" data-addr="' + esc(r.addr) + '">Восстановить…</button>';
+      }
+      return line + "</div></div>";
+    }).join("") + "</div>";
+  }
+
+  function catalogSectionHtml(p) {
+    var origins = (p.catalogs || []).map(function (o) {
+      var who = o.label || meshFp(o.origin);
+      return '<span class="muted">' + esc(who) + " · " + (o.entries || 0) +
+        " строк</span>";
+    }).join(" · ");
+    var html = '<hr><div class="field"><div class="field-label">' +
+      "Каталоги участников</div>" +
+      '<div class="field-hint">Что лежит сейчас у участников (их ' +
+      "подписанные снапшоты, зеркало с версиями строк). Восстановление " +
+      "идёт <b>по вашей строке</b> - чужие метаданные не принимаются. " +
+      (origins ? "Зеркала: " + origins : "Пока пусто.") + "</div>" +
+      '<button class="btn" data-peer="catalog-refresh"' +
+      (peerState.busy ? " disabled" : "") + ">Обновить каталоги</button> " +
+      '<input type="text" id="catalog-query" maxlength="80" ' +
+      'placeholder="поиск по названию/id" value="' +
+      esc(peerState.catalogQuery) + '" style="max-width:200px"> ' +
+      '<button class="btn ghost" data-peer="catalog-list">Искать</button>';
+    return html + catalogRowsHtml() + "</div>";
+  }
+
+  function wormholeSectionHtml() {
+    var w = peerState.wormhole;
+    if (!w) return "";
+    var html = '<hr><div class="field"><div class="field-label">' +
+      "Разовая передача по коду</div>" +
+      '<div class="field-hint">magic-wormhole: файл уходит по короткому ' +
+      "коду (например 7-кот-слово-дерево) - без адресов, портов и " +
+      "брандмауэра; код сообщают собеседнику. Установка отдельная, в " +
+      "изолированное окружение (в exe не вшивается). Ход и код - в " +
+      "журнал. " + (w.installed ? "Установлен." : "Не установлен.") +
+      "</div>";
+    if (w.busy) {
+      html += '<span class="muted">Идёт установка или передача - ждите ' +
+        "сообщения в журнале…</span>";
+    } else if (!w.installed) {
+      html += '<button class="btn" data-peer="wh-setup">Установить…' +
+        "</button>";
+    } else {
+      html += '<input type="text" id="wh-send-path" maxlength="500" ' +
+        'placeholder="путь к файлу" style="max-width:280px"> ' +
+        '<button class="btn" data-peer="wh-send">Отправить…</button><br>' +
+        '<input type="text" id="wh-code" maxlength="60" ' +
+        'placeholder="7-кот-слово-дерево" style="max-width:200px"> ' +
+        '<button class="btn" data-peer="wh-receive">Принять…</button>';
+    }
+    return html + "</div>";
+  }
+
   function renderPeerBody() {
     var p = peerState.profile;
     var html = "";
@@ -709,6 +794,8 @@
         "восстановлении. Без отметки ключ - просто запомненный контакт " +
         "(TOFU).</div>" +
         deviceRowsHtml(p.devices || []) + "</div>";
+      html += catalogSectionHtml(p);
+      html += wormholeSectionHtml();
       html += '<hr><div class="field"><div class="field-label">Найти участника по нику</div>' +
         '<div class="field-hint">Поиск точный (DHT не ищет по части ника): ' +
         "собеседник набирает ваш ник <b>ровно</b> - как он сохранён здесь: " +
@@ -3586,6 +3673,76 @@
             if (res && res.error) { toast(res.error, true); return; }
             openPeerOverlay();
           });
+        return;
+      }
+      if (action === "catalog-refresh") {
+        peerState.busy = true;
+        renderPeerBody();
+        call("catalog_refresh").then(function (res) {
+          peerState.busy = false;
+          if (res && res.error) { toast(res.error, true); renderPeerBody(); return; }
+          toast("Каталогов обновлено: " + ((res || {}).fetched || []).length);
+          openPeerOverlay();
+        }).catch(function () {
+          peerState.busy = false;
+          toast("Обновление каталогов не удалось (сеть)", true);
+          renderPeerBody();
+        });
+        return;
+      }
+      if (action === "catalog-list") {
+        peerState.catalogQuery = ($("catalog-query") || {}).value || "";
+        call("catalog_list", { query: peerState.catalogQuery })
+          .then(function (res) {
+            peerState.catalogRows = (res && res.rows) || [];
+            renderPeerBody();
+          });
+        return;
+      }
+      if (action === "catalog-restore") {
+        if (!confirm("Восстановить файл у участника?\n\nПуть привычный: " +
+              "манифесты -> стоп-лист -> перенос -> sha256 -> структура.")) return;
+        call("catalog_restore", { remote_id: btn.dataset.remote,
+                                  origin: btn.dataset.origin,
+                                  addr: btn.dataset.addr })
+          .then(function (res) {
+            if (res && res.error) { toast(res.error, true); return; }
+            toast("Запрос у участника запущен: " + ((res || {}).title || ""));
+          });
+        return;
+      }
+      if (action === "wh-setup") {
+        if (!confirm("Поставить magic-wormhole в отдельное окружение?\n\n" +
+              "Первый раз качает пакеты (минуты); ход - в журнал.")) return;
+        call("wormhole_setup").then(function (res) {
+          if (res && res.error) { toast(res.error, true); return; }
+          toast("Установка запущена - смотрите журнал");
+          setTimeout(function () { call("wormhole_status").then(
+            function (st) { peerState.wormhole = st || null; renderPeerBody(); });
+          }, 3000);
+        });
+        return;
+      }
+      if (action === "wh-send") {
+        var whPath = ($("wh-send-path") || {}).value || "";
+        if (!whPath) { toast("Укажите путь к файлу", true); return; }
+        if (!confirm("Отправить файл по коду wormhole?\n\nКод появится в " +
+              "журнале - передайте его собеседнику.")) return;
+        call("wormhole_send", { path: whPath }).then(function (res) {
+          if (res && res.error) { toast(res.error, true); return; }
+          toast("Отправка запущена - код в журнале");
+          openPeerOverlay();
+        });
+        return;
+      }
+      if (action === "wh-receive") {
+        var whCode = ($("wh-code") || {}).value || "";
+        if (!whCode) { toast("Укажите код передачи", true); return; }
+        call("wormhole_receive", { code: whCode }).then(function (res) {
+          if (res && res.error) { toast(res.error, true); return; }
+          toast("Приём запущен - итог в журнале");
+          openPeerOverlay();
+        });
       }
     });
     $("ffmpeg-body").addEventListener("click", function (event) {
@@ -3805,7 +3962,7 @@
       col_views: true, col_likes: true, col_comments: true, col_sync: true,
       sort_col: "", sort_dir: "desc",
       mesh_enabled: false, mesh_peers: "", mesh_port: 38574, mesh_upnp: true,
-      mesh_nick: "",
+      mesh_encrypt: false, mesh_mdns: true, mesh_nick: "",
       dest_dir: "D:\\видео\\downloads",
       output_template: "%(channel)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s",
       quality: "high", subtitles: "none", transcode: "none",
@@ -3999,6 +4156,18 @@
         hint: "Роутер откроет ваш порт наружу (TCP и UDP) - это меняет " +
               "настройки роутера; внешний адрес берём у него же. Без " +
               "проброса участникам доступна только ваша сеть (LAN).",
+        default: true },
+      { key: "mesh_encrypt", type: "bool", section: "Mesh",
+        label: "Шифровать перенос под свой ключ",
+        hint: "Канал и так шифрован (TLS); опция шифрует и сам файл " +
+              "блоками под ваш ключ - прочитать байты по пути сможет " +
+              "только обладатель ключа. Дозапись начнётся заново.",
+        default: false },
+      { key: "mesh_mdns", type: "bool", section: "Mesh",
+        label: "Искать участников в сети (mDNS)",
+        hint: "Стандартное объявление в локальной сети (как принтеры). " +
+              "Требует zeroconf (pip install zeroconf, LGPL); без неё " +
+              "работают приветствие, DHT и ручные адреса.",
         default: true },
       { key: "mesh_nick", type: "str", section: "Mesh",
         label: "Ваш никнейм",

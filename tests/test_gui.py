@@ -769,6 +769,76 @@ class TestPeerApi(GuiCase):
         self.assertTrue(res["forgotten"])
         self.assertEqual(api.peer_profile()["devices"], [])
 
+    def test_catalog_refresh_list_restore_guard(self):
+        """B3: обновление зеркала, список и защита «только своя строка»."""
+        api = self._api()
+        addr = "127.0.0.1:38574"
+        api._current_settings = lambda: {"mesh_enabled": True,
+                                         "mesh_nick": "Иван Тест",
+                                         "mesh_peers": addr}
+        entries = [{"remote_id": "vid000000001", "title": "Клип",
+                    "duration_s": 213, "synced_at": "2026-10-01",
+                    "updated_at": "2026-10-01T10:00:00",
+                    "sha256": "sha256:" + "ab" * 32}]
+        with mock.patch("app.gui.mesh_client.collect_catalogs",
+                        return_value=[(addr, "ab" * 32, entries)]):
+            res = api.catalog_refresh()
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res["fetched"][0]["added"], 1)
+        self.assertEqual(api.peer_profile()["catalogs"][0]["entries"], 1)
+
+        listed = api.catalog_list({"query": "КЛИП"})
+        self.assertEqual(len(listed["rows"]), 1)
+        self.assertIsNone(listed["rows"][0]["own_id"],
+                          "строки нет в индексе - восстанавливать нечего")
+
+        res = api.catalog_restore({"remote_id": "vid000000001",
+                                   "origin": "ab" * 32, "addr": addr})
+        self.assertIn("нет в вашем индексе", res.get("error", ""))
+
+        res = self._api(enabled=False).catalog_refresh()
+        self.assertIn("настройках", res.get("error", ""))
+
+        res = api.catalog_forget({"origin": "ab" * 32})
+        self.assertEqual(res["removed"], 1)
+        self.assertEqual(api.catalog_list({})["rows"], [])
+
+    def test_mdns_found_flow_and_profile_status(self):
+        """B4: находка mDNS живёт в памяти, своё объявление отфильтровано."""
+        api = self._api()
+        api._mesh_port = 38574
+        api._mdns_on_found("9.9.9.9", 38574, "Сосед")
+        self.assertIn("9.9.9.9", api._mdns_found)
+        with mock.patch("app.gui.mesh_mdns.lan_ip", return_value="5.5.5.5"):
+            api._mdns_on_found("5.5.5.5", 38574, "")
+        self.assertNotIn("5.5.5.5", api._mdns_found,
+                         "собственное объявление не должно попадать в список")
+        addrs = [addr for addr, _key in api._catalog_addresses()]
+        self.assertIn("9.9.9.9:38574", addrs,
+                      "mDNS-находка участвует в адресах каталогов")
+        profile = api.peer_profile()
+        mdns_status = profile["status"]["mdns"]
+        self.assertIsInstance(mdns_status["available"], bool)
+        self.assertFalse(mdns_status["running"], "в тесте старт не поднимаем")
+        self.assertEqual(mdns_status["found"], 1)
+
+    def test_wormhole_status_and_send_guard(self):
+        """B1: статус читается, действия без установки честно откажут."""
+        api = self._api()
+        status = api.wormhole_status()
+        self.assertIn("installed", status)
+        self.assertFalse(status["busy"])
+        with mock.patch("app.gui.wormhole_mod.installed",
+                        return_value=False):
+            res = api.wormhole_send({"path": "x.mp4"})
+            self.assertIn("не установлен", res.get("error", ""))
+            res = api.wormhole_receive({"code": "7-a-b-c"})
+            self.assertIn("не установлен", res.get("error", ""))
+        res = api.wormhole_send({"path": ""})
+        self.assertIn("путь", res.get("error", ""))
+        res = api.wormhole_receive({"code": ""})
+        self.assertIn("код", res.get("error", "").lower())
+
     def test_nick_change_during_announce_not_lost(self):
         """Смена ника ПОКА идёт объявление - не теряется (P3).
 

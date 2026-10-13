@@ -29,6 +29,7 @@ from . import repack as repack_mod
 from . import schedule as schedule_mod
 from . import settings_schema, sources
 from . import storages as storages_mod
+from . import wormhole as wormhole_mod
 from . import verify as verify_mod
 from .mesh import dht as mesh_dht
 from .mesh import channel as mesh_channel
@@ -37,6 +38,7 @@ from .mesh import feedback as mesh_feedback
 from .mesh import fetch as mesh_fetch
 from .mesh import firewall as mesh_firewall
 from .mesh import identity as mesh_identity
+from .mesh import mdns as mesh_mdns
 from .mesh import nat as mesh_nat
 from .mesh import server as mesh_server
 from .db import SYNC_MODES, Database
@@ -217,6 +219,14 @@ class Api:
         # UPnP-проброс (PortMapper): живёт только при включённом участии
         # и согласии на проброс; создаётся в _mesh_apply лениво.
         self._nat: mesh_nat.PortMapper | None = None
+        # mDNS (B4): объявление и поиск участников в LAN; библиотека
+        # zeroconf опциональна - без неё старт честно отключается строкой
+        # в журнале (см. app.mesh.mdns).
+        self._mdns_announcer = None
+        self._mdns_browser = None
+        self._mdns_found: dict = {}   # addr -> {port, nick, ts}
+        # Разовая передача по коду (B1): один процесс wormhole за раз.
+        self._wormhole_busy = False
         # Аккаунт Google: окно входа живёт отдельно от главного.
         self._login_window = None
         self._login_cancel = threading.Event()
@@ -559,6 +569,7 @@ class Api:
                     self._start_nick_announce()
                 except RuntimeError as exc:
                     self._log(f"DHT-узел не поднялся: {exc}")
+            self._mdns_apply(config)
         else:
             if self._mesh_server.running:
                 self._mesh_server.stop()
@@ -567,6 +578,7 @@ class Api:
                 self._mesh_dht.stop_sync()
                 mesh_dht.set_current(None)
                 self._log("DHT-узел остановлен")
+            self._mdns_stop_all()
 
     def _nat_stop(self) -> None:
         """Снять UPnP-проброс (снятие делает фон маппера, тут - только воля)."""
@@ -581,6 +593,53 @@ class Api:
         except Exception:  # noqa: BLE001 - брандмауэр не должен валить
             self._log("Брандмауэр: проверка правил не удалась (см. "
                       "инструкцию в журнале выше, если она была)")
+
+    # ------------------------------------------------------------------ #
+    #  B4: mDNS-объявление и поиск участников в LAN
+    # ------------------------------------------------------------------ #
+
+    def _mdns_apply(self, config: dict) -> None:
+        """Поднять/перенастроить mDNS при включённом участии.
+
+        Смена порта = новая пара объявл/поиск; смена ника - мягкая
+        перерегистрация сервиса. Без zeroconf оба старта честно
+        откажутся строкой в журнале (см. app.mesh.mdns).
+        """
+        if not config.get("mesh_mdns", True):
+            self._mdns_stop_all()
+            return
+        port = int(config.get("mesh_port") or 38574)
+        nick = mesh_dht.clean_nick(config.get("mesh_nick"))
+        announcer = self._mdns_announcer
+        if announcer is not None and announcer.port == port:
+            announcer.set_nick(nick)
+            return
+        self._mdns_stop_all()
+        self._mdns_announcer = mesh_mdns.Announcer(port, nick, log=self._log)
+        self._mdns_announcer.start()
+        self._mdns_browser = mesh_mdns.Browser(self._mdns_on_found,
+                                               log=self._log)
+        self._mdns_browser.start()
+
+    def _mdns_stop_all(self) -> None:
+        browser, announcer = self._mdns_browser, self._mdns_announcer
+        self._mdns_browser = self._mdns_announcer = None
+        if browser is not None:
+            browser.stop()
+        if announcer is not None:
+            announcer.stop()
+
+    def _mdns_on_found(self, addr: str, port: int, nick: str) -> None:
+        """Колбэк mDNS (свой поток): запомнить найти и оповестить о новых."""
+        if port == self._mesh_port and addr == mesh_mdns.lan_ip():
+            return                            # это собственное объявление
+        with self._lock:
+            known = self._mdns_found.get(addr)
+            self._mdns_found[addr] = {"port": int(port), "nick": nick,
+                                      "ts": time.time()}
+        if not known:
+            self._log(f"mDNS: найден участник {addr}:{port}"
+                      + (f" (ник {nick})" if nick else ""))
 
     def _dht_prepare_announce(self) -> None:
         """Перед анонсом: дать узлу увидеть внешний IP (нужен BEP42).
@@ -2245,6 +2304,10 @@ class Api:
             "nick_last": dict(self._nick_last or {}),
             "upnp": (self._nat.state().get("reason", "")
                      if self._nat is not None else "выключен (настройка)"),
+            "mdns": {"available": mesh_mdns.available(),
+                     "running": bool(self._mdns_browser is not None
+                                     and self._mdns_browser.running),
+                     "found": len(self._mdns_found)},
         }
         return {"pubkey": pub.hex(),
                 "fingerprint": mesh_identity.fingerprint(pub),
@@ -2253,6 +2316,7 @@ class Api:
                 "enabled": bool(config.get("mesh_enabled")),
                 "dht": status["dht"],
                 "devices": repo.truststore_list(self.db.conn),
+                "catalogs": repo.catalog_origins(self.db.conn),
                 "status": status}
 
     def nick_search(self, request=None) -> dict:
@@ -2404,6 +2468,233 @@ class Api:
             return {"error": str(exc)}
         self._log(f"Mesh: устройство {pubkey[:16]}… - {labels.get(op, op)}")
         return {"ok": True, "device": device}
+
+    # ------------------------------------------------------------------ #
+    #  B3: зеркало каталогов участников (синхронизация индекса)
+    # ------------------------------------------------------------------ #
+
+    def _catalog_addresses(self) -> list[tuple[str, str | None]]:
+        """[(addr, ожидаемый ключ)] из mesh_peers и устройств truststore.
+
+        Для устройств адрес берётся с ключом (канал обязан открыться
+        именно им); отозванные устройства каталогов не опрашиваются.
+        """
+        out: list[tuple[str, str | None]] = []
+        seen: set[str] = set()
+        config = self._current_settings()
+        for entry in str(config.get("mesh_peers") or "") \
+                .replace(";", ",").split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            addr, _, expect = entry.partition("@")
+            addr = addr.strip()
+            if not addr or addr in seen:
+                continue
+            seen.add(addr)
+            out.append((addr, expect.strip().lower() or None))
+        for device in repo.truststore_list(self.db.conn):
+            addr = str(device.get("last_addr") or "")
+            if addr and addr not in seen and device["status"] != "revoked":
+                seen.add(addr)
+                out.append((addr, device["pubkey"]))
+        # mDNS-находки (B4): адрес есть, ключ пока нет - без ожидания
+        with self._lock:
+            mdns_addrs = [f"{addr}:{info['port']}"
+                          for addr, info in self._mdns_found.items()]
+        for addr in mdns_addrs:
+            if addr not in seen:
+                seen.add(addr)
+                out.append((addr, None))
+        return out
+
+    def catalog_refresh(self, request=None) -> dict:
+        """Обновить зеркала каталогов у участников (B3).
+
+        Подпись каталога и ключ канала сверяются в mesh.client; здесь -
+        применение LWW-зеркала (версии строк сравниваются только внутри
+        одного узла) и журнал по каждому адресату.
+        """
+        if not self._current_settings().get("mesh_enabled"):
+            return {"error": "Участие в mesh выключено в настройках "
+                             "(секция Mesh)"}
+        pairs = self._catalog_addresses()
+        if not pairs:
+            return {"error": "Нет адресов участников: добавьте "
+                             "mesh_peers в настройках Mesh или проверьте "
+                             "адрес устройства"}
+        expects = {addr: key for addr, key in pairs if key}
+        try:
+            found = mesh_client.collect_catalogs([a for a, _k in pairs],
+                                                 expects=expects or None)
+        except Exception as exc:  # noqa: BLE001 - сбой не должен ронять окно
+            return {"error": f"Каталоги не получены: {exc}"}
+        summary = []
+        for addr, pubkey, entries in found:
+            stats = repo.catalog_apply(self.db.conn, pubkey, entries,
+                                       addr=addr)
+            # Автор каталога - устройство: запомнить адрес не помешает
+            # (решения человека не переписываются - см. truststore_add).
+            repo.truststore_add(self.db.conn, pubkey, addr=addr)
+            summary.append({"addr": addr, "pubkey": pubkey,
+                            "fingerprint": mesh_identity.fingerprint(pubkey),
+                            **stats})
+            self._log(f"Mesh: каталог {addr} ({len(entries)} строк): "
+                      f"+{stats['added']} ~{stats['updated']} "
+                      f"-{stats['removed']}")
+        if not summary:
+            return {"error": "Ни один участник не ответил каталогом "
+                             "(адреса недоступны или старая версия) - "
+                             "см. журнал"}
+        return {"ok": True, "fetched": summary}
+
+    def catalog_list(self, request=None) -> dict:
+        """Зеркало для диалога: строки с автором и признаком «есть у меня»."""
+        request = request or {}
+        rows = repo.catalog_list(self.db.conn,
+                                 query=str(request.get("query") or ""),
+                                 limit=int(request.get("limit") or 200))
+        for row in rows:
+            own = repo.catalog_own(self.db.conn, row["remote_id"])
+            row["own_id"] = own["id"] if own else None
+            row["own_status"] = own["status"] if own else None
+        return {"ok": True, "rows": rows,
+                "origins": repo.catalog_origins(self.db.conn)}
+
+    def catalog_restore(self, request=None) -> dict:
+        """Восстановить файл строки из каталога участника (mesh.fetch).
+
+        Только по СВОЕЙ строке - продуктовое правило: чужие метаданные не
+        принимаются, сверять нечего. Канал привязывается ключом автора
+        каталога (mesh_peers = addr@origin): запрос уйдёт только по
+        подтверждённой личности.
+        """
+        request = request or {}
+        remote_id = str(request.get("remote_id") or "")
+        origin = str(request.get("origin") or "")
+        addr = str(request.get("addr") or "")
+        if not remote_id or not origin or not addr:
+            return {"error": "Не указаны строка, устройство и адрес"}
+        own = repo.catalog_own(self.db.conn, remote_id)
+        if not own:
+            return {"error": "Такой строки нет в вашем индексе: сначала "
+                             "добавьте источник и синхронизируйте его"}
+        config = dict(self._current_settings())
+        if not config.get("mesh_enabled"):
+            return {"error": "Участие в mesh выключено в настройках "
+                             "(секция Mesh)"}
+        with self._lock:
+            if self._mesh.get("running"):
+                return {"error": "Запрос к участникам уже идёт"}
+        if own["status"] in ("queued", "downloading"):
+            return {"error": "Видео уже качается очередью"}
+        if own["status"] == "downloaded":
+            return {"error": "Файл уже скачан - проверяйте в «Целостности»"}
+        conn = self.db.conn
+        row = dict(conn.execute(
+            "SELECT id, remote_id, title, key, status, channel_id, "
+            "target_storage_id FROM videos WHERE id=?",
+            (own["id"],)).fetchone())
+        storage, error = storages_mod.resolve_for_row(conn, row, config)
+        if not storage:
+            return {"error": error}
+        config["mesh_peers"] = f"{addr}@{origin}"
+        self._mesh_stop.clear()
+        with self._lock:
+            self._mesh = {"running": True, "video_id": row["id"],
+                          "title": row.get("title") or "", "error": None,
+                          "summary": None}
+        thread = threading.Thread(target=self._mesh_worker,
+                                  args=(row, config, storage["path"]),
+                                  name="omnistash-catalog-fetch", daemon=True)
+        with self._lock:
+            self._mesh_thread = thread
+        thread.start()
+        self._log(f"Mesh: восстановление из каталога {addr[:24]}… "
+                  f"«{row.get('title')}» (назначение: {storage['label']})")
+        return {"ok": True, "title": row.get("title") or ""}
+
+    def catalog_forget(self, request=None) -> dict:
+        """Забыть зеркало участника (строки уходят, устройства не трогаются)."""
+        request = request or {}
+        try:
+            removed = repo.catalog_clear(self.db.conn,
+                                         str(request.get("origin") or ""))
+        except ValueError as exc:
+            return {"error": str(exc)}
+        return {"ok": True, "removed": removed}
+
+    # ------------------------------------------------------------------ #
+    #  B1: разовая передача по коду (magic-wormhole в отдельном venv)
+    # ------------------------------------------------------------------ #
+
+    def wormhole_status(self, request=None) -> dict:
+        """Установлен ли wormhole; busy - идёт установка/передача."""
+        return {**wormhole_mod.status(), "busy": self._wormhole_busy}
+
+    def _wormhole_run(self, name: str, work) -> dict:
+        """Запустить wormhole-действие фоном (одно за раз)."""
+        if self._wormhole_busy:
+            return {"error": "Передача или установка уже идёт"}
+        if not wormhole_mod.installed():
+            return {"error": "wormhole не установлен - кнопка "
+                             "«Установить» в разделе разовой передачи"}
+        self._wormhole_busy = True
+
+        def runner():
+            try:
+                work()
+            finally:
+                self._wormhole_busy = False
+
+        threading.Thread(target=runner, name=f"omnistash-{name}",
+                         daemon=True).start()
+        return {"ok": True, "started": True}
+
+    def wormhole_setup(self, request=None) -> dict:
+        """Поставить wormhole в изолированный venv (фоном, один раз)."""
+        if self._wormhole_busy:
+            return {"error": "Передача или установка уже идёт"}
+        if wormhole_mod.installed():
+            return {"ok": True, "installed": True}
+        self._wormhole_busy = True
+
+        def runner():
+            try:
+                wormhole_mod.setup(log=self._log)
+            finally:
+                self._wormhole_busy = False
+
+        threading.Thread(target=runner, name="omnistash-wormhole-setup",
+                         daemon=True).start()
+        return {"ok": True, "started": True}
+
+    def wormhole_send(self, request=None) -> dict:
+        """Отправить файл по коду: код и ход печатаются в журнал."""
+        request = request or {}
+        path = str(request.get("path") or "").strip()
+        if not path:
+            return {"error": "Укажите путь к файлу"}
+
+        def work():
+            def on_code(code: str) -> None:
+                self._log(f"wormhole: КОД ДЛЯ СОБЕСЕДНИКА: {code}")
+            wormhole_mod.send(path, log=self._log, on_code=on_code)
+
+        return self._wormhole_run("wormhole-send", work)
+
+    def wormhole_receive(self, request=None) -> dict:
+        """Принять файл по коду в папку загрузок (или указанную)."""
+        request = request or {}
+        code = str(request.get("code") or "").strip()
+        if not code:
+            return {"error": "Код не указан"}
+        dest = str(request.get("dest") or "").strip() \
+            or str(self._current_settings().get("dest_dir")
+                   or profile_dir())
+        return self._wormhole_run(
+            "wormhole-receive",
+            lambda: wormhole_mod.receive(code, dest, log=self._log))
 
     def _mesh_worker(self, row: dict, config: dict, dest_dir: str) -> None:
         try:

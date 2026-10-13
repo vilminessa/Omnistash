@@ -467,9 +467,41 @@ def _migrate_v6(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v7(conn: sqlite3.Connection) -> None:
+    """Зеркало каталогов участников (B3: синхронизация индекса).
+
+    Не cr-sqlite, а своё зеркало с явными правилами: каждая запись
+    живёт под своим автором (origin = ключ узла) и обновляется только
+    версией с ТОГО же узла (videos.updated_at как LWW-счётчик - шкалы
+    разных узлов не сравниваются). Снимок каталога авторитетен для
+    своего origin: строк, которых в нём больше нет, в зеркале не
+    остаётся (тамбстоун не нужен - снимок и есть полное состояние).
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mesh_catalog (
+            origin     TEXT NOT NULL,      -- pubkey-автор каталога
+            remote_id  TEXT NOT NULL,
+            title      TEXT NOT NULL DEFAULT '',
+            duration_s INTEGER,
+            sha256     TEXT NOT NULL DEFAULT '',  -- его хеш файла
+            synced_at  TEXT NOT NULL DEFAULT '',  -- его синк строки
+            updated_at TEXT NOT NULL DEFAULT '',  -- его версия строки (LWW)
+            addr       TEXT NOT NULL DEFAULT '',  -- откуда пришёл снапшот
+            fetched_at TEXT NOT NULL,
+            PRIMARY KEY (origin, remote_id)
+        );
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS mesh_catalog_origin "
+        "ON mesh_catalog(origin)"
+    )
+
+
 # Порядок важен: номер версии = индекс + 1.
 MIGRATIONS = (_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4,
-               _migrate_v5, _migrate_v6)
+               _migrate_v5, _migrate_v6, _migrate_v7)
 
 
 class Database:

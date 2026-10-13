@@ -18,7 +18,11 @@ import ssl
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from urllib.parse import parse_qs
+
+from . import catalog as catalog_mod
 from . import channel as channel_mod
+from . import crypt as crypt_mod
 from . import manifest as manifest_mod
 
 # Отдаём только байты: тела файлов чанками, без чтения в память целиком.
@@ -110,11 +114,34 @@ class _Handler(BaseHTTPRequestHandler):
             return None
         return dict(row)
 
+    def _send_catalog(self) -> None:
+        """Снапшот «что у меня есть» (B3): подписывается на лету.
+
+        Попадают только строки с проверенным файлом - каталог не должен
+        обещать того, чем участник не готов делиться.
+        """
+        conn = self.database.conn
+        entries = [dict(row) for row in conn.execute(
+            """SELECT v.remote_id, v.title, v.duration_s, v.synced_at,
+                      v.updated_at, f.hash AS sha256
+                 FROM videos v JOIN files f ON f.video_id = v.id
+                WHERE v.platform <> 'local'
+                  AND f.kind = 'video' AND f.missing = 0
+                  AND f.hash IS NOT NULL
+                ORDER BY v.updated_at DESC LIMIT ?""",
+            (catalog_mod.MAX_ENTRIES,))]
+        self._json(200, catalog_mod.build(entries))
+
     # -- маршруты ----------------------------------------------------------
 
     def do_GET(self) -> None:  # noqa: N802 - имя из http.server
-        path = (self.path or "").split("?", 1)[0]
+        raw_path = self.path or ""
+        path, _, query = raw_path.partition("?")
         try:
+            if path == "/catalog":
+                self._send_catalog()
+                return
+
             if path.startswith("/manifest/"):
                 remote_id = path[len("/manifest/"):]
                 found = self._find_file(remote_id)
@@ -129,7 +156,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return
 
             if path.startswith("/file/"):
-                self._send_file(path[len("/file/"):])
+                self._send_file(path[len("/file/"):], query)
                 return
 
             self._error(404, "неизвестный путь")
@@ -141,7 +168,7 @@ class _Handler(BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001
                 pass
 
-    def _send_file(self, remote_id: str) -> None:
+    def _send_file(self, remote_id: str, query: str = "") -> None:
         import os
         found = self._find_file(remote_id)
         if not found:
@@ -156,6 +183,40 @@ class _Handler(BaseHTTPRequestHandler):
 
         start, end = 0, total - 1
         range_header = self.headers.get("Range")
+
+        # Шифрование под ключ получателя (B2): ?enc=v1&pk=<x25519 hex>.
+        # Дозапись в этом режиме не поддерживаем (блоки шифруются с
+        # нуля) - честный отказ вместо тихой порчи файла.
+        params = parse_qs(query)
+        enc = (params.get("enc") or [""])[0]
+        pk = (params.get("pk") or [""])[0]
+        if enc or pk:
+            if enc != "v1" or not pk:
+                self._error(400, "непонятный запрос шифрования")
+                return
+            if range_header:
+                self._error(400, "с шифрованием дозапись не поддерживается")
+                return
+            try:
+                recipient_pub = bytes.fromhex(pk)
+                envelope, eph = crypt_mod.build_envelope(
+                    recipient_pub, str(found["hash"] or ""), total)
+            except (ValueError, crypt_mod.CryptError) as exc:
+                self._error(400, f"ключ получателя отклонён: {exc}")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length",
+                             str(crypt_mod.cipher_size(total)))
+            self.send_header(crypt_mod.HEADER,
+                             crypt_mod.envelope_header(envelope))
+            self.end_headers()
+            try:
+                crypt_mod.seal_file(self.wfile.write, path, envelope, eph)
+            except (OSError, crypt_mod.CryptError):
+                pass                        # файл пропал во время отдачи
+            return
+
         partial = False
         if range_header and range_header.startswith("bytes="):
             try:

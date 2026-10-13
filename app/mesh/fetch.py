@@ -19,7 +19,7 @@ import os
 
 from ..indexer import file_hash
 from ..util import human_size, sanitize_name
-from . import client, dht, feedback, manifest, verify
+from . import client, crypt, dht, feedback, manifest, verify
 
 
 def _drop_revoked(conn, pairs, log):
@@ -144,8 +144,15 @@ def restore(conn, row: dict, settings: dict, dest_dir, *,
     try:
         # expect = ключ манифеста, по которому выбрали адресата: канал
         # должен открыться именно им (TOFU-пин подтвердится снаружи).
+        # mesh_encrypt: шифроблоки под СВОЙ ключ (B2) - прочитать байты
+        # по пути сможет только обладатель нашего ключа.
+        encrypt_to = (crypt.own_x25519_public()
+                      if settings.get("mesh_encrypt") else None)
+        if encrypt_to:
+            log("Mesh: перенос шифруется под мой ключ (блоки 128 КБ)")
         client.fetch(row["remote_id"], peer, part, stop=stop,
-                     expect=str(item.get("pubkey") or "") or None)
+                     expect=str(item.get("pubkey") or "") or None,
+                     encrypt_to=encrypt_to)
     except client.MeshCancelled:
         return give_up("Mesh: перенос остановлен")
     except Exception as exc:  # noqa: BLE001
