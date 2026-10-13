@@ -3963,6 +3963,7 @@
       sort_col: "", sort_dir: "desc",
       mesh_enabled: false, mesh_peers: "", mesh_port: 38574, mesh_upnp: true,
       mesh_encrypt: false, mesh_mdns: true, mesh_nick: "",
+      mesh_max_mb: 10, mesh_rate_mbit: 10,
       dest_dir: "D:\\видео\\downloads",
       output_template: "%(channel)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s",
       quality: "high", subtitles: "none", transcode: "none",
@@ -4175,6 +4176,17 @@
               "списка видео). Регистр не важен, 2-32 символа; старое " +
               "имя живёт до суток. Пусто = не объявляться.",
         default: "" },
+      { key: "mesh_max_mb", type: "int", section: "Mesh",
+        label: "Лимит размера файла, МиБ",
+        hint: "Максимум отдачи/приёма через mesh одним файлом (по " +
+              "умолчанию 10); отказ виден в журнале. 0 - без лимита. " +
+              "Действует с обеих сторон независимо.",
+        min: 0, max: 10240, default: 10 },
+      { key: "mesh_rate_mbit", type: "int", section: "Mesh",
+        label: "Ограничение скорости, Мбит/с",
+        hint: "Отдача и приём не быстрее этого (по умолчанию 10); " +
+              "0 - без ограничения. Каждая сторона сдерживает свою часть.",
+        min: 0, max: 10000, default: 10 },
       { key: "_peers", type: "action", section: "Mesh",
         label: "Участники",
         hint: "Мой никнейм и отпечаток ключа, поиск участников по нику " +

@@ -24,6 +24,7 @@ from . import catalog as catalog_mod
 from . import channel as channel_mod
 from . import crypt as crypt_mod
 from . import manifest as manifest_mod
+from . import pacing
 
 # Отдаём только байты: тела файлов чанками, без чтения в память целиком.
 CHUNK = 256 * 1024
@@ -82,6 +83,8 @@ class _Server(ThreadingHTTPServer):
 class _Handler(BaseHTTPRequestHandler):
     server_version = "OmnistashMesh/1"
     database = None          # app.db.Database (свое соединение - в потоке)
+    max_bytes = 0            # лимит размера файла (0 = без лимита)
+    rate_bps = 0             # лимит отдачи в байтах/с (0 = без лимита)
 
     def log_message(self, *args) -> None:   # noqa: D102 - в stderr не пишем
         pass
@@ -181,6 +184,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(404, "файл недоступен")
             return
 
+        # Лимит размера (B1.7): больше - не отдаём ВООБЩЕ, ни байта и
+        # ни в шифрованном виде; клиенту - честный отказ в журнал.
+        if self.max_bytes and total > self.max_bytes:
+            self._error(413, f"файл {total / pacing.MIB:.1f} МиБ больше "
+                             f"лимита {self.max_bytes // pacing.MIB} МиБ - "
+                             "не отдаётся")
+            return
+
         start, end = 0, total - 1
         range_header = self.headers.get("Range")
 
@@ -212,7 +223,15 @@ class _Handler(BaseHTTPRequestHandler):
                              crypt_mod.envelope_header(envelope))
             self.end_headers()
             try:
-                crypt_mod.seal_file(self.wfile.write, path, envelope, eph)
+                # Темп действует и на шифропоток: обёртка пишет и
+                # учитывает байты, не меняя crypt-код.
+                limiter = pacing.RateLimiter(self.rate_bps)
+
+                def writer(data: bytes) -> None:
+                    self.wfile.write(data)
+                    limiter.consume(len(data))
+
+                crypt_mod.seal_file(writer, path, envelope, eph)
             except (OSError, crypt_mod.CryptError):
                 pass                        # файл пропал во время отдачи
             return
@@ -241,6 +260,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Range", f"bytes {start}-{end}/{total}")
         self.end_headers()
 
+        limiter = pacing.RateLimiter(self.rate_bps)
         with open(path, "rb") as handle:
             handle.seek(start)
             left = length
@@ -249,16 +269,20 @@ class _Handler(BaseHTTPRequestHandler):
                 if not chunk:
                     break
                 self.wfile.write(chunk)
+                limiter.consume(len(chunk))
                 left -= len(chunk)
 
 
 class PeerServer:
     """HTTPS-сервер участника: start() - фоном, stop() - дожидается."""
 
-    def __init__(self, database, port: int = 0, log=None):
+    def __init__(self, database, port: int = 0, log=None,
+                 max_bytes: int = 0, rate_bps: int = 0):
         self._database = database
         self._port = int(port)
         self._log = log or (lambda message: None)
+        self._max_bytes = int(max_bytes or 0)   # 0 = без лимита
+        self._rate_bps = int(rate_bps or 0)     # 0 = без ограничения
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -277,7 +301,9 @@ class PeerServer:
         if self.running:
             return self.port
         handler = type("_BoundHandler", (_Handler,),
-                       {"database": self._database})
+                       {"database": self._database,
+                        "max_bytes": self._max_bytes,
+                        "rate_bps": self._rate_bps})
         httpd = _Server(("0.0.0.0", self._port), handler)
         httpd.daemon_threads = True
         httpd.log = self._log

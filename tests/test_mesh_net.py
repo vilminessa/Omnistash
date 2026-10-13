@@ -266,6 +266,61 @@ class TestClient(MeshNetCase):
                          "неизвестное - безопасный дефолт")
 
 
+class TestLimits(MeshNetCase):
+    """B1.7: лимит размера - с обеих сторон (сервер не отдаёт, клиент не пишет)."""
+
+    BIG = 11 * 1024 * 1024          # больше лимита по умолчанию (10 МиБ)
+    LIMIT = 10 * 1024 * 1024
+
+    def _big_holder(self) -> dict:
+        """Холдер с файлом больше лимита (сервер смотрит размер на лету)."""
+        holder = self.seed_holder()
+        holder["path"].write_bytes(b"\x00" * self.BIG)
+        return holder
+
+    def test_server_refuses_oversized_file(self):
+        """Сервер с лимитом: отказ 413, ни байта тела файла."""
+        self._big_holder()
+        limited = server.PeerServer(self.db_a, 0, max_bytes=self.LIMIT)
+        port = limited.start()
+        self.addCleanup(limited.stop)
+        status, _headers, body = self.raw_get(
+            "/file/vid000000001", addr=f"127.0.0.1:{port}")
+        self.assertEqual(status, 413)
+        error = json.loads(body).get("error", "")
+        self.assertIn("лимит", error)
+        self.assertIn("не отдаётся", error)
+
+    def test_client_refuses_oversized_before_writing_part(self):
+        """Клиентский лимит: отказ по Content-Length ДО создания part."""
+        self._big_holder()
+        receiver = self.seed_receiver()
+        part = self.root / "limit" / "video.part"
+        with self.assertRaises(RuntimeError) as caught:
+            client.fetch("vid000000001", receiver["addr"], str(part),
+                         max_bytes=self.LIMIT)
+        self.assertIn("лимит", str(caught.exception))
+        self.assertFalse(part.exists(),
+                         "part не должен появиться при отказе по размеру")
+
+    def test_encrypted_stream_limit_from_envelope(self):
+        """Шифропуть: размер лежит в конверте - отказ до записи part."""
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.x25519 import \
+            X25519PrivateKey
+        self._big_holder()
+        receiver = self.seed_receiver()
+        part = self.root / "limit-enc" / "video.part"
+        recipient = X25519PrivateKey.generate().public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        with self.assertRaises(RuntimeError) as caught:
+            client.fetch("vid000000001", receiver["addr"], str(part),
+                         encrypt_to=recipient, max_bytes=self.LIMIT)
+        self.assertIn("лимит", str(caught.exception))
+        self.assertFalse(part.exists(),
+                         "шифропоток не должен начинаться сверх лимита")
+
+
 class TestRestore(MeshNetCase):
     """Полный путь восстановления: от манифеста до скачанной строки."""
 

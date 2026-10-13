@@ -27,6 +27,7 @@ from . import catalog as catalog_mod
 from . import channel as channel_mod
 from . import crypt as crypt_mod
 from . import manifest as manifest_mod
+from . import pacing
 
 CONNECT_TIMEOUT = 6.0
 READ_TIMEOUT = 60.0          # большие файлы читаем чанками долго
@@ -204,7 +205,8 @@ def probe(addr: str, expect: str | None = None,
 
 def fetch(remote_id: str, addr: str, part_path, *, progress=None,
           stop=None, expect: str | None = None,
-          encrypt_to: bytes | None = None) -> dict:
+          encrypt_to: bytes | None = None,
+          max_bytes: int = 0, rate_bps: int = 0) -> dict:
     """Загрузка (или дозагрузка) в part_path. Возвращает
     {resumed_from, written, total} - хеш считает вызывающая сторона.
 
@@ -214,6 +216,8 @@ def fetch(remote_id: str, addr: str, part_path, *, progress=None,
     encrypt_to - X25519-ключ (32 байта): файл уходит шифроблоками под
     него (B2), читается только нашим ключом; в этом режиме дозапись
     не поддерживается - начинается с нуля.
+    max_bytes/rate_bps (B1.7) - лимит размера (0 = без) и скорость
+    приёма: размер проверяем ДО записи part, темп держим на чтении.
     """
     import os
     existing = 0
@@ -239,14 +243,43 @@ def fetch(remote_id: str, addr: str, part_path, *, progress=None,
             if envelope is None:
                 raise RuntimeError("участник не поддержал шифрование "
                                    "(старая версия?)")
+            # Лимит размера: размер plaintext лежит в конверте - отказ
+            # ДО записи (шифрование пишет part с нуля).
+            plain_size = int(envelope.get("size") or 0)
+            if max_bytes and plain_size > max_bytes:
+                raise RuntimeError(
+                    f"файл {plain_size / pacing.MIB:.1f} МиБ больше "
+                    f"лимита {max_bytes // pacing.MIB} МиБ")
 
             def enc_progress(done: int, _total: int) -> None:
                 if stop is not None and stop.is_set():
                     raise MeshCancelled("остановлено пользователем")
+                if max_bytes and done > max_bytes:
+                    # Страховка: сервер мог соврать в конверте.
+                    raise RuntimeError(
+                        f"перенос превысил лимит "
+                        f"{max_bytes // pacing.MIB} МиБ")
                 if progress:
                     progress(done, _total)
 
-            written = crypt_mod.open_stream(part_path, response, envelope,
+            limiter = pacing.RateLimiter(rate_bps)
+
+            class _Paced:
+                """Чтение с темпом: recv-цикл шифропотока учитывает байты."""
+
+                def __init__(self, inner, pace):
+                    self._inner, self._pace = inner, pace
+
+                def read(self, size=-1):
+                    chunk = self._inner.read(size)
+                    self._pace.consume(len(chunk))
+                    return chunk
+
+                def __getattr__(self, name):
+                    return getattr(self._inner, name)
+
+            wrapped = _Paced(response, limiter)
+            written = crypt_mod.open_stream(part_path, wrapped, envelope,
                                             progress=enc_progress)
             return {"resumed_from": 0, "written": written}
         if existing and status != 206:
@@ -257,6 +290,13 @@ def fetch(remote_id: str, addr: str, part_path, *, progress=None,
             mode = "ab" if existing else "wb"
         declared = response.headers.get("Content-Length")
         total = existing + int(declared) if declared else None
+        # Лимит размера (B1.7): известен из заголовка - отказ ДО записи,
+        # part не создаём и не дописываем.
+        if max_bytes and total and total > max_bytes:
+            raise RuntimeError(
+                f"файл {total / pacing.MIB:.1f} МиБ больше лимита "
+                f"{max_bytes // pacing.MIB} МиБ")
+        limiter = pacing.RateLimiter(rate_bps)
         written = 0
         with open(part_path, mode) as out:
             while True:
@@ -267,6 +307,12 @@ def fetch(remote_id: str, addr: str, part_path, *, progress=None,
                     break
                 out.write(chunk)
                 written += len(chunk)
+                limiter.consume(len(chunk))
+                if max_bytes and existing + written > max_bytes:
+                    # Страховка: сервер соврал про Content-Length.
+                    raise RuntimeError(
+                        f"перенос превысил лимит "
+                        f"{max_bytes // pacing.MIB} МиБ")
                 if progress:
                     progress(existing + written, total)
     except MeshCancelled:

@@ -40,6 +40,7 @@ from .mesh import firewall as mesh_firewall
 from .mesh import identity as mesh_identity
 from .mesh import mdns as mesh_mdns
 from .mesh import nat as mesh_nat
+from .mesh import pacing as mesh_pacing
 from .mesh import server as mesh_server
 from .db import SYNC_MODES, Database
 from .metadata import normalize_video
@@ -196,8 +197,12 @@ class Api:
         # участников» из карточки.
         config0 = self._current_settings()
         self._mesh_port = int(config0.get("mesh_port") or 38574)
-        self._mesh_server = mesh_server.PeerServer(self.db, self._mesh_port,
-                                                   log=self._log)
+        self._server_limits = (mesh_pacing.mb_to_bytes(config0.get("mesh_max_mb")),
+                               mesh_pacing.mbit_to_bps(config0.get("mesh_rate_mbit")))
+        self._mesh_server = mesh_server.PeerServer(
+            self.db, self._mesh_port, log=self._log,
+            max_bytes=self._server_limits[0],
+            rate_bps=self._server_limits[1])
         # UDP-узел DHT (тот же номер порта - другой транспорт): вход в
         # сеть через публичные bootstrap-роутеры + LAN-multicast; живые
         # соседи помнятся в профиле между запусками.
@@ -520,19 +525,34 @@ class Api:
         config = self._current_settings()
         want = bool(config.get("mesh_enabled"))
         port = int(config.get("mesh_port") or 38574)
+        limits = (mesh_pacing.mb_to_bytes(config.get("mesh_max_mb")),
+                  mesh_pacing.mbit_to_bps(config.get("mesh_rate_mbit")))
         if port != self._mesh_port:
             if self._mesh_server.running:
                 self._mesh_server.stop()
             if self._mesh_dht.running:
                 self._mesh_dht.stop_sync()
             self._nat_stop()    # проброс старого порта нам больше не нужен
-            self._mesh_server = mesh_server.PeerServer(self.db, port,
-                                                       log=self._log)
+            self._mesh_server = mesh_server.PeerServer(
+                self.db, port, log=self._log,
+                max_bytes=limits[0], rate_bps=limits[1])
+            self._server_limits = limits
             self._mesh_dht = mesh_dht.DHTNode(
                 log=self._log, port=port,
                 persist=str(profile_dir() / mesh_dht.PEER_FILE))
             mesh_dht.set_current(None)
             self._mesh_port = port
+        elif self._server_limits != limits:
+            # Изменились лимиты переноса - сервер пересоздаём (они живут
+            # в обработчике соединений), DHT не трогаем.
+            if self._mesh_server.running:
+                self._mesh_server.stop()
+                self._log("Mesh-сервер: перезапуск - изменился лимит "
+                          "переноса")
+            self._mesh_server = mesh_server.PeerServer(
+                self.db, self._mesh_port, log=self._log,
+                max_bytes=limits[0], rate_bps=limits[1])
+            self._server_limits = limits
         if want and bool(config.get("mesh_upnp", True)):
             if self._nat is None or self._nat.port != port:
                 self._nat_stop()
@@ -774,8 +794,9 @@ class Api:
         else:
             self._log(f"Настройка {key} = {pair.get('value')!r}")
         self._heavy_at = 0.0  # дерево/счётчики могли измениться
-        if key in ("mesh_enabled", "mesh_port", "mesh_upnp"):
-            # Согласие дано/снято или сменился порт - сервер тут же следует.
+        if key in ("mesh_enabled", "mesh_port", "mesh_upnp",
+                    "mesh_max_mb", "mesh_rate_mbit"):
+            # Согласие/порт/лимиты - сервер и проброс следуют сразу.
             self._mesh_apply()
         if key == "mesh_nick":
             # Смена ника объявляется сразу (при включённом участии):
