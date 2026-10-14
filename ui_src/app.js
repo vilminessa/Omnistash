@@ -682,10 +682,15 @@
       if (d.status === "tofu") {
         row += '<button class="btn" data-peer="trust-verify" data-pub="' +
           esc(d.pubkey) + '">Отпечаток…</button> ';
+        row += '<select data-peer-format style="max-width:110px">' +
+          '<option value="words">12 слов</option>' +
+          '<option value="emoji">эмодзи</option>' +
+          '<option value="icons">иконки</option>' +
+          '<option value="digits">цифры</option></select> ';
         row += '<button class="btn primary" data-peer="trust-sas" data-pub="' +
           esc(d.pubkey) + '" data-addr="' + esc(d.last_addr || "") + '"' +
           (d.last_addr ? "" : " disabled title=\"нет адреса устройства\"") +
-          '>12 слов…</button>';
+          '>Сверить…</button>';
       } else if (d.status === "verified") {
         row += '<button class="btn" data-peer="trust-revoke" data-pub="' +
           esc(d.pubkey) + '">Отозвать доверие…</button>';
@@ -3780,19 +3785,40 @@
           toast("Нет адреса устройства - сначала проверьте адрес", true);
           return;
         }
-        call("trust_sas_begin", { addr: sasAddr }).then(function (res) {
-          if (res && res.error) { toast(res.error, true); return; }
-          var words = (res.words || []).join(" ");
-          var ok = confirm("Ваши 12 слов (сверьте ГОЛОСОМ с собеседником, " +
-            "его слова - на его устройстве):\n\n    " + words + "\n\n" +
-            "Слова совпали?\nOK = подтвердить " + (res.fingerprint || ""));
-          if (!ok) { toast("Сверка отменена - устройство не подтверждено"); return; }
-          call("trust_sas_confirm", { pubkey: res.pubkey }).then(function (fin) {
-            if (fin && fin.error) { toast(fin.error, true); return; }
-            toast("Устройство подтверждено сверкой 12 слов");
-            openPeerOverlay();
+        var sasRow = btn.closest(".peer-row");
+        var fmtSel = sasRow
+          ? sasRow.querySelector("[data-peer-format]") : null;
+        var method = (fmtSel || {}).value || "words";
+        call("trust_sas_begin", { addr: sasAddr, method: method })
+          .then(function (res) {
+            if (res && res.error) { toast(res.error, true); return; }
+            var text;
+            if (res.method === "icons" && res.shown_svg) {
+              text = "8 иконок (рисунок в строке устройства)";
+              var box = document.createElement("div");
+              box.className = "field-hint";
+              box.innerHTML = (res.shown_svg || []).map(function (svg) {
+                return svg.replace('width="64"', 'width="28"')
+                          .replace('height="64"', 'height="28"');
+              }).join(" ");
+              if (sasRow && sasRow.firstElementChild) {
+                sasRow.firstElementChild.appendChild(box);
+              }
+            } else {
+              text = (res.shown || []).join
+                ? (res.shown || []).join(" ") : String(res.shown || "");
+            }
+            var ok = confirm("Ваша сверка «" + method + "» - сверьте " +
+              "ГОЛОСОМ с собеседником (его сверка - на его устройстве):\n\n" +
+              "    " + text + "\n\nСовпали?\nOK = подтвердить " +
+              (res.fingerprint || ""));
+            if (!ok) { toast("Сверка отменена - устройство не подтверждено"); return; }
+            call("trust_sas_confirm", { pubkey: res.pubkey }).then(function (fin) {
+              if (fin && fin.error) { toast(fin.error, true); return; }
+              toast("Устройство подтверждено сверкой");
+              openPeerOverlay();
+            });
           });
-        });
         return;
       }
       if (action === "catalog-refresh") {

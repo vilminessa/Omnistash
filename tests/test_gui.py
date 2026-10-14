@@ -782,7 +782,9 @@ class TestPeerApi(GuiCase):
 
         res = api.trust_sas_begin({"addr": addr})
         self.assertTrue(res.get("ok"), res)
-        self.assertEqual(len(res["words"]), 12, "ровно 12 слов")
+        self.assertEqual(res["method"], "words")
+        self.assertEqual(len(res["shown"]), 12, "ровно 12 слов")
+        self.assertIsNone(res["shown_svg"])
         own = res["pubkey"]
 
         # чужой ключ / повтор без сверки - честные отказы
@@ -800,6 +802,37 @@ class TestPeerApi(GuiCase):
 
         # пин НЕ писался до подтверждения - теперь устройство verified
         self.assertEqual(api.peer_profile()["devices"][0]["pubkey"], own)
+
+    def test_sas_formats(self):
+        """1.1: выбор формата инициатором - все четыре рендера."""
+        api = self._api()
+        server = mesh_server.PeerServer(api.db, 0)
+        port = server.start()
+        self.addCleanup(server.stop)
+        addr = f"127.0.0.1:{port}"
+
+        words = api.trust_sas_begin({"addr": addr, "method": "words"})
+        self.assertEqual(len(words["shown"]), 12)
+        self.assertIsNone(words["shown_svg"])
+
+        emoji = api.trust_sas_begin({"addr": addr, "method": "emoji"})
+        self.assertEqual(len(emoji["shown"]), 8)
+
+        digits = api.trust_sas_begin({"addr": addr, "method": "digits"})
+        self.assertEqual(len(digits["shown"]), 8)
+        self.assertTrue(digits["shown"].isdigit())
+
+        icons = api.trust_sas_begin({"addr": addr, "method": "icons"})
+        self.assertEqual(len(icons["shown"]), 8)
+        self.assertEqual(len(icons["shown_svg"]), 8)
+        self.assertTrue(all(s.startswith("<svg") for s in icons["shown_svg"]))
+
+        bad = api.trust_sas_begin({"addr": addr, "method": "png"})
+        self.assertIn("error", bad, "неизвестный формат - честный отказ")
+
+        # после всех begin последний pending подтверждаем - устройство verified
+        res = api.trust_sas_confirm({"pubkey": icons["pubkey"]})
+        self.assertTrue(res.get("ok"), res)
 
     def test_device_doctor_report(self):
         """1.5: доктор - отчёт за прогон; чужой ключ - честный отказ."""

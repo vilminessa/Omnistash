@@ -146,32 +146,49 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(200, catalog_mod.build(entries))
 
     def _send_sas(self, query: str) -> None:
-        """Обмен ephemeral для SAS-сверки (1.1, B2+S).
+        """Обмен ephemeral для SAS-сверки (1.1, B2+S, канон a3fa9c7).
 
-        Вызывается ТОЛЬКО внутри аттестованного TLS-канала (verify_peer
-        уже прошёл в get_request): посредник без приватного ключа
-        участника сюда не дойдёт. Свой ephemeral свежий на каждый
-        запрос; общие слова считаются здесь и журналируются - оператор
-        сверяет их со словами на стороне запросчика (голосом).
+        Вызывается ТОЛЬКО внутри аттестованного TLS-канала. Запрос:
+        /sas/?eph=<hex>&id=<ed25519 hex клиента>&method=<words|emoji|
+        icons|digits>. id клиента нужен канону HKDF (info = пара идентич-
+        ностей); ложный id ломает сверку только самому лжецу (его слова
+        с сервером разойдутся). Свой ephemeral свежий на каждый запрос;
+        сверяемый дайджест журналируется рендером выбранного формата.
         """
-        from cryptography.hazmat.primitives.asymmetric.x25519 import (
-            X25519PublicKey)
+        from . import identity
         from . import sas as sas_mod
 
+        params = parse_qs(query)
         try:
-            peer_eph = bytes.fromhex(
-                (parse_qs(query).get("eph") or [""])[0])
+            peer_eph_hex = (params.get("eph") or [""])[0]
+            peer_eph = bytes.fromhex(peer_eph_hex)
             if len(peer_eph) != 32:
                 raise ValueError("не 32 байта")
+            client_id = (params.get("id") or [""])[0].strip().lower()
+            if len(client_id) != 64 or any(c not in "0123456789abcdef"
+                                            for c in client_id):
+                raise ValueError("id - 64 hex")
         except ValueError as exc:
-            self._error(400, f"битый ephemeral-ключ: {exc}")
+            self._error(400, f"битый запрос SAS: {exc}")
+            return
+        method = (params.get("method") or ["words"])[0]
+        if method not in sas_mod.METHODS:
+            self._error(400, f"формат сверки: {sas_mod.METHODS}")
             return
         eph, eph_pub_hex = sas_mod.own_ephemeral()
-        shared = eph.exchange(X25519PublicKey.from_public_bytes(peer_eph))
-        words = " ".join(sas_mod.words_from_secret(shared))
-        self.server.log(f"SAS: слова для собеседника (сверьте голосом): "
-                        f"{words}")
-        self._json(200, {"eph": eph_pub_hex})
+        own_id = identity.get_identity()[1].hex()
+        digest = sas_mod.digest_for(eph, peer_eph_hex, client_id, own_id)
+        rendered = sas_mod.render(method, digest)
+        if method == "icons":
+            shown = "индексы " + " ".join(
+                str(i) for i in sas_mod.icons(digest))
+        elif isinstance(rendered, str):
+            shown = rendered          # digits - строка, не список
+        else:
+            shown = " ".join(str(x) for x in rendered)
+        self.server.log(f"SAS[{method}] для собеседника "
+                        f"(сверьте на его экране): {shown}")
+        self._json(200, {"eph": eph_pub_hex, "method": method})
 
     # -- маршруты ----------------------------------------------------------
 

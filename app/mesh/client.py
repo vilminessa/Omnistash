@@ -203,21 +203,28 @@ def probe(addr: str, expect: str | None = None,
         conn.close()
 
 
-def sas_begin(addr: str, timeout: float = CONNECT_TIMEOUT) -> dict:
-    """Начать SAS-сверку «12 слов» с устройством по адресу (B2+S, 1.1).
+def sas_begin(addr: str, method: str = "words",
+              timeout: float = CONNECT_TIMEOUT) -> dict:
+    """Начать SAS-сверку с устройством по адресу (1.1, канон a3fa9c7).
 
+    method выбирает инициатор дружбы: words/emoji/icons/digits.
     pin=False: пин НЕ пишем - устройство запоминается только после того,
-    как человек сверил слова (gui.trust_sas_confirm -> truststore_verify).
-    Возвращает {pubkey, fingerprint, words, addr}; сверка слов - голосом
+    как человек сверил сверку (gui.trust_sas_confirm -> truststore_verify).
+    Возвращает {addr, pubkey, fingerprint, method, shown}; сверка - голосом
     или лично; MITM не пройдёт (см. mesh/sas.py).
     """
     from . import identity
     from . import sas as sas_mod
 
+    if method not in sas_mod.METHODS:
+        raise RuntimeError(f"формат сверки: {sas_mod.METHODS}")
+    my_id = identity.get_identity()[1].hex()
     eph_priv, eph_pub_hex = sas_mod.own_ephemeral()
     conn = _connect(addr, timeout, None, pin=False)
     try:
-        conn.request("GET", f"/sas/?eph={eph_pub_hex}",
+        peer_pubkey = str(getattr(conn, "mesh_identity", ""))
+        conn.request("GET",
+                     f"/sas/?eph={eph_pub_hex}&id={my_id}&method={method}",
                      headers={"User-Agent": USER_AGENT})
         response = conn.getresponse()
         raw = response.read(4096)
@@ -229,14 +236,14 @@ def sas_begin(addr: str, timeout: float = CONNECT_TIMEOUT) -> dict:
             payload = json.loads(raw.decode("utf-8"))
         except ValueError as exc:
             raise RuntimeError("ответ /sas/ не JSON") from exc
-        peer_pubkey = str(getattr(conn, "mesh_identity", ""))
         peer_eph = str(payload.get("eph") or "")
     finally:
         conn.close()
-    words = sas_mod.sas_words(eph_priv, peer_eph)
+    shown = sas_mod.sas_render(eph_priv, peer_eph, my_id, peer_pubkey,
+                               method)
     return {"addr": addr, "pubkey": peer_pubkey,
             "fingerprint": identity.fingerprint(peer_pubkey),
-            "words": words}
+            "method": method, "shown": shown}
 
 
 def fetch(remote_id: str, addr: str, part_path, *, progress=None,

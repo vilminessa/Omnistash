@@ -2595,28 +2595,36 @@ class Api:
     # ------------------------------------------------------------------ #
 
     def trust_sas_begin(self, request=None) -> dict:
-        """Начать SAS-сверку: вернуть 12 слов + отпечаток устройства.
+        """Начать SAS-сверку: вернуть показ выбранного формата.
 
-        Пин не пишется: устройство подтверждается только после того, как
-        человек сверит слова (trust_sas_confirm). Слова также идут в
-        журнал (оператор сверяет со словами на стороне устройства).
+        method выбирает инициатор (words/emoji/icons/digits); показ
+        бывает строкой (digits), списком (words/emoji) или списком SVG
+        (icons) - UI рисует что пришло. Пин не пишется: устройство
+        подтверждается только после сверки человеком (trust_sas_confirm).
         """
         request = request or {}
         addr = str(request.get("addr") or "").strip()
+        method = str(request.get("method") or "words").strip()
         if not addr or ":" not in addr:
             return {"error": "Адрес не указан (ожидается ip:порт)"}
         try:
-            result = mesh_client.sas_begin(addr)
+            result = mesh_client.sas_begin(addr, method=method)
         except mesh_channel.ChannelError as exc:
             return {"error": str(exc)}
         except Exception as exc:  # noqa: BLE001 - адрес мог умереть
             return {"error": f"SAS не начался: {exc}"}
+        shown_svg = (result["shown"] if result["method"] == "icons"
+                     else None)
+        if result["method"] == "icons":
+            shown = f"{len(result['shown'])} иконок"
+        else:
+            shown = " ".join(str(x) for x in result["shown"])
         with self._lock:
             self._sas_pending = {"pubkey": result["pubkey"], "addr": addr,
                                  "ts": time.time()}
-        self._log(f"SAS: слова для {addr} ({' '.join(result['words'])}) - "
-                  "сверьте голосом на устройстве собеседника")
-        return {"ok": True, **result}
+        self._log(f"SAS[{result['method']}]: сверьте на устройстве "
+                  f"собеседника ({addr}): {shown}")
+        return {"ok": True, **result, "shown_svg": shown_svg}
 
     def trust_sas_confirm(self, request=None) -> dict:
         """Человек подтвердил совпадение слов - устройство verified."""

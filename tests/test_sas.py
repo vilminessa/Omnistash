@@ -1,11 +1,12 @@
-"""SAS «12 слов» (1.1): словарь, обе дороги ECDH, живой обмен.
+"""SAS (1.1): канон a3fa9c7 (векторы) + обёртки API + живой обмен.
 
-Ключевой инвариант: обе стороны считают ОДНИ И ТЕ ЖЕ слова из своего
-ECDH-вывода общего секрета; MITM подставил бы свои ephemeral-ключи ->
-слова разошлись бы. Интеграция гоняет реальный TLS-сервер участника и
-сверяет слова клиента с серверными (из лога).
+Векторы - контракт стабильности: словарь/списки/нарезка битов менять
+нельзя, иначе пары разных версий перестанут сходиться. Живой обмен
+гоняет реальный TLS-сервер участника и сверяет рендер клиента с серверным
+журналом для выбранного формата.
 """
 
+import socket
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,50 +14,97 @@ from unittest import mock
 
 from app.mesh import identity, sas
 
-
-class TestWordList(unittest.TestCase):
-    def test_list_shape(self):
-        self.assertEqual(len(sas.WORDS), sas.WORDS_COUNT)
-        self.assertEqual(len(set(sas.WORDS)), sas.WORDS_COUNT,
-                         "слова должны быть уникальны")
-        for word in sas.WORDS[:50] + sas.WORDS[-50:]:
-            self.assertGreaterEqual(len(word), 6, word)
-            self.assertTrue(word.isalpha() and word.islower(), word)
-
-    def test_words_deterministic(self):
-        secret = b"\x01" * 32
-        first = sas.words_from_secret(secret)
-        second = sas.words_from_secret(secret)
-        self.assertEqual(first, second)
-        self.assertEqual(len(first), sas.SAS_LEN)
-        for word in first:
-            self.assertIn(word, sas.WORDS)
+# Общий вход для всех векторов: shared = 00..1f, идентичности aa/cc.
+SHARED = bytes(range(32))
+ID_A = "aa" * 32
+ID_B = "cc" * 32
+DIGEST_HEX = ("413b19380b64ce320f9df8cf0c88c8de"
+              "899c6b09c55eb5d78be4022b49b3bf7d")
+WORDS_VEC = ["посудомойка", "люлька", "минута", "заря", "катер",
+             "заготовка", "карп", "рецепт", "призёр", "ковёр",
+             "инвентарь", "чечевица"]
+EMOJI_VEC = "🐱🐻🎁🐵🌽🍎🧩🎯"
+ICONS_VEC = [51, 35, 8, 15, 39, 31, 35, 15]
+DIGITS_VEC = "25480802"
 
 
-class TestEcdh(unittest.TestCase):
+class TestCanon(unittest.TestCase):
+    def test_validate_canon(self):
+        """Канон: словарь 1024 без дублей, эмодзи 64, сетки иконок."""
+        sas.validate()
+        from app.mesh.sas_words import SAS_WORDS
+        self.assertEqual(len(SAS_WORDS), 1024)
+
+    def test_sas_bytes_is_symmetric_and_bound(self):
+        """Порядок идентичностей не важен; пара и версия - важны."""
+        digest = sas.sas_bytes(SHARED, ID_A, ID_B)
+        self.assertEqual(len(digest), 32)
+        self.assertEqual(digest, sas.sas_bytes(SHARED, ID_B, ID_A))
+        self.assertNotEqual(digest, sas.sas_bytes(b"\x01" * 32, ID_A, ID_B),
+                            "другой ECDH-секрет - другой SAS (ловит MITM)")
+        self.assertNotEqual(digest, sas.sas_bytes(SHARED, ID_A, "bb" * 32),
+                            "другая пара устройств - другой SAS")
+
+    def test_methods_exposed(self):
+        self.assertEqual(sas.METHODS, ("words", "emoji", "icons", "digits"))
+        for method in sas.METHODS:
+            self.assertIn(method, sas.METHOD_LABELS)
+
+
+class TestVector(unittest.TestCase):
+    """Фиксированный вектор: вход -> ровно эти значения."""
+
+    def setUp(self):
+        self.digest = sas.sas_bytes(SHARED, ID_A, ID_B)
+
+    def test_digest(self):
+        self.assertEqual(self.digest.hex(), DIGEST_HEX)
+
+    def test_words_vector(self):
+        got = sas.words(self.digest)
+        self.assertEqual(got, WORDS_VEC)
+        self.assertEqual(len(got), 12, "ровно 12 слов")
+
+    def test_emoji_vector(self):
+        self.assertEqual("".join(sas.emoji(self.digest)), EMOJI_VEC)
+
+    def test_icons_vector_and_svg(self):
+        indexes = sas.icons(self.digest)
+        self.assertEqual(indexes, ICONS_VEC)
+        for index in indexes:
+            svg = sas.svg_icon(index)
+            self.assertIn("<svg", svg)
+            self.assertIn("viewBox", svg)
+
+    def test_digits_vector(self):
+        self.assertEqual(sas.digits(self.digest), DIGITS_VEC)
+
+    def test_render_dispatch(self):
+        for method, expected in (("words", WORDS_VEC),
+                                 ("emoji", list(EMOJI_VEC)),
+                                 ("digits", DIGITS_VEC)):
+            self.assertEqual(sas.render(method, self.digest), expected)
+        with self.assertRaises(ValueError):
+            sas.render("png", self.digest)
+
+
+class TestEcdhWrappers(unittest.TestCase):
     def test_both_roads_agree(self):
-        """Обе дороги общего секрета дают одни и те же слова."""
         a_priv, a_pub = sas.own_ephemeral()
         b_priv, b_pub = sas.own_ephemeral()
-        shared_a = sas.shared_secret(a_priv, b_pub)
-        shared_b = sas.shared_secret(b_priv, a_pub)
-        self.assertEqual(shared_a, shared_b)
-        self.assertEqual(sas.words_from_secret(shared_a),
-                         sas.words_from_secret(shared_b))
+        self.assertEqual(sas.shared_secret(a_priv, b_pub),
+                         sas.shared_secret(b_priv, a_pub))
 
-    def test_impostor_words_differ(self):
-        """Чужой ephemeral (MITM-посредник) даёт другие слова."""
-        a_priv, _a_pub = sas.own_ephemeral()
+    def test_impostor_digest_differ(self):
+        """Чужой ephemeral (MITM) даёт другой дайджест - слова разойдутся."""
+        a_priv, a_pub = sas.own_ephemeral()
         _b_priv, b_pub = sas.own_ephemeral()
-        _mitv_priv, mitv_pub = sas.own_ephemeral()
-        honest = sas.sas_words(a_priv, b_pub)
-        spoofed = sas.sas_words(a_priv, mitv_pub)
-        self.assertNotEqual(honest, spoofed,
-                            "посредник обязан ломать сверку слов")
+        _m_priv, m_pub = sas.own_ephemeral()
+        honest = sas.digest_for(a_priv, b_pub, ID_A, ID_B)
+        spoofed = sas.digest_for(a_priv, m_pub, ID_A, ID_B)
+        self.assertNotEqual(honest, spoofed)
 
-
-class TestBadKeys(unittest.TestCase):
-    def test_shared_secret_validation(self):
+    def test_bad_keys(self):
         priv, _pub = sas.own_ephemeral()
         for bad in ("", "zz", "00" * 31, "00" * 33):
             with self.assertRaises(ValueError):
@@ -64,11 +112,10 @@ class TestBadKeys(unittest.TestCase):
 
 
 class TestLiveExchange(unittest.TestCase):
-    """Живой TLS-сервер участника: слова клиента == слова сервера."""
+    """Живой TLS-сервер участника: рендер клиента == рендер сервера."""
 
     def setUp(self):
         from app.mesh import channel as channel_mod
-        from app.mesh import identity
         self._prof = tempfile.TemporaryDirectory()
         self.addCleanup(self._prof.cleanup)
         prof = Path(self._prof.name)
@@ -96,19 +143,34 @@ class TestLiveExchange(unittest.TestCase):
         self.server.start()
         self.addCleanup(self.server.stop)
 
-    def test_words_agree_end_to_end(self):
-        result = self.client.sas_begin(f"127.0.0.1:{self.server.port}")
-        self.assertEqual(result["pubkey"], identity.get_identity()[1].hex())
-        self.assertEqual(len(result["words"]), sas.SAS_LEN)
-        server_words = [line.rsplit(": ", 1)[1] for line in self.server_logs
-                        if "SAS: слова" in line]
-        self.assertTrue(server_words, f"сервер не журналировал слова: "
+    def _server_render(self, method: str) -> str:
+        lines = [line for line in self.server_logs
+                 if line.startswith(f"SAS[{method}]")]
+        self.assertTrue(lines, f"сервер не журналировал {method}: "
                         f"{self.server_logs}")
-        self.assertEqual(" ".join(result["words"]), server_words[-1],
+        return lines[-1].rsplit(": ", 1)[1]
+
+    def test_words_end_to_end(self):
+        result = self.client.sas_begin(f"127.0.0.1:{self.server.port}",
+                                       method="words")
+        self.assertEqual(result["pubkey"], identity.get_identity()[1].hex())
+        self.assertEqual(len(result["shown"]), 12)
+        self.assertEqual(" ".join(result["shown"]),
+                         self._server_render("words"),
                          "слова клиента и сервера должны совпадать")
 
+    def test_digits_end_to_end(self):
+        result = self.client.sas_begin(f"127.0.0.1:{self.server.port}",
+                                       method="digits")
+        self.assertEqual(result["shown"], self._server_render("digits"))
+
+    def test_unknown_method_refused(self):
+        with self.assertRaises(RuntimeError):
+            self.client.sas_begin(f"127.0.0.1:{self.server.port}",
+                                  method="png")
+
     def test_dead_addr_is_honest_error(self):
-        probe = __import__("socket").socket()
+        probe = socket.socket()
         probe.bind(("127.0.0.1", 0))
         dead = probe.getsockname()[1]
         probe.close()
