@@ -39,6 +39,7 @@ CREATE_NEW_PROCESS_GROUP = 0x00000200
 CREATE_NO_WINDOW = 0x08000000
 _FLAGS = (DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW) \
     if os.name == "nt" else 0
+_HIDE = CREATE_NO_WINDOW if os.name == "nt" else 0   # для проверок
 
 
 def daemon_alive(port: int) -> bool:
@@ -46,7 +47,7 @@ def daemon_alive(port: int) -> bool:
     try:
         proc = subprocess.run(
             [sys.executable, str(LINK), "status", "--port", str(port)],
-            capture_output=True, timeout=20)
+            capture_output=True, timeout=20, creationflags=_HIDE)
     except (OSError, subprocess.TimeoutExpired):
         return False
     return proc.returncode == 0
@@ -57,12 +58,13 @@ def wait_running() -> bool:
     if os.name != "nt":
         return False                            # POSIX - не проверяем
     command = ('(Get-CimInstance Win32_Process -Filter '
-               '"Name=\'python.exe\'" | Where-Object { '
+               '"Name=\'python.exe\' OR Name=\'pythonw.exe\'" | '
+               'Where-Object { '
                '$_.CommandLine -match "link.py wait" }).Count')
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command", command],
-            capture_output=True, timeout=30)
+            capture_output=True, timeout=30, creationflags=_HIDE)
         return int(out.stdout.strip() or 0) > 0
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return True                             # не смогли - не мешаем
