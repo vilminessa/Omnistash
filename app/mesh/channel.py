@@ -118,6 +118,7 @@ def server_context() -> ssl.SSLContext:
         with os.fdopen(key_fd, "wb") as handle:
             handle.write(key_pem)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_3   # ревизия 1.8
         context.load_cert_chain(cert_path, key_path)
         return context
     finally:
@@ -133,8 +134,13 @@ def server_context() -> ssl.SSLContext:
 # ------------------------------------------------------------------ #
 
 def client_context() -> ssl.SSLContext:
-    """Контекст клиента: сертификатов не доверяем, проверяем СВОИМИ руками."""
+    """Контекст клиента: сертификатов не доверяем, проверяем СВОИМИ руками.
+
+    Ревизия 1.8: минимум TLS 1.3 (только AEAD, эфемерный ECDHE) - как
+    у сервера; переговоры со старыми версиями протокола не ведём.
+    """
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
     return context

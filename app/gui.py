@@ -2633,6 +2633,62 @@ class Api:
         return {"ok": True, **data}
 
     # ------------------------------------------------------------------ #
+    #  Этап 1: диагностика устройства (doctor, 1.5)
+    # ------------------------------------------------------------------ #
+
+    def device_doctor(self, request=None) -> dict:
+        """Диагностика устройства за один прогон (1.5): ключ/адрес/канал.
+
+        Только чтение и ОДИН TLS-probe (pin=False): статус доверия,
+        отвечает ли канал и с каким ключом, что видит DHT и сколько
+        строк каталога устройства в зеркале. Файлы и состояния не
+        меняются - чисто диагностика для человека.
+        """
+        request = request or {}
+        pubkey = str(request.get("pubkey") or "").strip().lower()
+        device = repo.truststore_get(self.db.conn, pubkey) if pubkey \
+            else None
+        if not device:
+            return {"error": "Устройство не найдено в хранилище доверия"}
+        name = device.get("label") or f"{pubkey[:16]}…"
+        lines = [f"Доктор «{name}» [{device.get('status')}]"]
+        addr = str(device.get("last_addr") or "")
+        reachable = None
+        if addr:
+            try:
+                ident = mesh_client.probe(addr, expect=pubkey, pin=False,
+                                          timeout=2.5)
+                reachable = bool(ident)
+                lines.append(f"канал {addr}: ОТКРЫТ, ключ "
+                             f"{mesh_identity.fingerprint(ident)}")
+            except mesh_channel.ChannelError as exc:
+                reachable = False
+                lines.append(f"канал {addr}: ОТКАЗ - {exc}")
+            except TimeoutError:
+                reachable = False
+                lines.append(f"канал {addr}: МОЛЧАНИЕ - приложение не "
+                             "запущено ИЛИ трафик фильтруется "
+                             "(DPI/брандмауэр)")
+            except Exception as exc:  # noqa: BLE001 - диагностика не валит
+                reachable = False
+                lines.append(f"канал {addr}: ошибка - {exc}")
+        else:
+            lines.append("адрес неизвестен: нет последнего контакта")
+        node = mesh_dht.current()
+        if node is not None and node.running:
+            lines.append(f"DHT: узлов {len(node.table)}, внешний IP "
+                         f"{node.external_ip or 'не выучен'}")
+        else:
+            lines.append("DHT: не поднят")
+        count = self.db.conn.execute(
+            "SELECT COUNT(*) AS c FROM mesh_catalog WHERE origin=?",
+            (pubkey,)).fetchone()["c"]
+        lines.append(f"каталог: строк в зеркале {int(count)}")
+        self._log("Доктор: " + "; ".join(lines))
+        return {"ok": True, "report": "\n".join(lines),
+                "reachable": reachable, "catalog_rows": int(count)}
+
+    # ------------------------------------------------------------------ #
     #  B3: зеркало каталогов участников (синхронизация индекса)
     # ------------------------------------------------------------------ #
 

@@ -801,6 +801,22 @@ class TestPeerApi(GuiCase):
         # пин НЕ писался до подтверждения - теперь устройство verified
         self.assertEqual(api.peer_profile()["devices"][0]["pubkey"], own)
 
+    def test_device_doctor_report(self):
+        """1.5: доктор - отчёт за прогон; чужой ключ - честный отказ."""
+        api = self._api()
+        pubkey = api.peer_profile()["pubkey"]
+        bad = api.device_doctor({"pubkey": "ff" * 32})
+        self.assertIn("error", bad, bad)
+        repo.truststore_add(api.db.conn, pubkey)
+        res = api.device_doctor({"pubkey": pubkey})
+        self.assertTrue(res["ok"], res)
+        self.assertIn("Доктор", res["report"])
+        self.assertIn("адрес неизвестен", res["report"],
+                      "без last_addr - честно пишем, а не врём")
+        self.assertIn("DHT: не поднят", res["report"])
+        self.assertIn("каталог: строк в зеркале 0", res["report"])
+        self.assertIsNone(res["reachable"])
+
     def test_catalog_refresh_list_restore_guard(self):
         """B3: обновление зеркала, список и защита «только своя строка»."""
         api = self._api()
@@ -857,19 +873,20 @@ class TestPeerApi(GuiCase):
     def test_wormhole_status_and_send_guard(self):
         """B1: статус читается, действия без установки честно откажут."""
         api = self._api()
-        # LEG-3 gate: wormhole-тест про отправку, а не про согласия.
-        api._current_settings = lambda: {"mesh_enabled": True,
-                                         "mesh_nick": "Иван Тест",
-                                         "first_send_accepted": True}
         status = api.wormhole_status()
         self.assertIn("installed", status)
         self.assertFalse(status["busy"])
-        with mock.patch("app.gui.wormhole_mod.installed",
-                        return_value=False):
-            res = api.wormhole_send({"path": "x.mp4"})
-            self.assertIn("не установлен", res.get("error", ""))
-            res = api.wormhole_receive({"code": "7-a-b-c"})
-            self.assertIn("не установлен", res.get("error", ""))
+        # LEG-3: согласие - факт в legal.json (в изолированном профиле
+        # теста), gate иначе перехватит проверку установки.
+        legal_file = Path(self._prof.name) / "legal.json"
+        with mock.patch("app.legal.legal_path", lambda: legal_file):
+            api.legal_accept({"first_send": True})
+            with mock.patch("app.gui.wormhole_mod.installed",
+                            return_value=False):
+                res = api.wormhole_send({"path": "x.mp4"})
+                self.assertIn("не установлен", res.get("error", ""))
+                res = api.wormhole_receive({"code": "7-a-b-c"})
+                self.assertIn("не установлен", res.get("error", ""))
         res = api.wormhole_send({"path": ""})
         self.assertIn("путь", res.get("error", ""))
         res = api.wormhole_receive({"code": ""})
@@ -932,7 +949,8 @@ class TestLegalApi(GuiCase):
         self.addCleanup(self._legal_dir.cleanup)
         from pathlib import Path as _Path
         target = _Path(self._legal_dir.name) / "legal.json"
-        patcher = mock.patch("app.paths.legal_path", lambda: target)
+        # legal.py берёт legal_path через from-import - патчим МОДУЛЬ legal.
+        patcher = mock.patch("app.legal.legal_path", lambda: target)
         patcher.start()
         self.addCleanup(patcher.stop)
 

@@ -221,6 +221,16 @@ class TestPinStore(ChannelCase):
         channel.reset_cache()                    # удаление живёт в файле
         self.assertEqual(channel.pins(), {"3.3.3.3:1": "bb" * 32})
 
+    def test_tls13_floor(self):
+        """Ревизия 1.8: переговоры только TLS 1.3 (AEAD-only, ECDHE)."""
+        import ssl
+        client = channel.client_context()
+        self.assertEqual(client.minimum_version, ssl.TLSVersion.TLSv1_3,
+                         "клиент не опускается ниже 1.3")
+        server = channel.server_context()
+        self.assertEqual(server.minimum_version, ssl.TLSVersion.TLSv1_3,
+                         "сервер не опускается ниже 1.3")
+
 
 if __name__ == "__main__":
     unittest.main()

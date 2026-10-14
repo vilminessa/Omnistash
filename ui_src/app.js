@@ -689,6 +689,8 @@
         row += '<button class="btn" data-peer="trust-restore" data-pub="' +
           esc(d.pubkey) + '">Вернуть доверие</button>';
       }
+      row += ' <button class="btn ghost" data-peer="doctor" data-pub="' +
+        esc(d.pubkey) + '">Диагностика…</button>';
       row += ' <button class="btn ghost" data-peer="trust-forget" data-pub="' +
         esc(d.pubkey) + '">Забыть</button>';
       return row + "</div></div>";
@@ -3752,6 +3754,13 @@
             if (res && res.error) { toast(res.error, true); return; }
             openPeerOverlay();
           });
+        return;
+      }
+      if (action === "doctor") {
+        call("device_doctor", { pubkey: btn.dataset.pub }).then(function (res) {
+          if (res && res.error) { toast(res.error, true); return; }
+          confirm((res && res.report) || "Отчёт пуст");
+        });
         return;
       }
       if (action === "trust-sas") {
