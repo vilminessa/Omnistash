@@ -1,0 +1,23 @@
+# Шлюз канала двух ПК: link-хаб (брокер журнал/состояние) + MCP-сервер.
+#
+#   $env:TOKEN='<ТОКЕН>'; docker compose -f gateway/compose.yaml up -d --build
+#
+# Порты публикуются ТОЛЬКО на адресе Tailscale (100.101.230.19) - в LAN/WAN
+# шлюз не светится. vilmnote: --peer 100.101.230.19:18581 и MCP-URL /mcp.
+services:
+  hub:
+    build:
+      context: ..
+      dockerfile: gateway/Dockerfile
+    container_name: omnistash-hub
+    restart: unless-stopped
+    environment:
+      TOKEN: ${TOKEN:?укажите TOKEN - это же токен link-канала}
+    ports:
+      - "100.101.230.19:18581:18581"   # link-хаб (Tailscale-only)
+      - "100.101.230.19:8809:8809"     # MCP streamable HTTP (Tailscale-only)
+    volumes:
+      - hub-data:/data
+
+volumes:
+  hub-data:

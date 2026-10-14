@@ -85,6 +85,46 @@ SYN не видят, у собеседника тишина (DROP, а не RST).
 адреса сокетом (`connect_ex`), а не «ping проходит». Обход на время
 теста: Tailscale-адреса (`100.x`, мимо winws) либо порт <1024.
 
+## Шлюз в Docker (link-хаб + MCP) — «коннект двух агентов»
+
+Выделенный канал пары в одном контейнере (по образцу MCP-гейтеев;
+hop = MCP, как в статье про agent gateways): **link-хаб**-брокер (порт
+18581) + **MCP-сервер** streamable-HTTP (порт 8809). Оба порта
+публикуются **только на Tailscale-адресе** vilmpc — в LAN/WAN не
+светятся. Токен один на всё (link-рукопожатие и Bearer MCP).
+
+```powershell
+# vilmpc, из корня репозитория (токен в репозиторий НЕ попадает)
+$env:TOKEN='<ТОКЕН>'
+docker compose -f gateway/compose.yaml up -d --build
+```
+
+Подключение агентов (бриф для обеих сторон):
+
+```powershell
+# link-демон каждого ПК набирает ХАБ (а не друг друга напрямую):
+python tools/link.py serve --id <pcA|pcB> --token <ТОКЕН> --peer 100.101.230.19:18581
+
+# MCP-инструменты (опционально; URL http://100.101.230.19:8809/mcp,
+# Bearer <ТОКЕН>): channel_log, channel_read, channel_state_set,
+# channel_state_get, channel_status
+```
+
+Плюсы: журнал/состояние живут в docker-томе (переживают падения),
+hub связывает обоих агентов брокером, MCP даёт стандартный доступ
+инструментами без CLI. Governance как в шлюзах: Bearer на каждый
+запрос (401 без), allow-list = явный список инструментов, журнал
+вызовов — `docker logs omnistash-hub`.
+
+Ловушки при сборке (закрыты, чтобы не повторять): mcp 2.x — `FastMCP`
+переименован в `MCPServer` (`mcp.server.mcpserver`); Starlette не
+принимает `middlewares=` в конструкторе (`add_middleware`); у
+`streamable_http_app()` включена защита от DNS-rebinding — нужны
+`transport_security` с точными Tailscale-хостами, иначе 421 на любом
+нелокальном Host; флаги `--port/--dir` в `link.py` идут **после**
+подкоманды; падение MCP не должно ронять контейнер (entrypoint
+держит hub и перезапускает MCP отдельно).
+
 Порт управления = `--port+1000`; при другом `--port` добавьте `--ctrl`.
 
 ## Соглашение по ключам состояния (чтобы агенты понимали друг друга)
