@@ -26,8 +26,10 @@ from concurrent.futures import ThreadPoolExecutor
 from . import catalog as catalog_mod
 from . import channel as channel_mod
 from . import crypt as crypt_mod
+from . import identity as identity_mod
 from . import manifest as manifest_mod
 from . import pacing
+from . import sas as sas_mod
 
 CONNECT_TIMEOUT = 6.0
 READ_TIMEOUT = 60.0          # большие файлы читаем чанками долго
@@ -85,6 +87,47 @@ def _request(addr: str, path: str, *, timeout: float = CONNECT_TIMEOUT,
     except Exception:
         conn.close()
         raise
+
+
+def friend_request(addr: str, method: str = "words", *,
+                   timeout: float = CONNECT_TIMEOUT) -> dict:
+    """SAS-обмен с участником (этап S): digest и рендер для сверки.
+
+    Идентичности берём с разных сторон канала: у СЕБЯ - свой ключ,
+    у ПАРТНЁРА - из TLS-аттестации (conn.mesh_identity); сервер же
+    считает digest с нашим pk из запроса. Подмена pk или эфемера в
+    пути даёт расхождение слов - сверка и должна это поймать.
+    Ничего секрета по сети не ходит: эфемер публичный, digest не
+    передаётся вообще.
+    """
+    if method not in sas_mod.METHODS:
+        raise ValueError(f"неизвестный формат сверки: {method!r}")
+    own = identity_mod.get_identity()[1].hex()
+    priv, eph_hex = sas_mod.make_eph()
+    path = (f"/friend?pk={own}&eph={eph_hex}"
+            f"&method={method}")
+    conn, resp = _request(addr, path, timeout=timeout, expect=None)
+    try:
+        body = resp.read(MAX_MANIFEST_BYTES)
+        if resp.status != 200:
+            reason = ""
+            try:
+                reason = str(json.loads(body).get("error") or "")
+            except ValueError:
+                pass
+            raise channel_mod.ChannelError(
+                f"{addr} не начал сверку: {reason or resp.status}")
+        data = json.loads(body)
+        peer = str(conn.mesh_identity or "")
+        shared = sas_mod.shared_with(priv, str(data.get("eph") or ""))
+    finally:
+        conn.close()
+    if not peer or len(peer) != 64:
+        raise channel_mod.ChannelError(f"{addr} - канал без идентичности")
+    digest = sas_mod.sas_bytes(shared, own, peer)
+    return {"digest": digest, "method": method, "peer": peer,
+            "render": sas_mod.render(method, digest),
+            "server_fp": str(data.get("fp") or "")}
 
 
 def collect_manifests(remote_id: str, addrs: list[str],

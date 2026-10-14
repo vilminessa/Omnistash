@@ -17,6 +17,7 @@ from app import db as db_mod, repo
 from app.mesh import channel as channel_mod
 from app.mesh import catalog as catalog_mod
 from app.mesh import client, fetch as mesh_fetch, identity, manifest, server
+from app.mesh import sas
 from app.mesh import crypt as crypt_mod
 from app.mesh import verify as mesh_verify
 
@@ -319,6 +320,83 @@ class TestLimits(MeshNetCase):
         self.assertIn("лимит", str(caught.exception))
         self.assertFalse(part.exists(),
                          "шифропоток не должен начинаться сверх лимита")
+
+
+class TestFriendSas(MeshNetCase):
+    """Этап S3: friend-обмен по живому TLS-каналу.
+
+    Главное - взаимность: инициатор и сервер обязаны получить один и
+    тот же digest, не передавая его друг другу (только эфемер и pk).
+    """
+
+    def test_digest_matches_both_sides(self):
+        self.seed_holder()
+        addr = f"127.0.0.1:{self.port}"
+        res = client.friend_request(addr, "words")
+        self.assertEqual(len(res["digest"]), 32)
+        self.assertEqual(len(res["render"]), 12, "words = 12 слов")
+        ctx = self.server.friend_ctx
+        self.assertIsNotNone(ctx, "сервер обязан запомнить контекст")
+        self.assertEqual(ctx["digest"], res["digest"].hex(),
+                         "digest считается обеими сторонами одинаково")
+        self.assertEqual(ctx["method"], "words")
+        self.assertEqual(res["peer"],
+                         identity.get_identity()[1].hex(),
+                         "идентичность взята с канала")
+
+    def test_all_methods_roundtrip(self):
+        self.seed_holder()
+        addr = f"127.0.0.1:{self.port}"
+        for method, size in (("words", 12), ("emoji", 8), ("icons", 8),
+                             ("digits", 8)):
+            res = client.friend_request(addr, method)
+            self.assertEqual(self.server.friend_ctx["digest"],
+                             res["digest"].hex(), method)
+            self.assertEqual(self.server.friend_ctx["method"], method)
+            rendered = res["render"]
+            self.assertEqual(len(rendered), size, method)
+            if method == "digits":
+                self.assertTrue(rendered.isdigit())
+            else:
+                self.assertIsInstance(rendered, list, method)
+
+    def test_bad_method_refused_locally(self):
+        # ValueError летит ДО соединения - адрес произвольный.
+        with self.assertRaises(ValueError):
+            client.friend_request("127.0.0.1:1", "video")
+
+    def test_server_refuses_garbage(self):
+        self.seed_holder()
+        conn, resp = client._request(
+            f"127.0.0.1:{self.port}",
+            "/friend?pk=zz&eph=zz&method=words")
+        try:
+            self.assertEqual(resp.status, 400)
+            body = json.loads(resp.read())
+            self.assertIn("непонятный", body.get("error", ""))
+        finally:
+            conn.close()
+        self.assertIsNone(self.server.friend_ctx,
+                          "мусор не должен оставлять контекст")
+
+    def test_tampered_ephemeral_breaks_agreement(self):
+        """Подмена эфемера в ответе = расхождение (MITM-смысл SAS)."""
+        self.seed_holder()
+        addr = f"127.0.0.1:{self.port}"
+        own = identity.get_identity()[1].hex()
+        priv, eph_hex = sas.make_eph()
+        conn, resp = client._request(
+            addr, f"/friend?pk={own}&eph={eph_hex}&method=words")
+        try:
+            data = json.loads(resp.read())
+        finally:
+            conn.close()
+        shared = sas.shared_with(priv, data["eph"])
+        honest = sas.sas_bytes(shared, own, own)
+        tampered = sas.sas_bytes(sas.shared_with(priv, "11" * 32),
+                                 own, own)
+        self.assertNotEqual(honest, tampered)
+        self.assertEqual(self.server.friend_ctx["digest"], honest.hex())
 
 
 class TestRestore(MeshNetCase):

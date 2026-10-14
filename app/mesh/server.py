@@ -16,6 +16,7 @@ import json
 import socket
 import ssl
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from urllib.parse import parse_qs
@@ -23,8 +24,10 @@ from urllib.parse import parse_qs
 from . import catalog as catalog_mod
 from . import channel as channel_mod
 from . import crypt as crypt_mod
+from . import identity as identity_mod
 from . import manifest as manifest_mod
 from . import pacing
+from . import sas as sas_mod
 
 # Отдаём только байты: тела файлов чанками, без чтения в память целиком.
 CHUNK = 256 * 1024
@@ -45,6 +48,9 @@ class _Server(ThreadingHTTPServer):
     allow_reuse_address = True
     ctx: ssl.SSLContext | None = None
     log = staticmethod(lambda message: None)
+    # Последний входящий SAS-обмен (этап S): digest для показа владельцу
+    # в диалоге (S4). Запись атомарна, читается GUI без лока.
+    friend_ctx = None
 
     def server_bind(self) -> None:
         if self.allow_reuse_address:
@@ -127,6 +133,38 @@ class _Handler(BaseHTTPRequestHandler):
             return None
         return dict(row)
 
+    def _friend(self, query: str) -> None:
+        """SAS-обмен (этап S): отвечаем своим эфемер-ключом.
+
+        Ничего секрета не отдаём: эфемер публичен по определению, digest
+        считает каждая сторона сама. Наш результат кладём в friend_ctx -
+        владелец увидит сверку в диалоге (S4). Чужой pk из запроса
+        входит в digest: подмена любого ключа в пути даёт расхождение
+        слов у инициатора - это и ловит MITM.
+        """
+        params = parse_qs(query)
+        peer = (params.get("pk") or [""])[0].strip().lower()
+        their = (params.get("eph") or [""])[0].strip().lower()
+        method = (params.get("method") or [""])[0].strip() or "words"
+        if method not in sas_mod.METHODS:
+            self._error(400, "непонятный формат сверки")
+            return
+        try:
+            bytes.fromhex(peer)
+            priv, eph_hex = sas_mod.make_eph()
+            shared = sas_mod.shared_with(priv, their)
+        except ValueError:
+            self._error(400, "непонятный ключ или эфемер участника")
+            return
+        own = identity_mod.get_identity()[1].hex()
+        digest = sas_mod.sas_bytes(shared, own, peer)
+        self.server.friend_ctx = {
+            "digest": digest.hex(), "method": method,
+            "peer": peer, "ts": time.time(),
+        }
+        self._json(200, {"ok": 1, "eph": eph_hex, "method": method,
+                         "fp": identity_mod.fingerprint(own)})
+
     def _send_catalog(self) -> None:
         """Снапшот «что у меня есть» (B3): подписывается на лету.
 
@@ -170,6 +208,10 @@ class _Handler(BaseHTTPRequestHandler):
 
             if path.startswith("/file/"):
                 self._send_file(path[len("/file/"):], query)
+                return
+
+            if path == "/friend":
+                self._friend(query)
                 return
 
             self._error(404, "неизвестный путь")
@@ -305,6 +347,11 @@ class PeerServer:
     def running(self) -> bool:
         return self._httpd is not None and self._thread is not None \
             and self._thread.is_alive()
+
+    @property
+    def friend_ctx(self):
+        """Последний входящий SAS-обмен (этап S) - для диалога/тестов."""
+        return self._httpd.friend_ctx if self._httpd else None
 
     def start(self) -> int:
         """Поднять сервер. Возвращает порт (повторный вызов - без вреда)."""
