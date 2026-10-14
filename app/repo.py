@@ -947,21 +947,28 @@ def truststore_add(conn: sqlite3.Connection, pubkey, *, label: str = "",
 
 
 def truststore_verify(conn: sqlite3.Connection, pubkey,
-                      label: str | None = None) -> dict:
-    """Человек сверил отпечаток - ключ становится подтверждённым."""
+                      label: str | None = None,
+                      via: str = "manual") -> dict:
+    """Человек подтвердил устройство - ключ становится verified.
+
+    via: 'manual' (сверка отпечатка глазами) или 'sas' (сверка 12 слов,
+    этап 1.1) - способ хранится, чтобы понимать, как подтвердили.
+    """
     key = _trust_key(pubkey)
+    if via not in ("manual", "sas"):
+        raise ValueError(f"неизвестный способ подтверждения: {via!r}")
     if not conn.execute("SELECT 1 FROM truststore WHERE pubkey=?",
                         (key,)).fetchone():
         truststore_add(conn, key)
     if label is None:
         conn.execute("UPDATE truststore SET verified_at=?, "
-                     "verified_via='manual', revoked_at=NULL WHERE pubkey=?",
-                     (now_iso(), key))
+                     "verified_via=?, revoked_at=NULL WHERE pubkey=?",
+                     (now_iso(), via, key))
     else:
         conn.execute("UPDATE truststore SET verified_at=?, "
-                     "verified_via='manual', revoked_at=NULL, label=? "
+                     "verified_via=?, revoked_at=NULL, label=? "
                      "WHERE pubkey=?",
-                     (now_iso(), str(label or "").strip()[:64], key))
+                     (now_iso(), via, str(label or "").strip()[:64], key))
     return truststore_get(conn, key)
 
 

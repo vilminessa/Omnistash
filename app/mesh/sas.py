@@ -1,180 +1,83 @@
-"""SAS - сверка «12 слов» для дружбы (этап S).
+"""SAS «12 слов»: сверка устройства при заключении дружбы (этап 1.1).
 
-Механика (согласована в docs/mesh-platform.md, секция 4):
+Идея (как Signal/Matrix SAS): стороны, уже соединённые по аттестованному
+TLS-каналу (verify_peer до первого байта), обмениваются ЭФЕМЕРНЫМИ
+X25519-ключами, считают общий секрет и показывают человеку 12 слов.
+Сверка голосом/лично; слова совпали -> устройство подтверждено
+(truststore verified_via='sas').
 
-* инициатор дружбы генерирует эфемерный ключ X25519 и шлёт публичную
-  часть в friend-запросе; ответный стороной - свой эфемер в ответе;
-* обе стороны считают ``shared = X25519(свой эфемер, чужой эфемер)`` -
-  MITM подменяет ключ → shared разный → сверка разойдётся;
-* ``sas_bytes``: HKDF-SHA256(shared, salt="omnistash-sas-v1",
-  info=сортированные Ed25519-идентичности обеих сторон) -> 32 байта.
-  Соль/идентичности привязывают результат к паре устройств и версии
-  протокола; наружу SAS не передаётся НИКОГДА - только рендерится
-  каждому своему экрану.
+Почему MITM не проходит:
+  * канал аттестован SPKI до первого байта - подменить участника без его
+    приватного ключа нельзя (verify_peer откажет);
+  * если бы посредник relay-ил сам обмен, он подставил бы СВОИ ephemeral-
+    ключи по бокам - общие секреты разошлись бы, слова не совпали.
 
-Формат сверки выбирает ИНИЦИАТОР (4 варианта):
-
-* ``words``  - 12 русских слов (словарь 1024, позиция = индекс);
-  по 10 бит на позицию из первых 120 бит digest (равномерно);
-* ``emoji``  - 8 эмодзи из списка 64 (6 бит на позицию, байты 0..5);
-* ``icons``  - 8 генеративных SVG-пиктограмм (64 варианта: 8 форм x
-  8 цветов; байты 6..11, 6 бит на позицию);
-* ``digits`` - 8 цифр (первые 4 байта -> равномерное [0, 10^8)).
-
-Словарь и списки - канонические данные: менять нельзя (тестовые
-векторы в tests/test_sas.py фиксируют стабильность).
+Словарь: 2048 произносимых слов ГЕНЕРИРУЕТСЯ детерминированно из фикс.
+таблиц согласных/гласных (слог cv, слово cv-cv-cv) - stdlib, без пакетов
+и без многокилобайтных констант в коде. 12 слов = 12 индексов по 11 бит
+= 132 бита общего секрета (перебор 2^132 нереален).
 """
 
 from __future__ import annotations
 
-from cryptography.hazmat.primitives import hashes
+import hashlib
+
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey, X25519PublicKey)
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives.serialization import (
-    Encoding, PublicFormat)
 
-from .sas_words import SAS_WORDS
-
-SAS_VERSION = b"omnistash-sas-v1"
-METHODS = ("words", "emoji", "icons", "digits")
-METHOD_LABELS = {
-    "words": "12 слов",
-    "emoji": "эмодзи",
-    "icons": "иконки",
-    "digits": "цифры",
-}
-
-# 64 эмодзи: общеупотребительные, стабильные код-пойнты, без вариаций
-# «держатель/цвет/контекст» - на разных ОС рисуются по-разному, но
-# СВЕРЯЕТСЯ форма/предмет, как в Matrix SAS.
-EMOJI: tuple = (
-    "🍎", "🍌", "🍇", "🍉", "🍓", "🍍", "🥝", "🍑",
-    "🍒", "🥥", "🥑", "🍆", "🥔", "🥕", "🌽", "🌶",
-    "🐱", "🐶", "🦊", "🐻", "🐼", "🐨", "🐯", "🦁",
-    "🐸", "🐵", "🦄", "🐙", "🦋", "🐞", "🐢", "🐳",
-    "⚽", "🎨", "🎸", "🎈", "🎯", "🚀", "🎪", "🎬",
-    "🔑", "⌚", "📷", "💡", "🎁", "🧩", "🎲", "🛎",
-    "⭐", "🔥", "💧", "🌈", "🌙", "☀", "⚡", "❄",
-    "❤", "✔", "✈", "⛺", "🏁", "🔔", "🏆", "📌",
-)
+CONSONANTS = "bdghjklmnprstvz"
+VOWELS = "aeiouy"
+WORDS_COUNT = 2048             # 11 бит на индекс
+SAS_LEN = 12                   # слов в сверке
 
 
-def sas_bytes(shared: bytes, id_a: str, id_b: str) -> bytes:
-    """32 байта SAS для пары устройств (наружу не передаётся)."""
-    pair = ":".join(sorted((str(id_a).lower(), str(id_b).lower())))
-    return HKDF(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=SAS_VERSION,
-        info=pair.encode("ascii"),
-    ).derive(bytes(shared))
+def _make_words() -> list[str]:
+    """2048 произносимых слов cv-cv-cv в фиксированном порядке."""
+    syllables = [c + v for c in CONSONANTS for v in VOWELS]
+    out: list[str] = []
+    for first in syllables:
+        for second in syllables:
+            for third in syllables:
+                out.append(first + second + third)
+                if len(out) >= WORDS_COUNT:
+                    return out
+    return out
 
 
-def make_eph() -> tuple:
-    """Одноразовый эфемерный ключ X25519 для friend-обмена (S3)."""
-    priv = X25519PrivateKey.generate()
-    pub = priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-    return priv, pub.hex()
+WORDS = _make_words()
 
 
-def shared_with(priv, their_pub_hex: str) -> bytes:
-    """Общий секрет ECDH; чужая публичная часть - 32 байта hex.
+def words_from_secret(secret: bytes) -> list[str]:
+    """12 слов из общего секрета: sha256, 11 бит на слово."""
+    digest = hashlib.sha256(secret).digest()
+    bits = int.from_bytes(digest, "big")
+    out = []
+    for _index in range(SAS_LEN):
+        out.append(WORDS[bits & (WORDS_COUNT - 1)])
+        bits >>= 11
+    return out
 
-    Мусор/неверная длина - ValueError (вызывающий отвечает 400).
-    """
-    raw = bytes.fromhex(str(their_pub_hex).strip())
+
+def own_ephemeral() -> tuple[X25519PrivateKey, str]:
+    """Свежая ephemeral-пара: (ключ, hex публичного). Не сохраняется."""
+    eph = X25519PrivateKey.generate()
+    pub = eph.public_key().public_bytes(serialization.Encoding.Raw,
+                                        serialization.PublicFormat.Raw)
+    return eph, pub.hex()
+
+
+def shared_secret(own_priv: X25519PrivateKey, peer_pub_hex: str) -> bytes:
+    """Общий секрет ECDH(свой ephemeral, чужой ephemeral)."""
+    try:
+        raw = bytes.fromhex(str(peer_pub_hex or "").strip())
+    except ValueError as exc:
+        raise ValueError("чужой ephemeral-ключ не hex") from exc
     if len(raw) != 32:
-        raise ValueError("эфемерный ключ должен быть 32 байта")
-    return priv.exchange(X25519PublicKey.from_public_bytes(raw))
+        raise ValueError("чужой ephemeral-ключ - 32 байта")
+    return own_priv.exchange(X25519PublicKey.from_public_bytes(raw))
 
 
-def _chunks6(digest: bytes) -> list:
-    """6 байт (48 бит) -> 8 индексов по 6 бит (MSB-first)."""
-    value = int.from_bytes(digest[:6], "big")
-    return [(value >> (42 - 6 * i)) & 0x3F for i in range(8)]
-
-
-def words(digest: bytes) -> list:
-    """12 слов: по 10 бит на позицию (1024 = 2^10, 120 бит <= 32 байта).
-
-    Формула «4 байта x 12 слов» из первоначального дока неверна
-    математически (48 > 32) - она давала нули в хвосте. Нарезка
-    MSB-first из первых 120 бит: равномерная, без смещения.
-    """
-    value = int.from_bytes(digest[:15], "big")
-    return [SAS_WORDS[(value >> (110 - 10 * i)) & 0x3FF]
-            for i in range(12)]
-
-
-def emoji(digest: bytes) -> list:
-    """8 эмодзи из 64 (байты 0..5)."""
-    return [EMOJI[i] for i in _chunks6(digest)]
-
-
-def icons(digest: bytes) -> list:
-    """8 индексов SVG-иконок из 64 (байты 6..11)."""
-    shifted = digest[6:12] + digest[:6]     # свой срез, не чужие биты
-    return _chunks6(shifted)
-
-
-def digits(digest: bytes) -> str:
-    """8 цифр: первые 4 байта -> равномерно в [0, 100000000)."""
-    whole = 100_000_000
-    scaled = int.from_bytes(digest[:4], "big") * whole
-    return f"{scaled >> 32:08d}"
-
-
-def render(method: str, digest: bytes):
-    """Сверяемая строка/список для выбранного формата."""
-    if method == "words":
-        return words(digest)
-    if method == "emoji":
-        return emoji(digest)
-    if method == "icons":
-        return icons(digest)
-    if method == "digits":
-        return digits(digest)
-    raise ValueError(f"неизвестный формат сверки: {method!r}")
-
-
-# --- генеративные SVG-иконки (S5): без ассетов, детерминированно ---
-
-_ICON_SHAPES = (
-    "circle", "square", "triangle", "star",
-    "hexagon", "diamond", "cross", "ring",
-)
-_ICON_COLORS = (
-    "#e5484d", "#f76b15", "#ffc53d", "#46a758",
-    "#12a594", "#0091ff", "#8e4ec6", "#8d6e63",
-)
-
-
-def svg_icon(index: int) -> str:
-    """SVG-пиктограмма 0..63: форма = index % 8, цвет = index // 8."""
-    index = int(index) & 0x3F
-    shape, color = _ICON_SHAPES[index % 8], _ICON_COLORS[index // 8]
-    body = {
-        "circle": '<circle cx="32" cy="32" r="22"/>',
-        "square": '<rect x="12" y="12" width="40" height="40" rx="6"/>',
-        "triangle": '<polygon points="32,10 54,52 10,52"/>',
-        "star": ('<polygon points="32,8 39,26 58,26 43,37 49,56 32,45 '
-                 '15,56 21,37 6,26 25,26"/>'),
-        "hexagon": ('<polygon points="32,8 52,20 52,44 32,56 12,44 '
-                    '12,20"/>'),
-        "diamond": '<polygon points="32,8 56,32 32,56 8,32"/>',
-        "cross": ('<path d="M20 8 h24 v12 h12 v24 h-12 v12 h-24 v-12 '
-                  'h-12 v-24 h12 z"/>'),
-        "ring": ('<path d="M32 8 a24 24 0 1 0 0.1 0 z '
-                 'M32 20 a12 12 0 1 1 -0.1 0 z" fill-rule="evenodd"/>'),
-    }[shape]
-    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" '
-            f'width="64" height="64"><g fill="{color}">{body}</g></svg>')
-
-
-def validate() -> None:
-    """Самопроверка канона (ловит случайную правку словаря/списков)."""
-    assert len(SAS_WORDS) == 1024, len(SAS_WORDS)
-    assert len(set(SAS_WORDS)) == 1024, "дубли в словаре SAS"
-    assert len(EMOJI) == 64 and len(set(EMOJI)) == 64, "эмодзи: 64 шт"
-    assert len(_ICON_SHAPES) == 8 and len(_ICON_COLORS) == 8
+def sas_words(own_priv: X25519PrivateKey, peer_pub_hex: str) -> list[str]:
+    """Слова сверки для пары ephemeral-ключей."""
+    return words_from_secret(shared_secret(own_priv, peer_pub_hex))
