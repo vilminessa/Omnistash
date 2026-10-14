@@ -186,7 +186,8 @@ python tools/link_watch.py loop  --id vilmpc --token <ТОКЕН> --peer 100.101
 ```
 
 Задача Windows (раз в минуту, без админа): `schtasks /Create /TN
-OmnistashLinkWatch /SC MINUTE /MO 1 /F /TR ...` с командой `once` выше.
+OmnistashLinkWatch /SC MINUTE /MO 1 /F /TR ...` — указывай
+**pythonw.exe** (без консоли: задача не мигает окном каждый запуск).
 Токен в определении задачи хранится открытым текстом — та же модель
 доверия, что аргументы CLI и файлы профиля. Сам `wait` дополнительно
 переживает рестарт демона (автопереподключение 1 с); двойной запуск
