@@ -668,7 +668,8 @@
       var row = '<div class="peer-row"><div>' + badge +
         '<div class="muted">' + esc(d.label || "без имени") + "</div>" +
         "<code>" + esc(meshFp(d.pubkey)) + "</code>" +
-        (d.last_addr ? '<div class="muted">' + esc(d.last_addr) + "</div>" : "") +
+        (d.last_addr ? '<div class="muted">' + esc(d.last_addr) +
+          (d.path ? " · " + esc(d.path) : "") + "</div>" : "") +
         "</div><div>" +
         '<input type="text" data-peer-label="' + esc(d.pubkey) +
         '" maxlength="32" placeholder="имя устройства" value="' +

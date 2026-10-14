@@ -139,6 +139,25 @@ def is_private_ip(ip: str) -> bool:
             or (first == 169 and second == 254))
 
 
+def path_class(addr: str) -> str:
+    """Класс пути адреса «ip:порт»: LAN / VPN / внешний (этап 1.6).
+
+    Человеку в диалоге важно видеть, КАКИМ путём лежит устройство:
+    LAN (одна сеть), VPN (Tailscale/ZeroTier - класс 100.64/10) или
+    внешний интернет. Неразборчивый адрес - пустая строка.
+    """
+    host = str(addr).partition(":")[0]
+    try:
+        socket.inet_aton(host)
+    except OSError:
+        return ""
+    if is_private_ip(host):
+        return "LAN"
+    if host.startswith("100."):
+        return "VPN"
+    return "внешний"
+
+
 # Хранение «своих» значений: ключ -> (значение, срок переобъявления).
 # Чужие значения живут отдельно (store) и отдаются по запросу get.
 _CURRENT: list = [None]

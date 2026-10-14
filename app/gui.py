@@ -2383,7 +2383,11 @@ class Api:
                 "nick_valid": mesh_dht.nick_ok(nick),
                 "enabled": bool(config.get("mesh_enabled")),
                 "dht": status["dht"],
-                "devices": repo.truststore_list(self.db.conn),
+                "devices": [
+                    {**device,
+                     "path": mesh_dht.path_class(device.get("last_addr")
+                                                 or "")}
+                    for device in repo.truststore_list(self.db.conn)],
                 "catalogs": repo.catalog_origins(self.db.conn),
                 "status": status}
 

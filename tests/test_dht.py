@@ -275,6 +275,16 @@ class DHTCase(unittest.TestCase):
         # B узнал A из id входящего запроса.
         self.assertTrue(any(c.node == self.a.own for c in self.b.table.all()))
 
+    def test_path_class(self):
+        """1.6: класс пути для диалога: LAN / VPN / внешний."""
+        self.assertEqual(dht.path_class("192.168.0.12:1000"), "LAN")
+        self.assertEqual(dht.path_class("10.0.0.5:1"), "LAN")
+        self.assertEqual(dht.path_class("172.31.0.9:1"), "LAN")
+        self.assertEqual(dht.path_class("100.101.230.19:38574"), "VPN")
+        self.assertEqual(dht.path_class("203.0.113.9:443"), "внешний")
+        self.assertEqual(dht.path_class(""), "")
+        self.assertEqual(dht.path_class("не адрес"), "")
+
     def test_announce_then_lookup(self):
         """АнOUNCE доходит по сети; локальное значение видно и себе же."""
         self._wire()
