@@ -668,6 +668,14 @@
       } else {
         badge = "запомнено автоматически (TOFU)";
       }
+      if (d.health === "alive") {
+        badge += " · <b>жив</b>";
+      } else if (d.health === "dead") {
+        badge += " · молчит (проба)";
+      }
+      if (d.path) {
+        badge += " · " + esc(d.path);
+      }
       var row = '<div class="peer-row"><div>' + badge +
         '<div class="muted">' + esc(d.label || "без имени") + "</div>" +
         "<code>" + esc(meshFp(d.pubkey)) + "</code>" +

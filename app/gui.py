@@ -238,6 +238,9 @@ class Api:
         # SAS-сверка в полёте (1.1): слова показаны, ждём подтверждения
         # человека; живёт 10 минут.
         self._sas_pending: dict | None = None
+        # Health-check устройств (1.4): фоновый TLS-probe, живёт при
+        # включённом участии.
+        self._health = None
         # Аккаунт Google: окно входа живёт отдельно от главного.
         self._login_window = None
         self._login_cancel = threading.Event()
@@ -604,6 +607,7 @@ class Api:
                 except RuntimeError as exc:
                     self._log(f"DHT-узел не поднялся: {exc}")
             self._mdns_apply(config)
+            self._health_apply(config)
         else:
             if self._mesh_server.running:
                 self._mesh_server.stop()
@@ -613,6 +617,8 @@ class Api:
                 mesh_dht.set_current(None)
                 self._log("DHT-узел остановлен")
             self._mdns_stop_all()
+            if self._health is not None:
+                self._health.stop()
 
     def _nat_stop(self) -> None:
         """Снять UPnP-проброс (снятие делает фон маппера, тут - только воля)."""
@@ -693,6 +699,49 @@ class Api:
         if not known:
             self._log(f"mDNS: найден участник {addr}:{port}"
                       + (f" (ник {nick})" if nick else ""))
+
+    # ------------------------------------------------------------------ #
+    #  1.4: health-check устройств (тихий TLS-probe, 5 мин ± джиттер)
+    # ------------------------------------------------------------------ #
+
+    def _health_apply(self, config: dict) -> None:
+        """Поднять health-check при включённом участии (идемпотентно)."""
+        if self._health is None:
+            from .mesh import health as mesh_health
+            self._health = mesh_health.HealthChecker(
+                probe_fn=self._health_probe,
+                devices_fn=self._health_devices,
+                on_result=self._health_record,
+                log=self._log)
+        if not self._health.running:
+            self._health.start()
+
+    @staticmethod
+    def _health_probe(addr: str, expect: str | None = None):
+        """Тихая проба: handshake + аттестация, без id и запросов."""
+        return mesh_client.probe(addr, expect=expect, pin=False,
+                                 timeout=4.0)
+
+    def _health_devices(self) -> list:
+        """Кого проверяем: устройства с адресом, без отозванных."""
+        out = []
+        for device in repo.truststore_list(self.db.conn):
+            if device.get("revoked_at") or not device.get("last_addr"):
+                continue
+            out.append((device["pubkey"], device["last_addr"]))
+        return out
+
+    def _health_record(self, pubkey: str, status: str,
+                       detail: str = "") -> str | None:
+        """Записать статус; при «ожил» обновить свежесть адреса."""
+        previous = repo.peer_health_set(self.db.conn, pubkey, status,
+                                        detail)
+        if status == "alive":
+            device = repo.truststore_get(self.db.conn, pubkey)
+            addr = str((device or {}).get("last_addr") or "")
+            if addr:
+                repo.peer_addr_add(self.db.conn, pubkey, addr, "health")
+        return previous.get("was")
 
     def _dht_prepare_announce(self) -> None:
         """Перед анонсом: внешний IP для BEP42 И решение о публикации.
@@ -2362,6 +2411,7 @@ class Api:
         config = self._current_settings()
         nick = mesh_dht.clean_nick(config.get("mesh_nick"))
         node = self._mesh_dht
+        repo_peer_health = repo.peer_health(self.db.conn)   # 1.4
         status = {
             "dht": bool(node is not None and node.running),
             "nodes": len(node.table) if node is not None else 0,
@@ -2387,7 +2437,11 @@ class Api:
                 "devices": [
                     {**device,
                      "path": mesh_dht.path_class(device.get("last_addr")
-                                                 or "")}
+                                                 or ""),
+                     "health": (repo_peer_health.get(device["pubkey"])
+                                or {}).get("status"),
+                     "health_at": (repo_peer_health.get(device["pubkey"])
+                                   or {}).get("checked_at")}
                     for device in repo.truststore_list(self.db.conn)],
                 "catalogs": repo.catalog_origins(self.db.conn),
                 "status": status}
@@ -2495,6 +2549,10 @@ class Api:
         # адрес запоминается всегда, а решения человека (сверка/отзыв)
         # переписываются только им.
         device = repo.truststore_add(self.db.conn, identity_hex, addr=addr)
+        try:
+            repo.peer_addr_add(self.db.conn, identity_hex, addr, "probe")
+        except ValueError:
+            pass                            # кривой ключ не должен валить
         self._log(f"Mesh: {addr} - канал открыт, ключ "
                   f"{identity_hex[:16]}… "
                   + ("(первый контакт - запомнен)" if not had_pin
@@ -2622,6 +2680,10 @@ class Api:
         with self._lock:
             self._sas_pending = {"pubkey": result["pubkey"], "addr": addr,
                                  "ts": time.time()}
+        try:
+            repo.peer_addr_add(self.db.conn, result["pubkey"], addr, "sas")
+        except ValueError:
+            pass                            # кривой ключ - не валить сверку
         self._log(f"SAS[{result['method']}]: сверьте на устройстве "
                   f"собеседника ({addr}): {shown}")
         return {"ok": True, **result, "shown_svg": shown_svg}
@@ -2794,6 +2856,10 @@ class Api:
             # Автор каталога - устройство: запомнить адрес не помешает
             # (решения человека не переписываются - см. truststore_add).
             repo.truststore_add(self.db.conn, pubkey, addr=addr)
+            try:
+                repo.peer_addr_add(self.db.conn, pubkey, addr, "catalog")
+            except ValueError:
+                pass                        # кривой ключ - не валить
             summary.append({"addr": addr, "pubkey": pubkey,
                             "fingerprint": mesh_identity.fingerprint(pubkey),
                             **stats})

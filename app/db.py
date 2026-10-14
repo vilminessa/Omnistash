@@ -499,9 +499,47 @@ def _migrate_v7(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v8(conn: sqlite3.Connection) -> None:
+    """Адресная книга и здоровье устройств (1.3/1.4).
+
+    peer_addrs - история адресов устройства с источником (проба/SAS/
+    каталог/перенос/health) и временем: смена IP не должна рвать дружбу.
+    Редиал при обрыве: last_addr (truststore) -> свежая история -> DHT ->
+    LAN-hello/mDNS (критерий приёмки этапа 1: «смена IP восстанавливается
+    сама»). peer_health - последний статус тихого TLS-probe (alive/dead);
+    «недоступен» информационно, барьер только по манифесту/отзыву.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS peer_addrs (
+            pubkey    TEXT NOT NULL,
+            addr      TEXT NOT NULL,
+            -- источник: probe|sas|catalog|fetch|health
+            source    TEXT NOT NULL DEFAULT 'probe',
+            last_seen TEXT NOT NULL,
+            PRIMARY KEY (pubkey, addr)
+        );
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS peer_addrs_pubkey "
+        "ON peer_addrs(pubkey)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS peer_health (
+            pubkey     TEXT PRIMARY KEY,
+            status     TEXT NOT NULL,          -- alive|dead
+            detail     TEXT NOT NULL DEFAULT '',
+            checked_at TEXT NOT NULL
+        );
+        """
+    )
+
+
 # Порядок важен: номер версии = индекс + 1.
 MIGRATIONS = (_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4,
-               _migrate_v5, _migrate_v6, _migrate_v7)
+               _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8)
 
 
 class Database:

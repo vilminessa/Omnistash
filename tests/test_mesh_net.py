@@ -509,6 +509,38 @@ class TestRestore(MeshNetCase):
         self.assertFalse(ok, "чужой ключ не должен проходить: " + str(logs))
         self.assertEqual(list(dest.iterdir()), [], "ничего не должно ляг")
 
+    def test_redial_after_ip_change(self):
+        """Критерий приёмки этапа 1: смена IP дружбы восстанавливается сама.
+
+        mesh_peers пуст, DHT не поднят - единственный источник адресов -
+        адресная книга (1.3): старый мёртвый адрес + свежий «новый IP».
+        """
+        self.seed_holder()
+        receiver = self.seed_receiver()
+        pubkey = identity.get_identity()[1].hex()
+        repo.truststore_verify(self.db_b.conn, pubkey)
+        repo.peer_addr_add(self.db_b.conn, pubkey, "127.0.0.1:1",
+                           "probe")           # старый IP дружбы (мёртв)
+        repo.peer_addr_add(self.db_b.conn, pubkey, receiver["addr"],
+                           "fetch")           # «новый IP» после переезда
+        row = {"id": receiver["vid"], "remote_id": "vid000000001",
+               "title": "Клип"}
+        settings = {"mesh_enabled": True, "mesh_strict": True}
+        logs = []
+        dest = self.root / "out-redial"
+        with mock.patch.object(mesh_verify, "probe",
+                               return_value={"checked": True, "ok": None,
+                                             "duration": 213.0,
+                                             "errors": [], "skipped": "тест"}):
+            ok = mesh_fetch.restore(self.db_b.conn, row, settings,
+                                    str(dest), log=logs.append, reason="")
+        self.assertTrue(ok, f"редиал по адресной книге должен найти "
+                            f"друга после смены IP: {logs}")
+        self.assertTrue((dest / "Клип [vid000000001].mp4").is_file())
+        # успешный перенос обновил свежесть адреса (источник fetch)
+        fresh = repo.peer_addr_list(self.db_b.conn, pubkey, limit=1)
+        self.assertEqual(fresh[0]["addr"], receiver["addr"])
+
     def test_revoked_device_is_refused_and_restorable(self):
         """Отзыв доверия (truststore) отсекает манифесты и будущие файлы.
 

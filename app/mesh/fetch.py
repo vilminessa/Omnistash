@@ -118,6 +118,16 @@ def restore(conn, row: dict, settings: dict, dest_dir, *,
             if not addr or addr in addrs:
                 continue
             addrs.append(addr)
+    # Редиал дружбы (1.3): свежие адреса подтверждённых устройств из
+    # адресной книги - смена IP друга не должна рвать восстановление
+    # (критерий приёмки этапа 1: «смена IP восстанавливается сама»).
+    from .. import repo
+    for key in repo.truststore_verified(conn):
+        for candidate in repo.peer_addr_list(conn, key, limit=3):
+            addr = str(candidate.get("addr") or "")
+            if addr and addr not in addrs:
+                addrs.append(addr)
+                expects.setdefault(addr, key)
     if not addrs:
         return give_up("Mesh: адреса участников не заданы - пропускаю "
                        f"(«{row.get('title') or row.get('key')}»)")
@@ -243,6 +253,12 @@ def restore(conn, row: dict, settings: dict, dest_dir, *,
         peer_synced_at=str(item.get("synced_at") or ""),
         structure=structure)
     from .. import repo
+    if str(item.get("pubkey") or ""):
+        try:
+            # адрес сработал - фиксируем для редиала (1.3)
+            repo.peer_addr_add(conn, str(item["pubkey"]), peer, "fetch")
+        except ValueError:
+            pass                            # кривой ключ в манифесте
     repo.record_file(conn, row["id"], final, "video",
                      size=stat.st_size, mtime=stat.st_mtime, digest=got,
                      format_json=json.dumps(provenance, ensure_ascii=False))

@@ -272,7 +272,7 @@ class TestFeedbackAndMigration(unittest.TestCase):
         self.assertIn("mesh_bans", tables)
         version = int(self.conn.execute(
             "PRAGMA user_version").fetchone()[0])
-        self.assertEqual(version, 7)   # v6 - truststore, v7 - каталоги
+        self.assertEqual(version, 8)   # v6 доверие, v7 каталоги, v8 адреса
 
     def test_ban_unban_cycle(self):
         digest = "sha256:" + "ef" * 32

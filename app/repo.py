@@ -1176,6 +1176,72 @@ def catalog_clear(conn: sqlite3.Connection, origin: str) -> int:
     return int(cursor.rowcount or 0)
 
 
+# --------------------------------------------------------------------------- #
+#  1.3/1.4: адресная книга и здоровье устройств
+# --------------------------------------------------------------------------- #
+
+PEER_ADDR_KEEP = 20           # сколько адресов помним на устройство
+
+
+def peer_addr_add(conn: sqlite3.Connection, pubkey, addr: str,
+                  source: str = "probe") -> None:
+    """Запомнить адрес устройства (источник + время); история растёт.
+
+    Лимит PEER_ADDR_KEEP на устройство: старые адреса вытесняются -
+    книга про «где_device_был недавно», не архив.
+    """
+    key = _trust_key(pubkey)
+    addr = str(addr or "").strip()
+    if not addr:
+        return
+    conn.execute(
+        "INSERT INTO peer_addrs (pubkey, addr, source, last_seen) "
+        "VALUES (?,?,?,?) ON CONFLICT(pubkey, addr) DO UPDATE SET "
+        "last_seen=excluded.last_seen, source=excluded.source",
+        (key, addr, str(source or "probe"), now_iso()))
+    conn.execute(
+        "DELETE FROM peer_addrs WHERE pubkey=? AND addr NOT IN "
+        "(SELECT addr FROM peer_addrs WHERE pubkey=? "
+        " ORDER BY last_seen DESC LIMIT ?)", (key, key, PEER_ADDR_KEEP))
+
+
+def peer_addr_list(conn: sqlite3.Connection, pubkey,
+                   limit: int = 5) -> list[dict]:
+    """Свежие адреса устройства (последний первым) - кандидаты редиала."""
+    return [dict(row) for row in conn.execute(
+        "SELECT addr, source, last_seen FROM peer_addrs WHERE pubkey=? "
+        "ORDER BY last_seen DESC, rowid DESC LIMIT ?",
+        (_trust_key(pubkey), int(limit)))]
+
+
+def peer_health_set(conn: sqlite3.Connection, pubkey, status: str,
+                    detail: str = "") -> dict:
+    """Сохранить статус тихого probe (alive|dead) и вернуть старый.
+
+    Возвращает {"was": ...} - вызывающий логирует СМЕНУ статуса (не
+    каждый проб:5 мин * N устройств = спам в журнал).
+    """
+    key = _trust_key(pubkey)
+    row = conn.execute("SELECT status FROM peer_health WHERE pubkey=?",
+                       (key,)).fetchone()
+    conn.execute(
+        "INSERT INTO peer_health (pubkey, status, detail, checked_at) "
+        "VALUES (?,?,?,?) ON CONFLICT(pubkey) DO UPDATE SET "
+        "status=excluded.status, detail=excluded.detail, "
+        "checked_at=excluded.checked_at",
+        (key, str(status), str(detail or ""), now_iso()))
+    return {"was": row["status"] if row else None}
+
+
+def peer_health(conn: sqlite3.Connection) -> dict:
+    """Снимок здоровья: {pubkey: {status, detail, checked_at}}."""
+    return {row["pubkey"]: {"status": row["status"],
+                            "detail": row["detail"],
+                            "checked_at": row["checked_at"]}
+            for row in conn.execute(
+                "SELECT pubkey, status, detail, checked_at FROM peer_health")}
+
+
 def queue_rows(conn: sqlite3.Connection) -> list[dict]:
     """Очередь загрузки: ожидающие, качающиеся и упавшие - в порядке постановки.
 
