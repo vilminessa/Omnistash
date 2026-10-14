@@ -720,6 +720,13 @@
         line += '<button class="btn" data-peer="catalog-restore" data-remote="' +
           esc(r.remote_id) + '" data-origin="' + esc(r.origin) +
           '" data-addr="' + esc(r.addr) + '">Восстановить…</button>';
+      } else {
+        line += '<button class="btn ghost" data-peer="catalog-friend"' +
+          ' data-remote="' + esc(r.remote_id) +
+          '" data-origin="' + esc(r.origin) +
+          '" data-addr="' + esc(r.addr) +
+          '" data-title="' + esc(r.title || r.remote_id) +
+          '">Забрать у друга…</button>';
       }
       return line + "</div></div>";
     }).join("") + "</div>";
@@ -3809,6 +3816,22 @@
           .then(function (res) {
             peerState.catalogRows = (res && res.rows) || [];
             renderPeerBody();
+          });
+        return;
+      }
+      if (action === "catalog-friend") {
+        if (!confirm("Забрать файл у друга по ЕГО строке?\n\n" +
+              "Это чужая строка: в ваш индекс она НЕ заводится, файл " +
+              "ляжет с пометкой происхождения (origin=friend). Хеш " +
+              "берётся из подписанного манифеста друга и сверяется " +
+              "по sha256 после переноса.")) return;
+        call("catalog_restore_friend", { remote_id: btn.dataset.remote,
+                                         origin: btn.dataset.origin,
+                                         addr: btn.dataset.addr,
+                                         title: btn.dataset.title })
+          .then(function (res) {
+            if (res && res.error) { toast(res.error, true); return; }
+            toast("Забор у друга запущен: " + ((res || {}).title || ""));
           });
         return;
       }

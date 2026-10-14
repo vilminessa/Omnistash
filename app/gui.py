@@ -2864,6 +2864,63 @@ class Api:
                   f"«{row.get('title')}» (назначение: {storage['label']})")
         return {"ok": True, "title": row.get("title") or ""}
 
+    def catalog_restore_friend(self, request=None) -> dict:
+        """Забрать файл у друга по ЧУЖОЙ строке (этап 2.1, §6(б)).
+
+        Строка в индекс НЕ заводится (правило B3 остаётся): файл
+        ложится с пофайловым провенансом origin=friend; хеш - из
+        подписанного манифеста автора каталога, sha256 сверяется.
+        """
+        request = request or {}
+        remote_id = str(request.get("remote_id") or "")
+        origin = str(request.get("origin") or "")
+        addr = str(request.get("addr") or "")
+        title = str(request.get("title") or remote_id)
+        if not remote_id or not origin or not addr:
+            return {"error": "Не указаны строка, устройство и адрес"}
+        if repo.catalog_own(self.db.conn, remote_id):
+            return {"error": "Строка есть в вашем индексе - "
+                             "пользуйтесь обычным восстановлением"}
+        config = dict(self._current_settings())
+        if not config.get("mesh_enabled"):
+            return {"error": "Участие в mesh выключено в настройках "
+                             "(секция Mesh)"}
+        with self._lock:
+            if self._mesh.get("running"):
+                return {"error": "Запрос к участникам уже идёт"}
+        dest = str(config.get("dest_dir") or profile_dir())
+        self._mesh_stop.clear()
+        with self._lock:
+            self._mesh = {"running": True, "video_id": None, "title": title,
+                          "error": None, "summary": None}
+
+        def work() -> None:
+            try:
+                ok = mesh_fetch.restore_friend(
+                    self.db.conn,
+                    {"remote_id": remote_id, "origin": origin,
+                     "title": title}, addr, dest,
+                    log=self._log, stop=self._mesh_stop)
+                summary = ("Файл забран у друга (пометка origin=friend)"
+                           if ok else "Забор у друга не удался")
+                with self._lock:
+                    self._mesh.update(running=False, summary=summary,
+                                      error=None if ok else summary)
+            except Exception as exc:  # noqa: BLE001 - воркер не валит
+                self._log(f"Mesh: забор у друга упал: {exc}")
+                with self._lock:
+                    self._mesh.update(running=False, error=str(exc),
+                                      summary=f"Ошибка: {exc}")
+
+        thread = threading.Thread(target=work, name="omnistash-friend-fetch",
+                                  daemon=True)
+        with self._lock:
+            self._mesh_thread = thread
+        thread.start()
+        self._log(f"Mesh: забор чужой строки у друга {addr[:24]}… "
+                  f"«{title}» (origin=friend, назначение: {dest})")
+        return {"ok": True, "title": title}
+
     def catalog_forget(self, request=None) -> dict:
         """Забыть зеркало участника (строки уходят, устройства не трогаются)."""
         request = request or {}

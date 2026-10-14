@@ -258,3 +258,77 @@ def restore(conn, row: dict, settings: dict, dest_dir, *,
         f"подтверждений {decision['consensus']}, синк узла "
         f"{provenance['peer_synced_at'] or 'не указан'})")
     return True
+
+
+def restore_friend(conn, catalog_row: dict, addr: str, dest_dir, *,
+                   log=None, stop=None) -> bool:
+    """Забрать файл у друга по ЧУЖОЙ строке (этап 2.1, §6(б)).
+
+    Продуктовое правило B3 остаётся в силе: строка в индекс НЕ
+    заводится, чужой title используется только для ИМЕНИ файла.
+    Проверки полученных данных (критерий заказчика):
+      * хеш берётся из ПОДПИСАННОГО манифеста ключом автора каталога
+        (origin) - ключ канала обязан совпасть с ним же;
+      * sha256 скачанного сверяется с манифестом;
+      * структурная проверка сигнатуры без эталона (чужой duration
+        не принимаем - сверять нечего, кроме самого контейнера).
+    Провенанс (кто отдал, чей хеш, origin=friend) пишется пофайловым
+    sidecar'ом рядом с файлом.
+    """
+    log = log or (lambda message: None)
+    remote_id = str(catalog_row.get("remote_id") or "")
+    origin = str(catalog_row.get("origin") or "").lower()
+    title = str(catalog_row.get("title") or "") or remote_id
+    if not remote_id or not origin or not addr:
+        return False
+    banned = feedback.banned_set(conn)
+    expects = {addr: origin}
+    pairs = client.collect_manifests(remote_id, [addr], expects=expects)
+    # Только манифесты АВТОРА каталога: подпись ключом origin, без
+    # битых подписей; отзыв доверия отсекается штатным фильтром.
+    pairs = [(a, item) for a, item in pairs
+             if str(item.get("pubkey") or "").lower() == origin
+             and manifest.verify(item) is None]
+    pairs = _drop_revoked(conn, pairs, log)
+    digest = client.pick_digest(pairs, banned)
+    if not digest:
+        log(f"Mesh: у друга нет пригодного манифеста «{title}» "
+            "(стоп-лист/подпись/недоступен)")
+        return False
+    from ..util import now_iso
+    part = os.path.join(str(dest_dir), f".friend_{remote_id}.part")
+    try:
+        client.fetch(remote_id, addr, part, expect=origin)
+        got = file_hash(part)
+        if got != digest:
+            raise RuntimeError(f"хеш не сошёлся (заявлен {digest[:16]}…, "
+                               f"получено {got[:16]}…)")
+        structure = verify.probe(part, None)
+        if structure["ok"] is False:
+            raise RuntimeError("структурная проверка: "
+                               + "; ".join(structure["errors"]))
+        ext = client.sniffer_ext(part)
+        final = os.path.join(dest_dir,
+                             f"{sanitize_name(title)} [{remote_id}].{ext}")
+        os.replace(part, final)
+    except Exception as exc:  # noqa: BLE001 - честный отказ в журнал
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        log(f"Mesh: забор у друга не удался «{title}»: {exc}")
+        return False
+    sidecar = os.path.splitext(final)[0] + ".post.json"
+    try:
+        with open(sidecar, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "origin": "friend", "from": origin,
+                "remote_id": remote_id, "title": title,
+                "sha256": digest, "size": os.path.getsize(final),
+                "fetched_at": now_iso(), "path": final,
+            }, ensure_ascii=False, indent=1))
+    except OSError:
+        pass                      # провенанс - не барьер для получения
+    log(f"Mesh: забрано у друга «{title}» ({human_size(os.path.getsize(final))}, "
+        f"sha {digest[:16]}… сверен, провенанс origin=friend)")
+    return True

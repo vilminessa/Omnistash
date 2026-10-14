@@ -456,6 +456,58 @@ class TestRestore(MeshNetCase):
                                     str(self.root / "out-strict2"),
                                     log=logs.append, reason="")
         self.assertTrue(ok, logs)
+    def test_friend_fetch_of_strangers_row(self):
+        """2.1: чужая строка у друга - проверенный файл + провенанс.
+
+        Правило B3 не ломается: строка в индекс НЕ заводится, хеш
+        берётся из ПОДПИСАННОГО манифеста автора каталога (origin).
+        """
+        holder = self.seed_holder()
+        receiver = self.seed_receiver()
+        origin = identity.get_identity()[1].hex()
+        dest = self.root / "friend-out"
+        dest.mkdir()
+        logs = []
+        before = self.db_b.conn.execute(
+            "SELECT COUNT(*) AS c FROM videos").fetchone()["c"]
+        from app.mesh import verify as mesh_verify
+        with mock.patch.object(mesh_verify, "probe",
+                               return_value={"checked": True, "ok": None,
+                                              "errors": []}):
+            ok = mesh_fetch.restore_friend(
+                self.db_b.conn,
+                {"remote_id": "vid000000001", "origin": origin,
+                 "title": "Клип"},
+                receiver["addr"], str(dest), log=logs.append)
+        self.assertTrue(ok, logs)
+        files = list(dest.glob("*.mp4"))
+        self.assertEqual(len(files), 1, files)
+        from app.indexer import file_hash
+        self.assertEqual(file_hash(files[0]), holder["digest"],
+                         "sha256 сверен с подписанным манифестом")
+        sidecar = files[0].with_suffix(".post.json")
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+        self.assertEqual(payload["origin"], "friend")
+        self.assertEqual(payload["from"], origin)
+        self.assertEqual(payload["sha256"], holder["digest"])
+        after = self.db_b.conn.execute(
+            "SELECT COUNT(*) AS c FROM videos").fetchone()["c"]
+        self.assertEqual(after, before, "строка в индекс НЕ заводится")
+
+    def test_friend_fetch_refuses_foreign_key(self):
+        """2.1: канал обязан открыться ключом автора каталога."""
+        self.seed_holder()
+        receiver = self.seed_receiver()
+        dest = self.root / "friend-bad"
+        dest.mkdir()
+        logs = []
+        ok = mesh_fetch.restore_friend(
+            self.db_b.conn,
+            {"remote_id": "vid000000001", "origin": "ab" * 32,
+             "title": "Клип"},
+            receiver["addr"], str(dest), log=logs.append)
+        self.assertFalse(ok, "чужой ключ не должен проходить: " + str(logs))
+        self.assertEqual(list(dest.iterdir()), [], "ничего не должно ляг")
 
     def test_revoked_device_is_refused_and_restorable(self):
         """Отзыв доверия (truststore) отсекает манифесты и будущие файлы.
