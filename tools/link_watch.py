@@ -100,6 +100,12 @@ def ensure(id: str, token: str, peer: str, port: int) -> dict:
     return {"started": started}
 
 
+def _say(message: str) -> None:
+    """Печать без падения в pythonw (sys.stdout = None без консоли)."""
+    if sys.stdout is not None:
+        print(message, flush=True)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="link_watch",
@@ -118,17 +124,16 @@ def main(argv=None) -> int:
     if args.cmd == "once":
         result = ensure(args.id, args.token, args.peer, args.port)
         if result["started"]:
-            print(f"link_watch: поднято - {', '.join(result['started'])}")
+            _say(f"link_watch: поднято - {', '.join(result['started'])}")
         else:
-            print("link_watch: демон и будильник живы")
+            _say("link_watch: демон и будильник живы")
         return 0
 
     # loop: сам себе планировщик (если задача Windows недоступна)
     while True:
         result = ensure(args.id, args.token, args.peer, args.port)
         if result["started"]:
-            print(f"link_watch: поднято - {', '.join(result['started'])}",
-                  flush=True)
+            _say(f"link_watch: поднято - {', '.join(result['started'])}")
         time.sleep(60)
 
 
