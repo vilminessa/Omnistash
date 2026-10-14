@@ -74,16 +74,22 @@ python tools/link.py wait --port 18571        # или --timeout 900
   будильник его не дёргает);
 - после каждого ответа `wait` перезапускается (один цикл — одна почта).
 
-## Ловушка живой LAN-пары: zapret/WinDivert
+## Ловушка живой LAN-пары: zapret/WinDivert и брандмауэр
 
-Проверено на живой паре vilmpc↔vilmnote: если на машине работает
-**zapret** (процесс `winws`, драйвер WinDivert), он глушит unicast
-TCP/UDP в диапазоне 1024–65535 **до сокетов** — ни firewall, ни python
-SYN не видят, у собеседника тишина (DROP, а не RST). Исключение
-`192.168.0.0/16` в конфиге zapret не всегда спасает. Диагностика:
-`Get-Process winws` на обеих сторонах; проверять реальную доступность
-адреса сокетом (`connect_ex`), а не «ping проходит». Обход на время
-теста: Tailscale-адреса (`100.x`, мимо winws) либо порт <1024.
+Проверено на живой паре vilmpc↔vilmnote. Диагностика по шагам:
+
+1. **Сначала брандмауэр**: без Allow-правила Windows тихо роняет SYN
+   (не RST!) — картина один в один с zapret. Лечение: `netsh advfirewall
+   firewall add rule name="omnistash-mesh" dir=in action=allow
+   protocol=TCP localport=<порт>` (и UDP для DHT) **от администратора**.
+2. **Потом winws**: `--wf-tcp`/`--wf-udp` в cmdline winws (см.
+   `Get-CimInstance Win32_Process -Filter "Name='winws.exe'"`) -
+   WinDivert перехватывает **только перечисленные порты**. Если наших
+   портов (mesh/18571/1000) в списках нет - zapret при чём не он.
+   Порядок проверки важен: в нашей паре DROP делал брандмауэр, а winws
+   оказался ни при чём (порты не в wf-списке).
+3. Проверять реальную доступность адреса сокетом (`connect_ex`), а не
+   «ping проходит». Обход: Tailscale-адреса (100.x) или порт <1024.
 
 ## Шлюз в Docker (link-хаб + MCP) — «коннект двух агентов»
 
