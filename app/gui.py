@@ -26,6 +26,7 @@ from . import __version__, indexer, migrate as migrate_mod, repo, settings
 from . import downloader as downloader_mod
 from . import ffmpeg_installer as ffmpeg_mod
 from . import google_auth
+from . import legal as legal_mod
 from . import repack as repack_mod
 from . import schedule as schedule_mod
 from . import settings_schema, sources
@@ -2606,6 +2607,32 @@ class Api:
         return {"ok": True, "device": device}
 
     # ------------------------------------------------------------------ #
+    #  LEG: юридические согласия (ACCEPTABLE_USE, права на файл)
+    # ------------------------------------------------------------------ #
+
+    def legal_state(self, request=None) -> dict:
+        """Факты согласий человека (LEG-1/LEG-3): принимались ли правила
+        и предупреждение о передаче файлов другим лицам."""
+        return {"ok": True, **legal_mod.state()}
+
+    def legal_accept(self, request=None) -> dict:
+        """Зафиксировать согласие: человек явно нажал «Принять».
+
+        Факт (когда) пишется отдельно от настроек (app.legal): юридическая
+        рамка требует датированного согласия, а не молчаливого.
+        """
+        request = request or {}
+        data = legal_mod.accept(aup=bool(request.get("aup")),
+                                first_send=bool(request.get("first_send")))
+        if request.get("aup"):
+            self._log("Правила использования (docs/ACCEPTABLE_USE.md) "
+                      "приняты")
+        if request.get("first_send"):
+            self._log("Предупреждение о передаче принято: файлы уходят "
+                      "другим лицам - только в рамках ваших прав")
+        return {"ok": True, **data}
+
+    # ------------------------------------------------------------------ #
     #  B3: зеркало каталогов участников (синхронизация индекса)
     # ------------------------------------------------------------------ #
 
@@ -2811,6 +2838,12 @@ class Api:
         path = str(request.get("path") or "").strip()
         if not path:
             return {"error": "Укажите путь к файлу"}
+        # LEG-3: первая передача файлу другому лицу - предупреждение
+        # о правах (одноразово; фиксируется человеком через legal_accept).
+        if not legal_mod.state()["first_send_accepted"]:
+            return {"need_confirm": "Вы передаёте файл ДРУГОМУ ЛИЦУ - "
+                    "убедитесь, что имеете права на этот файл. "
+                    "Продолжить?"}
 
         def work():
             def on_code(code: str) -> None:

@@ -2771,7 +2771,53 @@
       "</div></div>";
   }
 
+  // Диалог согласия (LEG): явная галка человека - без неё «Принять»
+  // неактивна. Возвращает Promise<boolean>.
+  function legalDialog(title, text, checkLabel) {
+    return new Promise(function (resolve) {
+      var overlay = $("legal-overlay");
+      $("legal-title").textContent = title;
+      $("legal-text").textContent = text;
+      $("legal-check-label").textContent = checkLabel ||
+        "Правила использования приняты";
+      var check = $("legal-check");
+      var accept = $("legal-accept");
+      var decline = $("legal-decline");
+      check.checked = false;
+      accept.disabled = true;
+      function done(result) {
+        overlay.hidden = true;
+        check.onchange = accept.onclick = decline.onclick = null;
+        resolve(result);
+      }
+      check.onchange = function () { accept.disabled = !check.checked; };
+      accept.onclick = function () { done(true); };
+      decline.onclick = function () { done(false); };
+      overlay.hidden = false;
+    });
+  }
+
   function bindSettings() {
+    // LEG-1: правила не принимались - спросить один раз при открытии
+    // настроек (mesh и relay живут в этих же настройках).
+    call("legal_state").then(function (legal) {
+      if (!(legal && legal.ok) || legal.aup_accepted_at) return;
+      legalDialog(
+        "Правила использования",
+        "Участие в mesh и функция relay работают в рамках документа\n" +
+        "docs/ACCEPTABLE_USE.md (лежит рядом с программой): контент - " +
+        "только ваши права, передача - другим лицам, relay - opt-in " +
+        "с квотами.\n\nБез принятия правил функции mesh/relay не включаются.",
+        "Правила использования приняты"
+      ).then(function (accepted) {
+        if (!accepted) {
+          toast("Правила не приняты - mesh/relay остаются выключенными");
+          return;
+        }
+        call("legal_accept", { aup: true, first_send: true }).then(
+          function () { toast("Правила приняты - спасибо"); });
+      });
+    });
     Array.prototype.forEach.call(
       document.querySelectorAll("#settings-body [data-key]"), function (input) {
         input.addEventListener("change", function () {
@@ -2780,24 +2826,43 @@
           // Согласие на mesh: включение - явное действие с объяснением,
           // что уходит наружу (адрес и id запрашиваемых видео).
           if (key === "mesh_enabled" && value) {
-            var ok = confirm(
-              "Включить участие в mesh?\n\n" +
-              "Наружу будут уходить: ваш адрес (когда поднят сервер) и id " +
-              "запрашиваемых видео. Метаданные от участников НЕ принимаются " +
-              "никогда - только файлы, и те проверяются (sha256, структура, " +
-              "стоп-лист «несовпадений»).\n\n" +
-              "С роутера также будет запрошен проброс порта (UPnP) - это " +
-              "меняет настройки роутера; выключается настройкой «Проброс " +
-              "порта через роутер» в этой же секции.\n\n" +
-              "Программа один раз разрешит себя в брандмауэр Windows " +
-              "(входящий порт) - без него к вам не смогут подключиться; " +
-              "если понадобятся права администратора, журнал даст готовую " +
-              "команду.\n\n" +
-              "Продолжить?");
-            if (!ok) {
-              input.checked = false;
-              return;
-            }
+            var proceed = function () {
+              var ok = confirm(
+                "Включить участие в mesh?\n\n" +
+                "Наружу будут уходить: ваш адрес (когда поднят сервер) и id " +
+                "запрашиваемых видео. Метаданные от участников НЕ принимаются " +
+                "никогда - только файлы, и те проверяются (sha256, структура, " +
+                "стоп-лист «несовпадений»).\n\n" +
+                "С роутера также будет запрошен проброс порта (UPnP) - это " +
+                "меняет настройки роутера; выключается настройкой «Проброс " +
+                "порта через роутер» в этой же секции.\n\n" +
+                "Программа один раз разрешит себя в брандмауэр Windows " +
+                "(входящий порт) - без него к вам не смогут подключиться; " +
+                "если понадобятся права администратора, журнал даст готовую " +
+                "команду.\n\n" +
+                "Вы отдаёте файлы только тем, кому они нужны, и только в " +
+                "рамках ваших прав (docs/ACCEPTABLE_USE.md).\n\n" +
+                "Продолжить?");
+              if (!ok) {
+                input.checked = false;
+                return;
+              }
+              saveSetting(key, value);
+            };
+            call("legal_state").then(function (legal) {
+              if (legal && legal.aup_accepted_at) { proceed(); return; }
+              legalDialog(
+                "Правила использования",
+                "Участие в mesh - это передача файлов ДРУГИМ ЛИЦАМ в " +
+                "рамках ваших прав (docs/ACCEPTABLE_USE.md).",
+                "Правила использования приняты"
+              ).then(function (accepted) {
+                if (!accepted) { input.checked = false; return; }
+                call("legal_accept", { aup: true, first_send: true }).then(
+                  proceed);
+              });
+            });
+            return;
           }
           saveSetting(key, value);
         });
@@ -3763,11 +3828,23 @@
         if (!whPath) { toast("Укажите путь к файлу", true); return; }
         if (!confirm("Отправить файл по коду wormhole?\n\nКод появится в " +
               "журнале - передайте его собеседнику.")) return;
-        call("wormhole_send", { path: whPath }).then(function (res) {
-          if (res && res.error) { toast(res.error, true); return; }
-          toast("Отправка запущена - код в журнале");
-          openPeerOverlay();
-        });
+        var whDoSend = function () {
+          call("wormhole_send", { path: whPath }).then(function (res) {
+            if (res && res.error) { toast(res.error, true); return; }
+            if (res && res.need_confirm) {
+              // LEG-3: первая передача - предупреждение о правах.
+              if (!confirm(res.need_confirm)) {
+                toast("Отправка отменена");
+                return;
+              }
+              call("legal_accept", { first_send: true }).then(whDoSend);
+              return;
+            }
+            toast("Отправка запущена - код в журнале");
+            openPeerOverlay();
+          });
+        };
+        whDoSend();
         return;
       }
       if (action === "wh-receive") {
@@ -4295,6 +4372,12 @@
           version: "0.1.1 (preview)", settings: settings,
           schema: schema, settings_rev: settingsRev
         });
+      },
+      legal_state: function () {
+        // В превью согласия уже приняты - диалоги не мешают смотреть разметку.
+        return Promise.resolve({ ok: true,
+          aup_accepted_at: "2026-01-01T00:00:00",
+          first_send_accepted: true });
       },
       poll: function () {
         return Promise.resolve({

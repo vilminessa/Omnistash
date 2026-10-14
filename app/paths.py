@@ -50,6 +50,11 @@ def settings_path() -> Path:
     return profile_dir() / "settings.json"
 
 
+def legal_path() -> Path:
+    """Файл юридических согласий (датированное «Принять», LEG-1/LEG-3)."""
+    return profile_dir() / "legal.json"
+
+
 def db_path() -> Path:
     """Файл базы библиотеки (индекс скачанного)."""
     return profile_dir() / "library.db"

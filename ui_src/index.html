@@ -352,6 +352,26 @@
   </div>
 </div>
 
+<!-- Правила использования (LEG-1/LEG-3): явное согласие человека -->
+<div class="overlay" id="legal-overlay" hidden>
+  <div class="card" role="dialog" aria-modal="true">
+    <div class="card-head">
+      <div class="card-title" id="legal-title">Правила использования</div>
+    </div>
+    <div class="card-body">
+      <p id="legal-text" style="white-space: pre-line"></p>
+      <label style="display:block; margin-top:8px">
+        <input type="checkbox" id="legal-check">
+        <span id="legal-check-label">Правила использования приняты</span>
+      </label>
+      <div style="margin-top:12px">
+        <button class="btn primary" id="legal-accept" disabled>Принять</button>
+        <button class="btn" id="legal-decline">Отклонить</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Вход в Google: куки снимаются сами, копия шифруется (DPAPI) -->
 <div class="overlay" id="account-overlay" hidden>
   <div class="card" role="dialog" aria-modal="true">

@@ -857,6 +857,10 @@ class TestPeerApi(GuiCase):
     def test_wormhole_status_and_send_guard(self):
         """B1: статус читается, действия без установки честно откажут."""
         api = self._api()
+        # LEG-3 gate: wormhole-тест про отправку, а не про согласия.
+        api._current_settings = lambda: {"mesh_enabled": True,
+                                         "mesh_nick": "Иван Тест",
+                                         "first_send_accepted": True}
         status = api.wormhole_status()
         self.assertIn("installed", status)
         self.assertFalse(status["busy"])
@@ -916,6 +920,59 @@ class TestPeerApi(GuiCase):
         self.assertEqual(calls, ["vilmi", "vilm"],
                          "второй ник обязан объявиться после первого")
         self.assertEqual(api._nick_last, {"nick": "vilm", "accepted": 7})
+
+
+class TestLegalApi(GuiCase):
+    """LEG: юридические согласия (AUP + предупреждение о передаче)."""
+
+    def setUp(self):
+        super().setUp()
+        # Свои согласия - в temp: общий профиль тестов загрязнять нельзя.
+        self._legal_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._legal_dir.cleanup)
+        from pathlib import Path as _Path
+        target = _Path(self._legal_dir.name) / "legal.json"
+        patcher = mock.patch("app.paths.legal_path", lambda: target)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _api(self) -> Api:
+        """Api с ЧЕСТНЫМИ настройками (temp-профиль): юр-флаги живут
+        в settings, подменённая лямбда TestPeerApi их прятала бы."""
+        return self.make_api()
+
+    def test_accept_flow_and_wormhole_gate(self):
+        api = self._api()
+        state = api.legal_state()
+        self.assertTrue(state["ok"])
+        self.assertEqual(state["aup_accepted_at"], "",
+                         "из коробки согласие не принято")
+        self.assertFalse(state["first_send_accepted"])
+
+        # wormhole ДО согласия - gate, а не отправка (библиотеки в тесте
+        # нет: даже после gate уйдёт честная ошибка «не установлен»)
+        with mock.patch("app.gui.wormhole_mod.installed",
+                        return_value=False):
+            gated = api.wormhole_send({"path": "x.mp4"})
+        self.assertIn("need_confirm", gated, gated)
+
+        res = api.legal_accept({"aup": True, "first_send": True})
+        self.assertTrue(res["aup_accepted_at"], "факт согласия датирован")
+        self.assertTrue(res["first_send_accepted"])
+        state = api.legal_state()
+        self.assertTrue(state["aup_accepted_at"])
+        # повтор пустым - безвреден (без исключений/перезаписи даты)
+        again = api.legal_accept({})
+        self.assertEqual(again["aup_accepted_at"], res["aup_accepted_at"])
+
+    def test_gate_lifted_after_accept(self):
+        api = self._api()
+        api.legal_accept({"first_send": True})
+        with mock.patch("app.gui.wormhole_mod.installed",
+                        return_value=False):
+            res = api.wormhole_send({"path": "x.mp4"})
+        self.assertNotIn("need_confirm", res,
+                         "после согласия wormhole идёт своим ходом")
 
 
 if __name__ == "__main__":
