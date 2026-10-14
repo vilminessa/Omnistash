@@ -394,6 +394,41 @@ class TestRestore(MeshNetCase):
         self.assertTrue(any("стоп-листе" in line or
                             "пригодных" in line for line in logs), logs)
 
+    def test_restore_tries_trusted_last_addr(self):
+        """F5: последний рабочий адрес доверенного - в очереди адресатов.
+
+        DHT мог не знать его (переезд, истёкший TTL): восстановление
+        обязано пробовать проверенный путь и сразу ожидать по нему ключ
+        устройства - личность подтверждается по TLS с первой пробы.
+        """
+        self.seed_holder()
+        receiver = self.seed_receiver()
+        row = {"id": receiver["vid"], "remote_id": "vid000000001",
+               "title": "Клип"}
+        key = "cd" * 32
+        repo.truststore_add(self.db_b.conn, key, addr="198.51.100.7:4444")
+        seen = {}
+
+        def capture(remote_id, addrs, expects=None, **kw):
+            seen["addrs"] = list(addrs)
+            seen["expects"] = expects or {}
+            return []
+
+        with mock.patch.object(client, "collect_manifests",
+                               side_effect=capture):
+            ok = mesh_fetch.restore(self.db_b.conn, row, self._settings(),
+                                    str(self.root / "out-f5"), reason="")
+        self.assertFalse(ok, "без манифестов восстановление не пройдёт")
+        self.assertIn("198.51.100.7:4444", seen["addrs"],
+                      "адрес доверенного устройства обязан пробоваться")
+        self.assertEqual(
+            seen["addrs"][:2],
+            [f"127.0.0.1:{self.port}", "198.51.100.7:4444"],
+            "порядок: явные адреса участников, затем проверенный путь "
+            "доверенного, и только потом DHT-перебор")
+        self.assertEqual(seen["expects"].get("198.51.100.7:4444"), key,
+                         "ожидание ключа = личность с первой пробы")
+
     def test_revoked_device_is_refused_and_restorable(self):
         """Отзыв доверия (truststore) отсекает манифесты и будущие файлы.
 

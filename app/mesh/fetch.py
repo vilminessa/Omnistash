@@ -71,6 +71,19 @@ def restore(conn, row: dict, settings: dict, dest_dir, *,
         addrs.append(addr)
         if expect.strip():
             expects[addr] = expect.strip().lower()
+    # F5: последний рабочий адрес доверенного устройства - в очередь до
+    # DHT-перебора: он уже когда-то отдавал этот файл (проверенный путь),
+    # а сеть могла его не знать (переезд, истёкший TTL). Ожидание ключа
+    # по адресу: личность подтверждается по TLS уже с первой пробы.
+    from .. import repo
+    for device in repo.truststore_list(conn):
+        if device.get("revoked_at"):
+            continue                    # отзыв - жёсткий барьер
+        addr = str(device.get("last_addr") or "").strip()
+        if not addr or addr in addrs:
+            continue
+        addrs.append(addr)
+        expects.setdefault(addr, str(device.get("pubkey") or "").lower())
     banned = feedback.banned_set(conn)
     # DHT: участники, объявившие этот файл (плюс ручные адреса). Сеть
     # отдаёт только АДРЕСА (ядро BEP5): ключ/подпись/хеш придут с
