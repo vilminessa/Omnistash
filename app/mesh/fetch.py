@@ -41,6 +41,28 @@ def _drop_revoked(conn, pairs, log):
     return kept
 
 
+def _strict_filter(conn, settings, pairs, log):
+    """Strict (1.2): манифесты - только от подтверждённых устройств.
+
+    Режим включается автоматически при первом подтверждённом друге
+    (gui.trust_sas_confirm / trust_op verify) и выключается только
+    человеком явно. Барьер стоит на манифестах и файлах; информационные
+    каталоги strict не трогает.
+    """
+    if not settings.get("mesh_strict"):
+        return pairs
+    from .. import repo
+    trusted = repo.truststore_verified(conn)
+    kept = [(addr, item) for addr, item in pairs
+            if str(item.get("pubkey") or "") in trusted]
+    dropped = len(pairs) - len(kept)
+    if dropped:
+        log(f"Mesh: strict - пропущено манифестов от неподтверждённых "
+            f"устройств: {dropped} (сверьте отпечаток или 12 слов в "
+            "диалоге «Участники»)")
+    return kept
+
+
 def restore(conn, row: dict, settings: dict, dest_dir, *,
             log=None, stop=None, reason: str = "") -> bool:
     """Попытка получить файл строки у участников. True - файл получен,
@@ -119,6 +141,7 @@ def restore(conn, row: dict, settings: dict, dest_dir, *,
     except Exception as exc:  # noqa: BLE001 - сбой не должен ронять поток
         return give_up(f"Mesh: манифесты не получены: {exc}")
     pairs = _drop_revoked(conn, pairs, log)
+    pairs = _strict_filter(conn, settings, pairs, log)
 
     digest = client.pick_digest(pairs, banned)
     if not digest:

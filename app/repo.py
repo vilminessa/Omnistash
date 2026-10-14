@@ -1020,6 +1020,18 @@ def truststore_revoked(conn: sqlite3.Connection) -> set:
                          "WHERE revoked_at IS NOT NULL")}
 
 
+def truststore_verified(conn: sqlite3.Connection) -> set:
+    """Подтверждённые и не отозванные ключи - круг «друзей» (strict, 1.2).
+
+    Только этот круг участвует в strict-режиме: манифесты/файлы от
+    неподтверждённых устройств отбрасываются (см. mesh.fetch.restore).
+    """
+    return {row["pubkey"] for row in
+            conn.execute("SELECT pubkey FROM truststore "
+                         "WHERE verified_at IS NOT NULL "
+                         "AND revoked_at IS NULL")}
+
+
 def truststore_import_pins(conn: sqlite3.Connection, pins: dict) -> int:
     """Перенос TOFU-пинов «адрес -> ключ» в устройства (идемпотентно).
 

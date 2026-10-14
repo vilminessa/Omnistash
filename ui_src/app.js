@@ -630,6 +630,9 @@
     }
     parts.push("LAN-приветствий получено: " + (s.hello_rx || 0) +
       (s.hello_rx > 0 ? "" : " (соседи по сети не видны)"));
+    parts.push(p.strict
+      ? "strict: вкл - только подтверждённые устройства"
+      : "strict: выкл");
     if (s.mdns) {
       parts.push(s.mdns.available
         ? (s.mdns.running
@@ -4084,7 +4087,7 @@
       col_views: true, col_likes: true, col_comments: true, col_sync: true,
       sort_col: "", sort_dir: "desc",
       mesh_enabled: false, mesh_peers: "", mesh_port: 1000, mesh_upnp: true,
-      mesh_encrypt: false, mesh_mdns: true, mesh_nick: "",
+      mesh_encrypt: false, mesh_mdns: true, mesh_strict: false, mesh_nick: "",
       mesh_max_mb: 10, mesh_rate_mbit: 10,
       dest_dir: "D:\\видео\\downloads",
       output_template: "%(channel)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s",
@@ -4266,6 +4269,12 @@
               "Наружу уходят адрес и id запрашиваемых видео; соединение " +
               "шифруется (TLS). Файлы проверяются (sha256, структура, " +
               "стоп-лист).",
+        default: false },
+      { key: "mesh_strict", type: "bool", section: "Mesh",
+        label: "Только подтверждённые устройства (strict)",
+        hint: "Манифесты и файлы - только от устройств с подтверждённым " +
+              "ключом (сверка отпечатка или 12 слов). Включается само при " +
+              "первом подтверждённом устройстве.",
         default: false },
       { key: "mesh_peers", type: "str", section: "Mesh",
         label: "Адреса участников",

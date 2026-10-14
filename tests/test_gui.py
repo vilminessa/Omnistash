@@ -817,6 +817,38 @@ class TestPeerApi(GuiCase):
         self.assertIn("каталог: строк в зеркале 0", res["report"])
         self.assertIsNone(res["reachable"])
 
+    def test_strict_autoload_on_first_confirmed(self):
+        """1.2: strict включается при первом подтверждённом устройстве,
+        но НЕ включается повторно, если человек его выключил."""
+        from app import settings as settings_mod
+        api = self._api()
+        self.assertFalse(settings_mod.load().get("mesh_strict"))
+
+        api.trust_op({"op": "verify", "pubkey": "aa" * 32})
+        self.assertTrue(settings_mod.load().get("mesh_strict"),
+                        "первое подтверждение должно включить strict")
+
+        # человек выключил - повторные подтверждения не включают
+        settings_mod.set_value("mesh_strict", False)
+        with mock.patch.object(api, "_current_settings",
+                               return_value={"mesh_enabled": True,
+                                             "mesh_nick": "x",
+                                             "mesh_strict": False}):
+            api.trust_op({"op": "verify", "pubkey": "bb" * 32})
+        self.assertFalse(settings_mod.load().get("mesh_strict"),
+                         "выключенный человеком strict не возвращается")
+        # SAS-подтверждение тоже подчиняется правилу
+        with mock.patch.object(api, "_current_settings",
+                               return_value={"mesh_enabled": True,
+                                             "mesh_nick": "x",
+                                             "mesh_strict": False}):
+            server = mesh_server.PeerServer(api.db, 0)
+            port = server.start()
+            self.addCleanup(server.stop)
+            res = api.trust_sas_begin({"addr": f"127.0.0.1:{port}"})
+            api.trust_sas_confirm({"pubkey": res["pubkey"]})
+        self.assertFalse(settings_mod.load().get("mesh_strict"))
+
     def test_catalog_refresh_list_restore_guard(self):
         """B3: обновление зеркала, список и защита «только своя строка»."""
         api = self._api()

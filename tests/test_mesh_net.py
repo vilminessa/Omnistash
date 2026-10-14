@@ -429,6 +429,34 @@ class TestRestore(MeshNetCase):
         self.assertEqual(seen["expects"].get("198.51.100.7:4444"), key,
                          "ожидание ключа = личность с первой пробы")
 
+    def test_strict_blocks_unverified_holder(self):
+        """1.2: strict принимает манифесты только от подтверждённых."""
+        self.seed_holder()
+        receiver = self.seed_receiver()
+        row = {"id": receiver["vid"], "remote_id": "vid000000001",
+               "title": "Клип"}
+        settings = self._settings({"mesh_strict": True})
+        logs = []
+        ok = mesh_fetch.restore(self.db_b.conn, row, settings,
+                                str(self.root / "out-strict"),
+                                log=logs.append, reason="")
+        self.assertFalse(ok, "неподтверждённый держатель в strict - отказ")
+        self.assertTrue(any("strict" in line for line in logs), logs)
+        self.assertFalse(list((self.root / "out-strict").glob("*.mp4"))
+                         if (self.root / "out-strict").exists() else False)
+
+        # подтверждаем ключ держателя - путь открывается
+        pubkey = identity.get_identity()[1].hex()
+        repo.truststore_verify(self.db_b.conn, pubkey)
+        with mock.patch.object(mesh_verify, "probe",
+                               return_value={"checked": True, "ok": None,
+                                             "duration": 213.0,
+                                             "errors": [], "skipped": "тест"}):
+            ok = mesh_fetch.restore(self.db_b.conn, row, settings,
+                                    str(self.root / "out-strict2"),
+                                    log=logs.append, reason="")
+        self.assertTrue(ok, logs)
+
     def test_revoked_device_is_refused_and_restorable(self):
         """Отзыв доверия (truststore) отсекает манифесты и будущие файлы.
 

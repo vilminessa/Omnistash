@@ -2382,6 +2382,7 @@ class Api:
                 "nick": nick,
                 "nick_valid": mesh_dht.nick_ok(nick),
                 "enabled": bool(config.get("mesh_enabled")),
+                "strict": bool(config.get("mesh_strict")),
                 "dht": status["dht"],
                 "devices": [
                     {**device,
@@ -2505,6 +2506,29 @@ class Api:
                 "trust": device["status"], "label": device["label"],
                 "revoked": bool(device["revoked_at"])}
 
+    def _strict_autoload(self, device: dict) -> None:
+        """Strict включается при ПЕРВОМ подтверждённом устройстве (1.2).
+
+        Повторные подтверждения НЕ включают режим, выключенный человеком:
+        авто-включение работает, только пока в truststore не было
+        подтверждённых устройств до этой операции.
+        """
+        try:
+            others = repo.truststore_verified(self.db.conn) - {
+                str(device.get("pubkey") or "")}
+            if others or self._current_settings().get("mesh_strict"):
+                return
+            settings.set_value("mesh_strict", True)
+            with self._lock:
+                self._settings_rev += 1
+                self._settings_cache.clear()
+            settings.reload_if_changed(self._settings_cache)
+            self._log("Mesh: strict включён автоматически - первое "
+                      "подтверждённое устройство (выключается явно в "
+                      "настройках, секция Mesh)")
+        except Exception as exc:  # noqa: BLE001 - авто-включение не критично
+            self._log(f"Mesh: strict не удалось включить: {exc}")
+
     def _truststore_seed(self) -> None:
         """Перенос TOFU-пинов адресов в устройства (идемпотентно, один раз).
 
@@ -2561,6 +2585,8 @@ class Api:
                 return {"error": f"Неизвестная операция: {op!r}"}
         except ValueError as exc:
             return {"error": str(exc)}
+        if op == "verify":
+            self._strict_autoload(device)
         self._log(f"Mesh: устройство {pubkey[:16]}… - {labels.get(op, op)}")
         return {"ok": True, "device": device}
 
@@ -2608,6 +2634,7 @@ class Api:
             self._sas_pending = None
         self._log(f"SAS: устройство {pubkey[:16]}… подтверждено сверкой "
                   "12 слов")
+        self._strict_autoload(device)
         return {"ok": True, "device": device}
 
     # ------------------------------------------------------------------ #
