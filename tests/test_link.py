@@ -183,6 +183,43 @@ class TestState(LinkCase):
         self.assertTrue(wait_for(lambda: b2.state_merged().get("x") == 1))
 
 
+class TestHubRelay(LinkCase):
+    """Хаб-топология: запись третьего пира доходит LIVE, без реконнекта.
+
+    Ловушка, которую мы поймали на живой паре через hub: записи,
+    появившиеся у хаба от другого пира ПОСЛЕ нашего подключения, не
+    доезжали (hub не форвардил, догон был только при реконнекте) -
+    будильники молчали. Теперь hub ретранслирует применённые записи
+    остальным пирам (origin/seq сохраняются, петля невозможна).
+    """
+
+    def test_third_peer_entries_forward_live(self):
+        hub = self.make("hub")
+        b = self.make("pcB")
+        c = self.make("pcC")
+        b.add_peer("127.0.0.1", hub.mesh_port)
+        c.add_peer("127.0.0.1", hub.mesh_port)
+        self.assertTrue(wait_for(lambda: hub.conns.get("pcB")
+                                 and hub.conns.get("pcC")),
+                        "хаб не собрал пару")
+        b.add_log("письмо от B через хаб")
+        entries = wait_for(
+            lambda: len(c.journal.read(origin="pcB")) >= 1
+            and c.journal.read(origin="pcB"))
+        self.assertEqual(entries[0]["txt"], "письмо от B через хаб")
+        self.assertEqual([e["seq"] for e in entries], [1],
+                         "ровно одна запись - дублей нет")
+        # и хаб тоже получил её (origin сохранён)
+        hub_seen = hub.journal.read(origin="pcB")
+        self.assertEqual(len(hub_seen), 1)
+        # C пишет ответ - B видит live через хаб
+        c.add_log("ответ от C")
+        back = wait_for(
+            lambda: len(b.journal.read(origin="pcC")) >= 1
+            and b.journal.read(origin="pcC"))
+        self.assertEqual(back[0]["txt"], "ответ от C")
+
+
 class TestCli(LinkCase):
     def test_log_state_status(self):
         a = self.make("pcA")

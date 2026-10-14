@@ -716,7 +716,9 @@ class Link:
     def _on_message(self, conn: Conn, msg: dict) -> None:
         kind = msg.get("t")
         if kind == "log":
-            self._apply_entry(conn, msg)
+            entry = self._apply_entry(conn, msg)
+            if entry is not None:
+                self._forward(entry, conn)   # hub: отдать остальным пирам
         elif kind == "replay":
             self._apply_replay(conn, msg)
         elif kind == "req":
@@ -753,23 +755,30 @@ class Link:
         self._notify(entry)
         return entry
 
-    def _apply_entry(self, conn: Conn, msg: dict) -> None:
+    def _apply_entry(self, conn: Conn, msg: dict) -> dict | None:
         """Чужая запись: seq строго по порядку, иначе дубль или догон.
 
-        Origin берётся из соединения, а не из сообщения: подпись записи
-        не нужна, канал уже прошёл рукопожатие с токеном.
+        Origin: из сообщения, если это валидный id (hub-ретрансляция
+        сохраняет автора записи), иначе - id прямого пира (антиподмена
+        в парной топологии). Непрерывность seq по каждому origin
+        сохраняется независимо от пути доставки. Возвращает
+        применённую запись (для форвардинга остальным пирам) или None.
         """
-        origin = conn.peer_id
+        claimed = msg.get("o")
+        origin = (claimed if isinstance(claimed, str)
+                  and 0 < len(claimed) <= 64
+                  and all(ch.isalnum() or ch in "._-" for ch in claimed)
+                  else conn.peer_id)
         seq = msg.get("seq")
         if not isinstance(seq, int):
-            return
+            return None
         with self.lock:
             expect = self.peer_next.get(origin, 1)
             if seq < expect:
-                return                              # дубль
+                return None                           # дубль
             if seq > expect:
                 self._request_gap_locked(origin, expect)
-                return                              # пропуск - на догон
+                return None                           # пропуск - на догон
             entry = {"o": origin, "seq": seq,
                      "ts": msg.get("ts") if isinstance(msg.get("ts"),
                                                        (int, float))
@@ -780,9 +789,24 @@ class Link:
                 self.journal.append(entry)
             except OSError as exc:
                 self._note(f"журнал не дописался: {exc}", print_it=True)
-                return                              # не двигаем seq: догоним
+                return None                   # не двигаем seq: догоним
             self.peer_next[origin] = expect + 1
         self._notify(entry)
+        return entry
+
+    def _forward(self, entry: dict, source: Conn) -> None:
+        """Ретрансляция записи остальным пирам (hub-топология, 1.9).
+
+        Запись сохраняет СВОЙ origin и seq - принимающая сторона
+        применяет её как живую (seq по порядку) или игнорирует как дубль,
+        поэтому петля невозможна: пересылается только только-что
+        применённая запись, а каждая (origin, seq) применяется один раз.
+        """
+        with self.lock:
+            targets = [conn for conn in self.conns.values()
+                       if conn is not source and conn.alive]
+        for conn in targets:
+            conn.enqueue({"t": "log", **entry})
 
     def _request_gap_locked(self, origin: str, expect: int) -> None:
         """Попросить недостающее; cooldown гасит цикл «дыра -> req -> пусто»."""
@@ -811,7 +835,9 @@ class Link:
         origin = conn.peer_id
         for item in entries:
             if isinstance(item, dict):
-                self._apply_entry(conn, item)
+                applied = self._apply_entry(conn, item)
+                if applied is not None:
+                    self._forward(applied, conn)   # догон тоже ретранслируем
         if not entries:
             # пир не смог отдать (журнал короче запроса) - пауза, чтобы
             # не крутить бесконечный цикл req/replay
