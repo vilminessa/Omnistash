@@ -98,7 +98,48 @@ class WaitCase(unittest.TestCase):
             code = link.main(["wait", "--timeout", "0.4",
                               "--ctrl", str(dead)])
         self.assertEqual(code, 2)
-        self.assertIn("запущенного демона", err.getvalue())
+        self.assertIn("не поднялся", err.getvalue())
+
+    def test_wait_survives_daemon_restart(self):
+        """Будильник переживает перезапуск демона (автовосстановление).
+
+        Ловушка живой пары: wait висел на сокете убитого демона и почта
+        не будила - теперь клиент переподключается сам.
+        """
+        a = self.make("pcA")
+        mesh_port, ctrl_port = a.mesh_port, a.ctrl_port
+        b = self.make("pcB")
+        b.add_peer("127.0.0.1", mesh_port)
+        self.assertTrue(wait_for(lambda: a.conns.get("pcB")))
+
+        result = {}
+        out = io.StringIO()
+
+        def waiter():
+            with contextlib.redirect_stdout(out):
+                result["code"] = link.main(["wait", "--timeout", "30",
+                                            "--ctrl", str(ctrl_port),
+                                            "--json"])
+
+        thread = threading.Thread(target=waiter, daemon=True)
+        thread.start()
+        time.sleep(0.3)
+        a.stop_link()                       # демон умер под будильником
+        time.sleep(0.5)
+        a2 = link.Link(data_dir=self.root / "pcA", peer_id="pcA",
+                       token="t", mesh_port=mesh_port,
+                       ctrl_port=ctrl_port, dial_interval=0.15,
+                       handshake_timeout=2.0)
+        a2.start()
+        self.links.append(a2)               # убьём в teardown
+        time.sleep(3.0)                     # будильник переподключается (1с)
+        self.assertTrue(thread.is_alive(),
+                        "wait должен переподключиться, а не умереть")
+        b.add_log("почта после рестарта")
+        thread.join(timeout=10)
+        self.assertEqual(result.get("code"), 0,
+                         "после рестарта почта должна разбудить")
+        self.assertIn("почта после рестарта", out.getvalue())
 
 
 def wait_for(cond, timeout=8.0, interval=0.02):

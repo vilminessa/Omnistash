@@ -97,6 +97,10 @@ class ControlError(Exception):
     """Нет связи с локальным демоном или демон ответил отказом."""
 
 
+class _WaitDropped(Exception):
+    """Внутреннее: демон оборвал ожидание - будильник переподключается."""
+
+
 def _proof(token: str, nonce: str) -> str:
     """Ответ на вызов: sha256(токен|nonce) - токена в канале нет."""
     return hashlib.sha256(f"{token}|{nonce}".encode("utf-8")).hexdigest()
@@ -367,7 +371,12 @@ class Link:
     def _listen(host: str, port: int, backlog: int) -> socket.socket:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # НЕ ставим SO_REUSEADDR: на Windows он разрешает ДВОЙНОЙ
+            # bind - два демона слушают один порт, ctrl-порт достаётся
+            # случайному, будильники висят на мёртвом сокете (зомби).
+            # Порт слушателя освобождается сразу после close - быстрый
+            # перезапуск и так работает, а двойной запуск теперь честно
+            # отдаёт LinkError вместо тихого разделения порта.
             sock.bind((host, port))
             sock.listen(backlog)
             sock.settimeout(1.0)          # accept просыпается раз в секунду
@@ -1466,44 +1475,67 @@ def _cmd_wait(args) -> int:
     подаёт уведомление о завершении фонового процесса. Дальше агент
     читает журнал (--last) и отвечает. Свои записи не будят (иначе
     петля); таймаут --timeout заканчивается кодом 3 (перезапусти wait).
+
+    Автовосстановление: демон мог перезапуститься (обрыв/рестарт) -
+    клиент переподключается сам каждые 2с; обрыв после успеха НЕ
+    заканчивается молча (раньше зомби-wait висел на мёртвом сокете и
+    почта не будила). Коды: 0 почта, 2 демон не поднялся за --timeout,
+    3 таймаут ожидания.
     """
     control = _ctrl_port_of(args)
-    try:
-        with socket.create_connection(("127.0.0.1", control),
-                                      timeout=CTRL_TIMEOUT) as sock:
-            sock.settimeout(args.timeout if args.timeout > 0 else None)
-            sock.sendall((json.dumps({"cmd": "wait"},
-                                     ensure_ascii=False) + "\n")
-                         .encode("utf-8"))
-            reader = sock.makefile("rb")
-            while True:
-                line = reader.readline()
-                if not line:
-                    print("link: демон оборвал ожидание", file=sys.stderr)
-                    return 1
+    deadline = time.time() + args.timeout if args.timeout > 0 else None
+    ever_connected = False
+    while True:
+        remaining = None
+        if deadline is not None:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                print("link: wait - демон так и не поднялся "
+                      f"(127.0.0.1:{control})", file=sys.stderr)
+                return 2 if not ever_connected else 3
+        try:
+            with socket.create_connection(("127.0.0.1", control),
+                                          timeout=CTRL_TIMEOUT) as sock:
                 try:
-                    msg = json.loads(line.decode("utf-8"))
-                except ValueError:
-                    continue
-                if not isinstance(msg, dict):
-                    continue
-                if msg.get("t") == "tick":
-                    continue
-                entry = msg.get("e")
-                if isinstance(entry, dict):
-                    print(_fmt_entry(entry, args.json), flush=True)
-                if msg.get("done"):
-                    return 0
-    except socket.timeout:
-        print("link: wait - таймаут, новых записей от пира нет "
-              "(перезапустите wait)", file=sys.stderr)
-        return 3
-    except KeyboardInterrupt:
-        return 0
-    except OSError as exc:
-        print(f"link: wait требует запущенного демона "
-              f"(127.0.0.1:{control}): {exc}", file=sys.stderr)
-        return 2
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE,
+                                    1)
+                except OSError:
+                    pass
+                sock.settimeout(remaining)
+                ever_connected = True
+                sock.sendall((json.dumps({"cmd": "wait"},
+                                         ensure_ascii=False) + "\n")
+                             .encode("utf-8"))
+                reader = sock.makefile("rb")
+                while True:
+                    line = reader.readline()
+                    if not line:
+                        raise _WaitDropped("демон оборвал ожидание")
+                    try:
+                        msg = json.loads(line.decode("utf-8"))
+                    except ValueError:
+                        continue
+                    if not isinstance(msg, dict):
+                        continue
+                    if msg.get("t") == "tick":
+                        continue
+                    entry = msg.get("e")
+                    if isinstance(entry, dict):
+                        print(_fmt_entry(entry, args.json), flush=True)
+                    if msg.get("done"):
+                        return 0
+        except socket.timeout:
+            print("link: wait - таймаут, новых записей от пира нет "
+                  "(перезапустите wait)", file=sys.stderr)
+            return 3
+        except KeyboardInterrupt:
+            return 0
+        except (OSError, _WaitDropped) as exc:
+            # демон перезапустился/ещё не поднят - переподключаемся
+            time.sleep(1.0)
+            if deadline is None and not ever_connected:
+                print(f"link: wait: ждём демона (127.0.0.1:{control}): "
+                      f"{exc}", file=sys.stderr)
 
 
 def _cmd_status(args) -> int:
