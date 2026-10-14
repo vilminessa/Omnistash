@@ -234,6 +234,9 @@ class Api:
         self._mdns_found: dict = {}   # addr -> {port, nick, ts}
         # Разовая передача по коду (B1): один процесс wormhole за раз.
         self._wormhole_busy = False
+        # SAS-сверка в полёте (1.1): слова показаны, ждём подтверждения
+        # человека; живёт 10 минут.
+        self._sas_pending: dict | None = None
         # Аккаунт Google: окно входа живёт отдельно от главного.
         self._login_window = None
         self._login_cancel = threading.Event()
@@ -2554,6 +2557,52 @@ class Api:
         except ValueError as exc:
             return {"error": str(exc)}
         self._log(f"Mesh: устройство {pubkey[:16]}… - {labels.get(op, op)}")
+        return {"ok": True, "device": device}
+
+    # ------------------------------------------------------------------ #
+    #  1.1: SAS-верификация «12 слов» (B2+S)
+    # ------------------------------------------------------------------ #
+
+    def trust_sas_begin(self, request=None) -> dict:
+        """Начать SAS-сверку: вернуть 12 слов + отпечаток устройства.
+
+        Пин не пишется: устройство подтверждается только после того, как
+        человек сверит слова (trust_sas_confirm). Слова также идут в
+        журнал (оператор сверяет со словами на стороне устройства).
+        """
+        request = request or {}
+        addr = str(request.get("addr") or "").strip()
+        if not addr or ":" not in addr:
+            return {"error": "Адрес не указан (ожидается ip:порт)"}
+        try:
+            result = mesh_client.sas_begin(addr)
+        except mesh_channel.ChannelError as exc:
+            return {"error": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - адрес мог умереть
+            return {"error": f"SAS не начался: {exc}"}
+        with self._lock:
+            self._sas_pending = {"pubkey": result["pubkey"], "addr": addr,
+                                 "ts": time.time()}
+        self._log(f"SAS: слова для {addr} ({' '.join(result['words'])}) - "
+                  "сверьте голосом на устройстве собеседника")
+        return {"ok": True, **result}
+
+    def trust_sas_confirm(self, request=None) -> dict:
+        """Человек подтвердил совпадение слов - устройство verified."""
+        request = request or {}
+        pubkey = str(request.get("pubkey") or "").strip().lower()
+        with self._lock:
+            pending = dict(self._sas_pending or {})
+        if not pending or pending.get("pubkey") != pubkey:
+            return {"error": "Нет активной SAS-сверки с этим ключом - "
+                             "начните заново («Подтвердить 12 слов»)"}
+        if time.time() - pending.get("ts", 0.0) > 600:
+            return {"error": "Сверка устарела (10 минут) - начните заново"}
+        device = repo.truststore_verify(self.db.conn, pubkey, via="sas")
+        with self._lock:
+            self._sas_pending = None
+        self._log(f"SAS: устройство {pubkey[:16]}… подтверждено сверкой "
+                  "12 слов")
         return {"ok": True, "device": device}
 
     # ------------------------------------------------------------------ #

@@ -145,6 +145,34 @@ class _Handler(BaseHTTPRequestHandler):
             (catalog_mod.MAX_ENTRIES,))]
         self._json(200, catalog_mod.build(entries))
 
+    def _send_sas(self, query: str) -> None:
+        """Обмен ephemeral для SAS-сверки (1.1, B2+S).
+
+        Вызывается ТОЛЬКО внутри аттестованного TLS-канала (verify_peer
+        уже прошёл в get_request): посредник без приватного ключа
+        участника сюда не дойдёт. Свой ephemeral свежий на каждый
+        запрос; общие слова считаются здесь и журналируются - оператор
+        сверяет их со словами на стороне запросчика (голосом).
+        """
+        from cryptography.hazmat.primitives.asymmetric.x25519 import (
+            X25519PublicKey)
+        from . import sas as sas_mod
+
+        try:
+            peer_eph = bytes.fromhex(
+                (parse_qs(query).get("eph") or [""])[0])
+            if len(peer_eph) != 32:
+                raise ValueError("не 32 байта")
+        except ValueError as exc:
+            self._error(400, f"битый ephemeral-ключ: {exc}")
+            return
+        eph, eph_pub_hex = sas_mod.own_ephemeral()
+        shared = eph.exchange(X25519PublicKey.from_public_bytes(peer_eph))
+        words = " ".join(sas_mod.words_from_secret(shared))
+        self.server.log(f"SAS: слова для собеседника (сверьте голосом): "
+                        f"{words}")
+        self._json(200, {"eph": eph_pub_hex})
+
     # -- маршруты ----------------------------------------------------------
 
     def do_GET(self) -> None:  # noqa: N802 - имя из http.server
@@ -153,6 +181,10 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if path == "/catalog":
                 self._send_catalog()
+                return
+
+            if path == "/sas/":
+                self._send_sas(query)
                 return
 
             if path.startswith("/manifest/"):

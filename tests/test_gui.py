@@ -772,6 +772,35 @@ class TestPeerApi(GuiCase):
         self.assertTrue(res["forgotten"])
         self.assertEqual(api.peer_profile()["devices"], [])
 
+    def test_sas_flow(self):
+        """1.1: SAS-слова -> подтверждение человека -> verified_via=sas."""
+        api = self._api()
+        server = mesh_server.PeerServer(api.db, 0)
+        port = server.start()
+        self.addCleanup(server.stop)
+        addr = f"127.0.0.1:{port}"
+
+        res = api.trust_sas_begin({"addr": addr})
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(len(res["words"]), 12, "ровно 12 слов")
+        own = res["pubkey"]
+
+        # чужой ключ / повтор без сверки - честные отказы
+        bad = api.trust_sas_confirm({"pubkey": "ff" * 32})
+        self.assertIn("Нет активной", bad.get("error", ""))
+
+        ok = api.trust_sas_confirm({"pubkey": own})
+        self.assertTrue(ok.get("ok"), ok)
+        self.assertEqual(ok["device"]["status"], "verified")
+        self.assertEqual(ok["device"]["verified_via"], "sas")
+
+        again = api.trust_sas_confirm({"pubkey": own})
+        self.assertIn("Нет активной", again.get("error", ""),
+                      "pending израсходован - вторая сверка нужна новая")
+
+        # пин НЕ писался до подтверждения - теперь устройство verified
+        self.assertEqual(api.peer_profile()["devices"][0]["pubkey"], own)
+
     def test_catalog_refresh_list_restore_guard(self):
         """B3: обновление зеркала, список и защита «только своя строка»."""
         api = self._api()
