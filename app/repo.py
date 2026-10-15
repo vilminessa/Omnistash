@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from collections import Counter
 from pathlib import Path
@@ -137,6 +138,9 @@ def upsert_video(conn: sqlite3.Connection, data: dict, *,
              data.get("thumb_url"), raw,
              channel_id, now, vid),
         )
+        if data.get("platform_tags") is not None:
+            set_platform_tags(conn, vid, platform,
+                              data.get("platform_tags"))
         return vid, False
 
     cur = conn.execute(
@@ -153,7 +157,68 @@ def upsert_video(conn: sqlite3.Connection, data: dict, *,
          data.get("webpage_url"), data.get("thumb_url"), data.get("raw_json"),
          data.get("origin") or "yt-dlp", "known", now, now),
     )
-    return int(cur.lastrowid), True
+    vid = int(cur.lastrowid)
+    if data.get("platform_tags") is not None:
+        set_platform_tags(conn, vid, platform, data.get("platform_tags"))
+    return vid, True
+
+
+def set_platform_tags(conn: sqlite3.Connection, video_id: int,
+                      platform: str, tags) -> None:
+    """Связать видео с тегами ПЛОЩАДКИ (полная замена набора).
+
+    Справочник tags пополняется при необходимости (platform+slug
+    уникальны); slug = строчная нормализация (для юникода сохраняем
+    буквы, прочее - в дефис) - он же ключ фильтра. Связи заменяются
+    целиком: синк площадки - авторитетное состояние тегов строки.
+    """
+    cleaned: list[tuple[str, str]] = []
+    for raw in (tags or [])[:50]:
+        name = str(raw or "").strip()[:80]
+        if not name:
+            continue
+        slug = tag_slug(name)
+        if slug and (slug, name) not in cleaned:
+            cleaned.append((slug, name))
+    conn.execute("DELETE FROM video_tags WHERE video_id=?", (int(video_id),))
+    for slug, name in cleaned:
+        row = conn.execute(
+            "SELECT id FROM tags WHERE platform=? AND slug=?",
+            (platform, slug)).fetchone()
+        if row:
+            tag_id = int(row["id"])
+        else:
+            tag_id = int(conn.execute(
+                "INSERT INTO tags (platform, slug, name) VALUES (?,?,?)",
+                (platform, slug, name)).lastrowid)
+        conn.execute(
+            "INSERT OR IGNORE INTO video_tags (video_id, tag_id) VALUES (?,?)",
+            (int(video_id), tag_id))
+
+
+def tag_slug(name) -> str:
+    """Ключ тега: строчная нормализация (буквы/цифры, прочее - дефис)."""
+    return re.sub(r"[^0-9a-zа-яё]+", "-", str(name or "").lower()).strip("-")
+
+
+def tags_popular(conn: sqlite3.Connection, platform: str | None = None,
+                 limit: int = 40) -> list[dict]:
+    """Теги счётчиками для чипсов фильтра: популярные первыми.
+
+    Счёт - связанные строки: пустые теги (никто не носит) не показываем.
+    """
+    where = "WHERE t.platform=?" if platform else ""
+    args = ([platform] if platform else []) + [int(limit)]
+    return [dict(row) for row in conn.execute(
+        f"""SELECT t.slug, t.name, t.platform,
+                   COUNT(vt.video_id) AS n
+              FROM tags t
+              JOIN video_tags vt ON vt.tag_id = t.id
+              {where}
+             GROUP BY t.id
+             HAVING n > 0
+             ORDER BY n DESC, t.name COLLATE NOCASE
+             LIMIT ?""", args)]
 
 
 def ensure_playlist(conn: sqlite3.Connection, data: dict) -> int:
@@ -589,6 +654,7 @@ def _entry_to_video(entry: dict, platform: str = PLATFORM) -> dict:
         "platform": platform,
         "remote_id": entry.get("remote_id"),
         "key": video_key(platform, entry.get("remote_id")),
+        "platform_tags": entry.get("platform_tags"),
         "title": entry.get("title"),
         "description": entry.get("description"),
         "uploaded_at": entry.get("uploaded_at"),
@@ -762,12 +828,14 @@ ORDER_COLS: dict[str, str] = {
 def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
                 status: str | None = None, query: str = "",
                 rating_min: int | None = None, order: dict | None = None,
+                tag: str = "",
                 offset: int = 0, limit: int = 200) -> dict:
     """Строки таблицы библиотеки: (total, rows) для виртуализированного списка.
 
     scope: {"type": "pool"|"channel"|"playlist", "id": int}.
     Поиск - по FTS5 (название, описание, локальные теги), фильтры - по
-    статусу и рейтингу, страница - offset/limit.
+    статусу, рейтингу и ТЕГУ ПЛОЩАДКИ (slug из video_tags), страница -
+    offset/limit.
     order: {"col": <ключ из ORDER_COLS>, "dir": "asc"|"desc"} - сортировка
     по белому списку: ключ из запроса окна попадает в SQL только через
     этот словарь, произвольный текст отвергается молча (дефолтная дата).
@@ -787,6 +855,13 @@ def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
     if rating_min:
         where.append("COALESCE(v.user_rating, 0) >= ?")
         args.append(int(rating_min))
+    tag = tag_slug(tag) if tag else ""
+    if tag:
+        # Тег площадки: подзапрос по связям (slug нормализуется тем же
+        # правилом, что писал тег).
+        where.append("v.id IN (SELECT vt.video_id FROM video_tags vt "
+                     "JOIN tags t ON t.id=vt.tag_id WHERE t.slug=?)")
+        args.append(tag)
     query = (query or "").strip()
     if query:
         fts = fts_query(query)

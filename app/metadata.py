@@ -196,6 +196,10 @@ def flat_entry(entry, position: int, platform: str = PLATFORM) -> dict:
         "webpage_url": to_text(entry.get("url")) or (
             f"https://www.youtube.com/watch?v={remote_id}" if remote_id else None),
         "channel": channel_ref(entry, platform),
+        # Теги площадки (PH2): строки площадки; None = в источнике их не
+        # было (не трогаем связи), [] = площадка явно вернула пусто.
+        "platform_tags": ([str(t)[:80] for t in entry.get("tags")[:50]]
+                          if isinstance(entry.get("tags"), list) else None),
     }
 
 

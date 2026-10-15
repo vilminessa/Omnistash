@@ -202,7 +202,7 @@ class TestAccountColumnV3(unittest.TestCase):
         # База поехала дальше: v4 (счётчики площадки), v5 (стоп-лист mesh),
         # v6 (доверие), v7 (каталоги), v8 (адреса) и v9 (видео-источники).
         self.assertEqual(
-            int(database.conn.execute("PRAGMA user_version").fetchone()[0]), 9)
+            int(database.conn.execute("PRAGMA user_version").fetchone()[0]), 10)
         row = database.conn.execute("SELECT remote_id FROM playlists").fetchone()
         self.assertEqual(row["remote_id"], "PLv2", "данные должны пережить")
 
@@ -221,7 +221,7 @@ class TestAccountColumnV3(unittest.TestCase):
         database = db_mod.Database(self.path)
         self.addCleanup(database.close)
         self.assertEqual(
-            int(database.conn.execute("PRAGMA user_version").fetchone()[0]), 9)
+            int(database.conn.execute("PRAGMA user_version").fetchone()[0]), 10)
         count = database.conn.execute(
             "SELECT COUNT(*) n FROM playlists").fetchone()["n"]
         self.assertEqual(count, 1, "повторный запуск не должен дублировать")

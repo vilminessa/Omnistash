@@ -597,10 +597,38 @@ def _migrate_v9(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v10(conn: sqlite3.Connection) -> None:
+    """Теги площадки (PH2): жанры/теги контента, а не пометки пользователя.
+
+    tags - справочник площадки (platform+slug уникальны);
+    video_tags - связи (много-ко-многим, каскадное удаление). Локальные
+    пометки пользователя (videos.user_tags) остаются отдельными - это
+    разные сущности и в UI, и в поиске.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS tags (
+            id      INTEGER PRIMARY KEY,
+            platform TEXT NOT NULL,
+            slug    TEXT NOT NULL,
+            name    TEXT NOT NULL,
+            UNIQUE (platform, slug)
+        );
+        CREATE TABLE IF NOT EXISTS video_tags (
+            video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+            tag_id   INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+            PRIMARY KEY (video_id, tag_id)
+        );
+        CREATE INDEX IF NOT EXISTS video_tags_tag_idx
+            ON video_tags(tag_id, video_id);
+        """
+    )
+
+
 # Порядок важен: номер версии = индекс + 1.
 MIGRATIONS = (_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4,
                _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8,
-               _migrate_v9)
+               _migrate_v9, _migrate_v10)
 
 
 class Database:

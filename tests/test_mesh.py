@@ -272,7 +272,7 @@ class TestFeedbackAndMigration(unittest.TestCase):
         self.assertIn("mesh_bans", tables)
         version = int(self.conn.execute(
             "PRAGMA user_version").fetchone()[0])
-        self.assertEqual(version, 9)   # ...v8 адреса, v9 видео-источники
+        self.assertEqual(version, 10)   # ...v8 адреса, v9 видео-источники
 
     def test_ban_unban_cycle(self):
         digest = "sha256:" + "ef" * 32
