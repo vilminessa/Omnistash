@@ -124,10 +124,21 @@ class TestPlatformRegistry(unittest.TestCase):
         self.assertEqual(platforms.by_host("m.youtu.be")["id"], "youtube")
         self.assertEqual(platforms.by_host("www.pornhub.com")["id"],
                          "pornhub")
+        # зеркала PH, которые знает и yt-dlp (живая ссылка юзера)
+        self.assertEqual(platforms.by_host("rt.pornhub.org")["id"],
+                         "pornhub")
+        self.assertEqual(platforms.by_host("pornhub.net")["id"], "pornhub")
         # домен в середине чужого хоста - не площадка
         self.assertIsNone(platforms.by_host("evilyoutube.com.example.org"))
         self.assertIsNone(platforms.by_host(""))
         self.assertIsNone(platforms.by_host("example.org"))
+
+    def test_rt_mirror_link_classifies(self):
+        info = classify_url(
+            "https://rt.pornhub.org/view_video.php?viewkey=698a3d3b0e335")
+        self.assertEqual(info["platform"], "pornhub")
+        self.assertEqual(info["kind"], "video")
+        self.assertEqual(info["video_id"], "698a3d3b0e335")
 
     def test_adult_flags(self):
         from app import platforms

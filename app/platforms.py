@@ -27,7 +27,9 @@ PLATFORMS: tuple = (
     {
         "id": "pornhub",
         "label": "PornHub",
-        "domains": ("pornhub.com",),
+        # зеркала, которые yt-dlp знает тоже: pornhub.(com|net|org)
+        # с любым поддоменом (rt./www./мобильные)
+        "domains": ("pornhub.com", "pornhub.org", "pornhub.net"),
         "adult": True,
         "account": False,
     },
