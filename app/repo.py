@@ -822,19 +822,24 @@ ORDER_COLS: dict[str, str] = {
     "likes": "v.like_count",
     "comments": "v.comment_count",
     "sync": "v.synced_at",
+    # Сортировка ПО ТЕГУ (PH3): алфавит первого тега строки; у строк
+    # без тегов - NULL (последними в обе стороны).
+    "tag": ("(SELECT MIN(t.name) FROM video_tags vt JOIN tags t "
+            "ON t.id=vt.tag_id WHERE vt.video_id=v.id)"),
 }
 
 
 def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
                 status: str | None = None, query: str = "",
                 rating_min: int | None = None, order: dict | None = None,
-                tag: str = "",
+                tag: str = "", platform: str = "",
                 offset: int = 0, limit: int = 200) -> dict:
     """Строки таблицы библиотеки: (total, rows) для виртуализированного списка.
 
     scope: {"type": "pool"|"channel"|"playlist", "id": int}.
     Поиск - по FTS5 (название, описание, локальные теги), фильтры - по
-    статусу, рейтингу и ТЕГУ ПЛОЩАДКИ (slug из video_tags), страница -
+    статусу, рейтингу, ТЕГУ ПЛОЩАДКИ (slug из video_tags) и ПЛОЩАДКЕ
+    (platform: вкладка 18+ показывает только pornhub), страница -
     offset/limit.
     order: {"col": <ключ из ORDER_COLS>, "dir": "asc"|"desc"} - сортировка
     по белому списку: ключ из запроса окна попадает в SQL только через
@@ -842,6 +847,9 @@ def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
     """
     scope = scope or {"type": "pool"}
     joins, where, args = [], [], []
+    if platform:
+        where.append("v.platform=?")
+        args.append(str(platform))
     if scope.get("type") == "channel":
         where.append("v.channel_id=?")
         args.append(scope.get("id"))

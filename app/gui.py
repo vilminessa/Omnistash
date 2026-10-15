@@ -507,12 +507,26 @@ class Api:
                 query=request.get("query") or "",
                 rating_min=request.get("rating_min") or None,
                 order=request.get("order") or None,
+                tag=request.get("tag") or "",
+                platform=request.get("platform") or "",
                 offset=int(request.get("offset") or 0),
                 limit=min(int(request.get("limit") or 200), 500),
             )
         except Exception as exc:  # noqa: BLE001 - окно должно увидеть ошибку
             self._log(f"Ошибка списка: {exc}")
             return {"total": 0, "rows": [], "error": str(exc)}
+
+    def tags_popular(self, request=None) -> dict:
+        """Теги площадки счётчиками - чипсы фильтра (PH3, вкладка 18+)."""
+        request = request or {}
+        try:
+            limit = min(int(request.get("limit") or 40), 200)
+            platform = str(request.get("platform") or "").strip()
+            tags = repo.tags_popular(self.db.conn, platform or None,
+                                     limit=limit)
+        except Exception as exc:  # noqa: BLE001 - окно должно увидеть ошибку
+            return {"ok": False, "error": str(exc), "tags": []}
+        return {"ok": True, "tags": tags}
 
     def get_video(self, video_id) -> dict | None:
         """Карточка видео: колонки + файлы + плейлисты + raw_json."""

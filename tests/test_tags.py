@@ -10,6 +10,7 @@ from pathlib import Path
 
 from app import db as db_mod
 from app import repo
+from tests.test_gui import GuiCase
 
 
 class TagsCase(unittest.TestCase):
@@ -99,6 +100,30 @@ class TagsCase(unittest.TestCase):
             "SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertIn("tags", tables)
         self.assertIn("video_tags", tables)
+
+
+class TestAdultApi(GuiCase):
+    """PH3: API вкладки 18+ - платформа-фильтр и чипсы."""
+
+    def test_platform_filter_and_tags_endpoint(self):
+        api = self.make_api()
+        repo.upsert_video(api.db.conn, {
+            "platform": "pornhub", "remote_id": "phX", "title": "PH",
+            "channel": None})
+        repo.upsert_video(api.db.conn, {
+            "platform": "youtube", "remote_id": "ytY", "title": "YT",
+            "channel": None})
+        got = api.list_videos({"platform": "pornhub"})
+        self.assertEqual(got["total"], 1)
+        self.assertEqual(got["rows"][0]["title"], "PH")
+        vid = got["rows"][0]["id"]
+        repo.set_platform_tags(api.db.conn, vid, "pornhub", ["Solo"])
+        chips = api.tags_popular({"platform": "pornhub"})
+        self.assertTrue(chips["ok"], chips)
+        self.assertEqual(chips["tags"][0]["slug"], "solo")
+        self.assertEqual(chips["tags"][0]["n"], 1)
+        filtered = api.list_videos({"platform": "pornhub", "tag": "solo"})
+        self.assertEqual(filtered["total"], 1)
 
 
 if __name__ == "__main__":

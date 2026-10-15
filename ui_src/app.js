@@ -3507,7 +3507,7 @@
     Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (tab) {
       tab.classList.toggle("active", tab.dataset.tab === name);
     });
-    ["library", "sync", "queue", "settings"].forEach(function (panel) {
+    ["library", "sync", "queue", "settings", "adult"].forEach(function (panel) {
       $("panel-" + panel).hidden = panel !== name;
     });
     if (name === "library") paintGrid();
@@ -3515,6 +3515,105 @@
     // перерисовать, иначе виджет хранилищ останется пустым (он рисовался
     // до того, как пришли данные).
     if (name === "settings") renderSettings();
+    if (name === "adult") { phLoad(true); phTags(); }
+  }
+
+  /* ------------------------------------------------------------------ *
+   *  Вкладка 18+ (PH3): своя таблица, поиск, сортировка, чипсы тегов
+   * ------------------------------------------------------------------ */
+
+  var phState = { query: "", tag: "", sort: "date:desc",
+                  offset: 0, rows: [], total: 0, tags: [] };
+
+  function phLoad(reset) {
+    if (reset) { phState.offset = 0; phState.rows = []; }
+    var parts = phState.sort.split(":");
+    call("list_videos", {
+      platform: "pornhub",
+      query: phState.query,
+      tag: phState.tag,
+      order: { col: parts[0], dir: parts[1] },
+      offset: phState.offset,
+      limit: 100
+    }).then(function (res) {
+      if (!res || res.error) { toast((res || {}).error || "Ошибка списка", true); return; }
+      phState.rows = phState.rows.concat(res.rows || []);
+      phState.total = res.total || 0;
+      phRender();
+    });
+  }
+
+  function phRender() {
+    var body = $("ph-body");
+    var rows = phState.rows.map(function (row) {
+      var duration = row.duration_s ? humanDuration(row.duration_s) : "—";
+      var date = row.uploaded_at ? String(row.uploaded_at).slice(0, 10) : "—";
+      var views = row.view_count != null ? humanSize(row.view_count) : "—";
+      return '<tr data-id="' + row.id + '" style="cursor:pointer">' +
+        "<td>" + esc(row.title || row.key) + "</td>" +
+        '<td class="muted">' + esc(row.channel || "—") + "</td>" +
+        "<td>" + esc(duration) + "</td>" +
+        "<td>" + esc(date) + "</td>" +
+        "<td>" + esc(views) + "</td></tr>";
+    }).join("");
+    body.innerHTML = rows;
+    $("ph-count").textContent = phState.total
+      ? "найдено: " + phState.total : "";
+    $("ph-empty").hidden = !!phState.rows.length;
+    if (!phState.rows.length) {
+      $("ph-empty").textContent = "Пока пусто: добавьте видео/канал/плейлист " +
+        "PornHub через «Добавить источник» — вкладка покажет их здесь.";
+    }
+    $("ph-more").hidden = phState.rows.length >= phState.total;
+    phTagsRender();
+  }
+
+  function phTagsRender() {
+    var box = $("ph-tags");
+    var all = '<button class="btn ghost ph-tag' + (phState.tag ? "" : " active") +
+      '" data-slug="">все</button>';
+    box.innerHTML = all + phState.tags.map(function (t) {
+      var active = phState.tag === t.slug ? " active" : "";
+      return '<button class="btn ghost ph-tag' + active + '" data-slug="' +
+        esc(t.slug) + '">' + esc(t.name) + " (" + t.n + ")</button>";
+    }).join("");
+  }
+
+  function phTags() {
+    call("tags_popular", { platform: "pornhub", limit: 40 }).then(function (res) {
+      phState.tags = (res && res.ok) ? (res.tags || []) : [];
+      phTagsRender();
+    });
+  }
+
+  function bindPh() {
+    var search = $("ph-search");
+    var timer = null;
+    search.addEventListener("input", function () {
+      clearTimeout(timer);
+      timer = setTimeout(function () {
+        phState.query = search.value.trim();
+        phLoad(true);
+      }, 300);
+    });
+    $("ph-sort").addEventListener("change", function (ev) {
+      phState.sort = ev.target.value;
+      phLoad(true);
+    });
+    $("ph-more").addEventListener("click", function () {
+      phState.offset = phState.rows.length;
+      phLoad(false);
+    });
+    $("ph-tags").addEventListener("click", function (ev) {
+      var btn = ev.target.closest ? ev.target.closest(".ph-tag") : null;
+      if (!btn) return;
+      phState.tag = btn.dataset.slug || "";
+      phLoad(true);
+    });
+    $("ph-body").addEventListener("click", function (ev) {
+      var tr = ev.target.closest ? ev.target.closest("tr[data-id]") : null;
+      if (tr) openDetail(Number(tr.dataset.id));
+    });
   }
 
   /* ------------------------------------------------------------------ *
@@ -3525,6 +3624,7 @@
     Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (tab) {
       tab.addEventListener("click", function () { switchTab(tab.dataset.tab); });
     });
+    bindPh();
 
     // Ширины колонок зависят от ширины окна (≤900px - тесный набор):
     // пересчёт при ресайте, иначе развернутое/свернутое окно помнит бы

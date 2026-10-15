@@ -27,6 +27,7 @@
   <button class="tab active" data-tab="library">Библиотека</button>
   <button class="tab" data-tab="sync">Синхронизация</button>
   <button class="tab" data-tab="queue">Очередь <span class="badge" id="queue-badge" hidden>0</span></button>
+  <button class="tab" data-tab="adult">18+</button>
   <button class="tab" data-tab="settings">Настройки</button>
 </nav>
 
@@ -247,6 +248,43 @@
   </section>
 
   <!-- ================= Настройки ================= -->
+  <!-- ================= 18+ (PornHub): отдельная вкладка, изолированная
+       от библиотеки; свои поиск/сортировка/чипсы тегов = PH3 ========= -->
+  <section class="panel" id="panel-adult" hidden>
+    <div class="toolbar">
+      <input type="search" id="ph-search"
+             placeholder="Поиск в18+ по названию и описанию…" autocomplete="off">
+      <select id="ph-sort" title="Сортировка">
+        <option value="date:desc">по дате (новые)</option>
+        <option value="date:asc">по дате (старые)</option>
+        <option value="views:desc">по просмотрам</option>
+        <option value="title:asc">по названию</option>
+        <option value="tag:asc">по тегу (алфавит)</option>
+      </select>
+      <span class="spacer"></span>
+      <span class="muted" id="ph-count"></span>
+    </div>
+    <div class="toolbar" id="ph-tags" aria-label="Фильтр по тегам"></div>
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Название</th>
+            <th>Канал</th>
+            <th style="width:72px">Время</th>
+            <th style="width:100px">Дата</th>
+            <th style="width:92px">Просмотры</th>
+          </tr>
+        </thead>
+        <tbody id="ph-body"></tbody>
+      </table>
+    </div>
+    <div class="empty" id="ph-empty" hidden></div>
+    <div style="padding:8px; text-align:center">
+      <button class="btn ghost" id="ph-more" hidden>Показать ещё</button>
+    </div>
+  </section>
+
   <section class="panel" id="panel-settings" hidden>
     <div id="settings-body" class="settings"></div>
   </section>
