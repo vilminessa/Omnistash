@@ -202,6 +202,80 @@ def tag_slug(name) -> str:
     return re.sub(r"[^0-9a-zа-яё]+", "-", str(name or "").lower()).strip("-")
 
 
+# ---------------------------------------------------------------- #
+#  Коллекции-папки (P4/M17): свои группы из видео разных площадок.
+# ---------------------------------------------------------------- #
+
+def collection_list(conn: sqlite3.Connection) -> list[dict]:
+    """Коллекции со счётчиками (для дерева и диалогов)."""
+    return [dict(row) for row in conn.execute(
+        """SELECT c.id, c.name, c.created_at,
+                  COUNT(ci.video_id) AS total
+             FROM collections c
+             LEFT JOIN collection_items ci ON ci.collection_id = c.id
+         GROUP BY c.id
+         ORDER BY c.name COLLATE NOCASE""")]
+
+
+def collection_create(conn: sqlite3.Connection, name: str) -> int:
+    """Создать коллекцию; пустое/дубль - ValueError."""
+    name = str(name or "").strip()[:80]
+    if not name:
+        raise ValueError("коллекции нужно имя")
+    try:
+        return int(conn.execute(
+            "INSERT INTO collections (name, created_at) VALUES (?,?)",
+            (name, now_iso())).lastrowid)
+    except sqlite3.IntegrityError as exc:
+        raise ValueError(f"коллекция «{name}» уже есть") from exc
+
+
+def collection_rename(conn: sqlite3.Connection, collection_id: int,
+                      name: str) -> None:
+    """Переименовать (уникальность имени проверяется)."""
+    name = str(name or "").strip()[:80]
+    if not name:
+        raise ValueError("коллекции нужно имя")
+    try:
+        conn.execute("UPDATE collections SET name=? WHERE id=?",
+                     (name, int(collection_id)))
+    except sqlite3.IntegrityError as exc:
+        raise ValueError(f"коллекция «{name}» уже есть") from exc
+
+
+def collection_delete(conn: sqlite3.Connection, collection_id: int) -> None:
+    """Удалить папку (позиции уходят каскадом, строки видео нетронуты)."""
+    conn.execute("DELETE FROM collections WHERE id=?", (int(collection_id),))
+
+
+def collection_add(conn: sqlite3.Connection, collection_id: int,
+                   video_ids) -> int:
+    """Добавить строки (игнор дублей); возвращает число новых позиций."""
+    added = 0
+    stamp = now_iso()
+    for vid in video_ids:
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO collection_items "
+            "(collection_id, video_id, position, added_at) "
+            "VALUES (?,?,COALESCE((SELECT MAX(position)+1 FROM "
+            "collection_items WHERE collection_id=?),1),?)",
+            (int(collection_id), int(vid), int(collection_id), stamp))
+        added += int(cursor.rowcount)
+    return added
+
+
+def collection_remove(conn: sqlite3.Connection, collection_id: int,
+                      video_ids) -> int:
+    """Убрать строки из папки (сами строки не трогаем)."""
+    removed = 0
+    for vid in video_ids:
+        cursor = conn.execute(
+            "DELETE FROM collection_items WHERE collection_id=? "
+            "AND video_id=?", (int(collection_id), int(vid)))
+        removed += int(cursor.rowcount)
+    return removed
+
+
 def tags_popular(conn: sqlite3.Connection, platform: str | None = None,
                  limit: int = 40) -> list[dict]:
     """Теги счётчиками для чипсов фильтра: популярные первыми.
@@ -746,7 +820,8 @@ def tree(conn: sqlite3.Connection) -> dict:
              LEFT JOIN videos v ON v.id = pi.video_id
             GROUP BY p.id
             ORDER BY p.title COLLATE NOCASE""")]
-    return {"pool": pool, "channels": channels, "playlists": playlists}
+    return {"pool": pool, "channels": channels, "playlists": playlists,
+            "collections": collection_list(conn)}
 
 
 # Причина «файл битый»: очередь узнаёт по ней, что файл нужно скачать
@@ -866,6 +941,11 @@ def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
         joins.append("JOIN playlist_items pi ON pi.video_id=v.id "
                      "AND pi.playlist_id=? AND pi.removed_at IS NULL")
         args.append(scope.get("id"))
+    elif scope.get("type") == "collection":
+        # Порядок - как добавлялось (ci.position), не дата площадки.
+        joins.append("JOIN collection_items ci "
+                     "ON ci.video_id=v.id AND ci.collection_id=?")
+        args.append(scope.get("id"))
     if status:
         where.append("v.status=?")
         args.append(status)
@@ -904,6 +984,9 @@ def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
     # Сортировка по белому списку; NULL - последним в обе стороны, чтобы
     # пустые даты/счётчики не занимали первую строку по возрастанию.
     order_sql = "v.uploaded_at DESC NULLS LAST, v.id DESC"
+    if scope.get("type") == "collection":
+        # Внутри коллекции важнее порядок добавления, чем дата площадки.
+        order_sql = "ci.position, ci.added_at, v.id"
     direction = "DESC" if str((order or {}).get("dir") or "").lower() == "desc" else "ASC"
     col = str((order or {}).get("col") or "")
     if col in ORDER_COLS:

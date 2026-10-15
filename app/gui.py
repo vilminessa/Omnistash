@@ -524,6 +524,61 @@ class Api:
             self._log(f"Ошибка списка: {exc}")
             return {"total": 0, "rows": [], "error": str(exc)}
 
+    # ------------------------------------------------------------------ #
+    #  Коллекции-папки (P4/M17): свои группы из видео разных площадок.
+    # ------------------------------------------------------------------ #
+
+    def collections_list(self, request=None) -> dict:
+        """Коллекции со счётчиками (дерево и диалоги)."""
+        return {"ok": True, "collections": repo.collection_list(self.db.conn)}
+
+    def collection_create(self, request=None) -> dict:
+        """Создать папку; имя - из запроса окна."""
+        request = request or {}
+        try:
+            cid = repo.collection_create(self.db.conn,
+                                         request.get("name"))
+        except ValueError as exc:
+            return {"error": str(exc)}
+        self._log(f"Коллекция создана: {request.get('name')!r}")
+        return {"ok": True, "id": cid}
+
+    def collection_rename(self, request=None) -> dict:
+        request = request or {}
+        try:
+            repo.collection_rename(self.db.conn,
+                                   int(request.get("id") or 0),
+                                   request.get("name"))
+        except ValueError as exc:
+            return {"error": str(exc)}
+        return {"ok": True}
+
+    def collection_delete(self, request=None) -> dict:
+        """Удалить папку: строки видео остаются, уходят только связи."""
+        request = request or {}
+        cid = int((request or {}).get("id") or 0)
+        if not cid:
+            return {"error": "Не указана коллекция"}
+        row = self.db.conn.execute("SELECT name FROM collections WHERE id=?",
+                                   (cid,)).fetchone()
+        repo.collection_delete(self.db.conn, cid)
+        self._log(f"Коллекция удалена: {(row['name'] if row else cid)!r} "
+                  "(строки видео нетронуты)")
+        return {"ok": True}
+
+    def collection_edit(self, request=None) -> dict:
+        """Добавить/убрать строки: {id, add: [видео], remove: [видео]}."""
+        request = request or {}
+        cid = int(request.get("id") or 0)
+        if not cid:
+            return {"error": "Не указана коллекция"}
+        add = [int(i) for i in (request.get("add") or [])]
+        remove = [int(i) for i in (request.get("remove") or [])]
+        added = repo.collection_add(self.db.conn, cid, add) if add else 0
+        removed = repo.collection_remove(self.db.conn, cid, remove) \
+            if remove else 0
+        return {"ok": True, "added": added, "removed": removed}
+
     def platforms_list(self, request=None) -> dict:
         """Платформы для вкладок (P2): реестр + наличие контента.
 

@@ -119,7 +119,7 @@ class TagsCase(unittest.TestCase):
         self.addCleanup(conn.close)
         version = int(conn.conn.execute(
             "PRAGMA user_version").fetchone()[0])
-        self.assertEqual(version, 10)
+        self.assertEqual(version, 11)
         tables = {r["name"] for r in conn.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertIn("tags", tables)

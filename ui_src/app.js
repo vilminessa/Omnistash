@@ -1558,6 +1558,17 @@
         pl.total, current, pl.downloaded));
     });
 
+    html.push('<div class="tree-group">Коллекции ' +
+      '<button class="icon-btn" id="tree-collection-add" ' +
+      'title="Новая папка (можно из видео разных площадок)">+</button></div>');
+    if (!(tree.collections || []).length) {
+      html.push('<div class="tree-item muted"><span class="name">нет коллекций</span></div>');
+    }
+    (tree.collections || []).forEach(function (c) {
+      html.push(item({ type: "collection", id: c.id }, "📁",
+        c.name || "Без названия", c.total, current));
+    });
+
     $("tree").innerHTML = html.join("");
 
     Array.prototype.forEach.call($("tree").querySelectorAll(".tree-item[data-scope]"),
@@ -1565,10 +1576,22 @@
         node.addEventListener("click", function () {
           state.scope = JSON.parse(node.dataset.scope);
           state.pages = {};
+          updateCollectionBar();
           renderTree(tree);
           renderGrid(true);
         });
       });
+    var addBtn = $("tree-collection-add");
+    if (addBtn) addBtn.addEventListener("click", function () {
+      var name = prompt("Имя новой коллекции:", "");
+      if (!name || !name.trim()) return;
+      call("collection_create", { name: name.trim() }).then(function (res) {
+        if (res && res.error) { toast(res.error, true); return; }
+        state.scope = { type: "collection", id: res.id };
+        updateCollectionBar();
+        renderGrid(true);
+      });
+    });
 
     function item(scope, ico, name, total, current, done) {
       var active = JSON.stringify(scope) === current ? " active" : "";
@@ -1581,6 +1604,84 @@
         '<span class="name" title="' + esc(name) + '">' + esc(name) + "</span>" +
         '<span class="count">' + count + "</span></div>";
     }
+  }
+
+  /* P4: управление папкой - кнопки видны только в её контексте. */
+  function updateCollectionBar() {
+    var inCollection = state.scope && state.scope.type === "collection";
+    ["sel-collect-remove", "sel-collect-rename",
+     "sel-collect-delete"].forEach(function (id) {
+      var node = $(id);
+      if (node) node.hidden = !inCollection;
+    });
+  }
+
+  /* P4: «В коллекцию…» - список папок + создание новой одним диалогом. */
+  function collectAdd() {
+    var ids = Array.from(state.selected);
+    if (!ids.length) { toast("Сначала выделите строки", true); return; }
+    call("collections_list").then(function (res) {
+      var list = (res && res.ok) ? (res.collections || []) : [];
+      var lines = list.map(function (c, i) {
+        return (i + 1) + ") " + c.name + " (" + c.total + ")";
+      });
+      var hint = lines.length
+        ? "Существующие папки:\n" + lines.join("\n") +
+          "\n\nВведите номер или новое имя:"
+        : "Папок пока нет - введите имя новой:";
+      var answer = prompt(hint, "");
+      if (answer === null || !answer.trim()) return;
+      answer = answer.trim();
+      var target = null;
+      var num = Number(answer);
+      if (lines.length && /^[0-9]+$/.test(answer) &&
+          num >= 1 && num <= list.length) {
+        target = list[num - 1].id;
+      }
+      var finish = function (cid) {
+        call("collection_edit", { id: cid, add: ids }).then(function (r2) {
+          if (r2 && r2.error) { toast(r2.error, true); return; }
+          toast("Добавлено в папку: " + (r2.added || 0));
+          clearSelection();
+        });
+      };
+      if (target) { finish(target); return; }
+      call("collection_create", { name: answer }).then(function (r1) {
+        if (r1 && r1.error) { toast(r1.error, true); return; }
+        finish(r1.id);
+      });
+    });
+  }
+
+  function bindCollections() {
+    $("sel-collect").addEventListener("click", collectAdd);
+    $("sel-collect-remove").addEventListener("click", function () {
+      var ids = Array.from(state.selected);
+      if (!ids.length) return;
+      call("collection_edit", { id: state.scope.id, remove: ids })
+        .then(function (res) {
+          if (res && res.error) { toast(res.error, true); return; }
+          toast("Убрано из папки: " + (res.removed || 0));
+          clearSelection();
+        });
+    });
+    $("sel-collect-rename").addEventListener("click", function () {
+      var name = prompt("Новое имя папки:", "");
+      if (!name || !name.trim()) return;
+      call("collection_rename", { id: state.scope.id, name: name.trim() })
+        .then(function (res) {
+          if (res && res.error) toast(res.error, true);
+        });
+    });
+    $("sel-collect-delete").addEventListener("click", function () {
+      if (!confirm("Удалить папку? Строки видео и файлы НЕ трогаются - "
+        + "убираются только связи.")) return;
+      call("collection_delete", { id: state.scope.id }).then(function () {
+        state.scope = { type: "pool" };
+        updateCollectionBar();
+        renderGrid(true);
+      });
+    });
   }
 
   /* ------------------------------------------------------------------ *
@@ -3728,6 +3829,8 @@
       tab.addEventListener("click", function () { switchTab(tab.dataset.tab); });
     });
     bindPh();
+    bindCollections();
+    updateCollectionBar();
 
     // Ширины колонок зависят от ширины окна (≤900px - тесный набор):
     // пересчёт при ресайте, иначе развернутое/свернутое окно помнит бы

@@ -447,5 +447,53 @@ class TestAdultExclude(RepoCase):
         got = repo.list_videos(self.conn, exclude_adult=True, tag="музыка")
         self.assertEqual(got["total"], 1)
 
+class TestCollections(RepoCase):
+    """P4/M17: коллекции-папки - межсервисные группы и порядок."""
+
+    def _seed(self):
+        self.yt, _ = repo.upsert_video(self.conn, {
+            "platform": "youtube", "remote_id": "vid000000001",
+            "title": "YT видео", "channel": None})
+        self.ph, _ = repo.upsert_video(self.conn, {
+            "platform": "pornhub", "remote_id": "ph00000001",
+            "title": "PH видео", "channel": None})
+
+    def test_create_add_scope_and_remove(self):
+        self._seed()
+        cid = repo.collection_create(self.conn, "Избранное")
+        with self.assertRaises(ValueError):
+            repo.collection_create(self.conn, "Избранное")   # дубль
+        with self.assertRaises(ValueError):
+            repo.collection_create(self.conn, "  ")
+        # межсервисный набор: строки из разных площадок в одной папке
+        added = repo.collection_add(self.conn, cid,
+                                    [self.ph, self.yt, self.ph])
+        self.assertEqual(added, 2, "дубль в добавлении игнорируется")
+        got = repo.list_videos(self.conn,
+                               scope={"type": "collection", "id": cid})
+        self.assertEqual(got["total"], 2)
+        # порядок добавления (PH первый)
+        self.assertEqual(got["rows"][0]["title"], "PH видео")
+        removed = repo.collection_remove(self.conn, cid, [self.yt])
+        self.assertEqual(removed, 1)
+        self.assertEqual(
+            repo.list_videos(self.conn,
+                             scope={"type": "collection", "id": cid}
+                             )["total"], 1)
+        # удаление папки не трогает строки видео
+        repo.collection_delete(self.conn, cid)
+        self.assertEqual(repo.collection_list(self.conn), [])
+        rows = self.conn.execute("SELECT COUNT(*) n FROM videos").fetchone()
+        self.assertEqual(rows["n"], 2, "строки видео нетронуты")
+
+    def test_tree_carries_collections(self):
+        self._seed()
+        cid = repo.collection_create(self.conn, "Папка")
+        repo.collection_add(self.conn, cid, [self.yt])
+        tree = repo.tree(self.conn)
+        self.assertEqual(tree["collections"][0]["name"], "Папка")
+        self.assertEqual(tree["collections"][0]["total"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

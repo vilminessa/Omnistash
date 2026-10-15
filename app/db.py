@@ -625,10 +625,40 @@ def _migrate_v10(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v11(conn: sqlite3.Connection) -> None:
+    """Коллекции-папки (P4/M17): свои группы видео ЛЮБЫХ площадок.
+
+    Локальная сущность пользователя: набор строк из разных платформ
+    (YouTube+VK в одной папке); каскадные связи - удаление строки не
+    оставляет битых позиций.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS collections (
+            id         INTEGER PRIMARY KEY,
+            name       TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE (name)
+        );
+        CREATE TABLE IF NOT EXISTS collection_items (
+            collection_id INTEGER NOT NULL REFERENCES collections(id)
+                                  ON DELETE CASCADE,
+            video_id      INTEGER NOT NULL REFERENCES videos(id)
+                                  ON DELETE CASCADE,
+            position      INTEGER NOT NULL DEFAULT 0,
+            added_at      TEXT NOT NULL,
+            PRIMARY KEY (collection_id, video_id)
+        );
+        CREATE INDEX IF NOT EXISTS collection_items_video_idx
+            ON collection_items(video_id);
+        """
+    )
+
+
 # Порядок важен: номер версии = индекс + 1.
 MIGRATIONS = (_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4,
                _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8,
-               _migrate_v9, _migrate_v10)
+               _migrate_v9, _migrate_v10, _migrate_v11)
 
 
 class Database:
