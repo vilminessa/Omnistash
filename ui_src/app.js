@@ -1794,6 +1794,8 @@
       sortable: "likes", setting: "col_likes" },
     { key: "comments", label: "Комменты", w: [74, 64],
       sortable: "comments", setting: "col_comments" },
+    { key: "tags", label: "Теги", w: [160, 110],
+      sortable: "tag", setting: "col_tags" },
     { key: "sync", label: "Синк", w: [92, 76],
       sortable: "sync", setting: "col_sync" }
   ];
@@ -2084,7 +2086,12 @@
       views: '<span class="cell c-views">' + bigCount(row.view_count) + "</span>",
       likes: '<span class="cell c-likes">' + bigCount(row.like_count) + "</span>",
       comments: '<span class="cell c-comments">' + bigCount(row.comment_count) + "</span>",
-      sync: '<span class="cell c-sync">' + shortDate(row.synced_at) + "</span>"
+      sync: '<span class="cell c-sync">' + shortDate(row.synced_at) + "</span>",
+      // Теги ПЛОЩАДКИ (PH4): жанры строки; локальные пометки - в карточке.
+      tags: '<span class="cell c-tags" title="' +
+        esc((row.platform_tags || []).join(", ")) + '">' +
+        esc((row.platform_tags || []).slice(0, 3).join(", ") ||
+            ((row.platform_tags || []).length ? "…" : "—")) + "</span>"
     };
     // Состав строк должен совпадать со шапкой: скрытая колонка не
     // рисуется ни там, ни здесь, и сетка не рассыпается.
@@ -4242,6 +4249,7 @@
       default_sync_mode: "partial", sidecar_mode: "embed", compute_hash: true,
       sync_depth: "full",
       col_views: true, col_likes: true, col_comments: true, col_sync: true,
+      col_tags: true,
       sort_col: "", sort_dir: "desc",
       mesh_enabled: false, mesh_peers: "", mesh_port: 1000, mesh_upnp: true,
       mesh_encrypt: false, mesh_mdns: true, mesh_strict: false, mesh_nick: "",
@@ -4409,6 +4417,11 @@
       { key: "col_sync", type: "bool", section: "Библиотека",
         label: "Колонка «Синк»",
         hint: "Когда данные в последний раз обновлялись с площадки.",
+        default: true },
+      { key: "col_tags", type: "bool", section: "Библиотека",
+        label: "Колонка «Теги»",
+        hint: "Жанры/теги площадки у строки (для PH и других вторых " +
+              "площадок); локальные пометки - в карточке видео.",
         default: true },
       { key: "_refresh_meta", type: "action", section: "Библиотека",
         label: "Метаданные с площадки",

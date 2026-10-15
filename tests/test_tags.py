@@ -88,6 +88,30 @@ class TagsCase(unittest.TestCase):
         self.assertEqual(popular[0]["n"], 2)
         self.assertEqual(len(popular), 2)
 
+    def test_query_reaches_platform_tags(self):
+        """PH4: строка поиска задевает теги площадки, не только FTS."""
+        repo.set_platform_tags(self.conn, self.vid, "pornhub", ["Vintage"])
+        got = repo.list_videos(self.conn, query="Vintage")
+        self.assertEqual(got["total"], 1, "тег площадки должен находиться")
+        self.assertEqual(repo.list_videos(self.conn, query="NoSuchTag")["total"],
+                         0)
+
+    def test_rows_carry_platform_tags(self):
+        """PH4: строки списка несут теги (колонка сетки)."""
+        repo.set_platform_tags(self.conn, self.vid, "pornhub", ["Solo", "4K"])
+        row = repo.list_videos(self.conn)["rows"][0]
+        self.assertEqual(row["platform_tags"], ["4K", "Solo"])   # по алфавиту
+
+    def test_normalize_video_carries_tags(self):
+        from app.metadata import normalize_video
+        data = normalize_video({"id": "ph9", "title": "X",
+                                "tags": ["Anal", "Teen"]},
+                               platform="pornhub")
+        self.assertEqual(data["platform_tags"], ["Anal", "Teen"])
+        self.assertEqual(data["platform"], "pornhub")
+        # без tags - None (связи не трогаем)
+        self.assertIsNone(normalize_video({"id": "ph9"})["platform_tags"])
+
     def test_migrated_version_is_10(self):
         path = Path(self.dir.name) / "v10.db"
         db_mod.Database(path).close()

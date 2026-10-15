@@ -874,8 +874,18 @@ def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
     if query:
         fts = fts_query(query)
         if fts:
-            where.append("v.id IN (SELECT rowid FROM videos_fts WHERE videos_fts MATCH ?)")
-            args.append(fts)
+            # Поиск задевает и ТЕГИ ПЛОЩАДКИ (PH4): справочник маленький,
+            # LIKE по нему дёшев, а FTS-таблицу пересобирать ради колонки
+            # нельзя (внешний content + триггеры - только полная реконструкция).
+            # Функционально строка поиска ищет по названию/описанию/локальным
+            # тегам (FTS) и по жанрам площадки (связи video_tags).
+            where.append("(v.id IN (SELECT rowid FROM videos_fts "
+                         "WHERE videos_fts MATCH ?) "
+                         "OR v.id IN (SELECT vt.video_id FROM video_tags vt "
+                         "JOIN tags t ON t.id=vt.tag_id "
+                         "WHERE t.name LIKE ? OR t.slug LIKE ?))")
+            needle = "%" + query.lower() + "%"
+            args.extend([fts, needle, needle])
 
     join_sql = " ".join(joins)
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
@@ -904,6 +914,21 @@ def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
         [*args, int(limit), int(offset)])]
     for row in rows:
         row["status_label"] = STATUS_LABELS.get(row["status"], row["status"])
+
+    # Теги страницы одним запросом (PH4: колонка сетки «Теги»).
+    ids = [row["id"] for row in rows]
+    tags_by_video: dict[int, list] = {}
+    if ids:
+        marks = ",".join("?" * len(ids))
+        for tag_row in conn.execute(
+                f"""SELECT vt.video_id, t.name FROM video_tags vt
+                      JOIN tags t ON t.id=vt.tag_id
+                     WHERE vt.video_id IN ({marks})
+                  ORDER BY t.name COLLATE NOCASE""", ids):
+            tags_by_video.setdefault(int(tag_row["video_id"]),
+                                     []).append(tag_row["name"])
+    for row in rows:
+        row["platform_tags"] = tags_by_video.get(row["id"], [])
 
     # Есть ли локальная обложка - одним запросом на страницу: коррелированный
     # подзапрос на каждую строку стоил бы столько же, сколько вся выборка,

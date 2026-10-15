@@ -107,6 +107,17 @@ def _channel_url(remote_id: str) -> str | None:
     return f"https://www.youtube.com/channel/{remote_id}" if remote_id.startswith("UC") else None
 
 
+def _platform_tags(info: dict) -> list | None:
+    """Теги площадки из info (None = «в ответе не было»).
+
+    Отличие важно: None не трогает связи строки (быстрый синк без
+    tags), пустой список означает «площадка вернула пусто».
+    """
+    tags = info.get("tags")
+    return ([str(t)[:80] for t in tags[:50]]
+            if isinstance(tags, list) else None)
+
+
 def normalize_video(info: dict, platform: str = PLATFORM, origin: str = "yt-dlp") -> dict:
     """Строка таблицы videos (+ вложенный «channel» для repo.upsert_video)."""
     info = info if isinstance(info, dict) else {}
@@ -134,7 +145,20 @@ def normalize_video(info: dict, platform: str = PLATFORM, origin: str = "yt-dlp"
         "raw_json": slim_info(info),
         "origin": origin,
         "channel": channel_ref(info, platform),
+        "platform_tags": _platform_tags(info),
     }
+
+
+def video_url(platform: str, remote_id: str) -> str | None:
+    """Канонический URL видео по платформе (фолбэки и «открыть на
+    площадке»): youtube-шаблон ломал бы PH-строки."""
+    remote_id = to_text(remote_id) or ""
+    if not remote_id:
+        return None
+    if platform == "pornhub":
+        return ("https://www.pornhub.com/view_video.php?viewkey="
+                + remote_id)
+    return f"https://www.youtube.com/watch?v={remote_id}"
 
 
 def normalize_playlist(info: dict, kind: str = "remote", platform: str = PLATFORM) -> dict:
@@ -198,8 +222,7 @@ def flat_entry(entry, position: int, platform: str = PLATFORM) -> dict:
         "channel": channel_ref(entry, platform),
         # Теги площадки (PH2): строки площадки; None = в источнике их не
         # было (не трогаем связи), [] = площадка явно вернула пусто.
-        "platform_tags": ([str(t)[:80] for t in entry.get("tags")[:50]]
-                          if isinstance(entry.get("tags"), list) else None),
+        "platform_tags": _platform_tags(entry),
     }
 
 

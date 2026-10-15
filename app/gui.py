@@ -45,7 +45,7 @@ from .mesh import nat as mesh_nat
 from .mesh import pacing as mesh_pacing
 from .mesh import server as mesh_server
 from .db import SYNC_MODES, Database
-from .metadata import normalize_video
+from .metadata import normalize_video, video_url
 from .paths import log_path, profile_dir
 from .queue import DownloadWorker
 from .util import human_size, now_iso
@@ -98,6 +98,12 @@ def _sources_with_accounts(conn) -> list[dict]:
         item["account_label"] = labels.get(account_id, "") if account_id else ""
         out.append(item)
     return out
+
+
+def _fallback_url(row: dict) -> str:
+    """Ссылка на площадку для строки без webpage_url - по её платформе."""
+    return (video_url(row.get("platform"), row.get("remote_id"))
+            or "")
 
 
 class Api:
@@ -2157,7 +2163,7 @@ class Api:
                 return {"error": "Идёт синхронизация - дождитесь, она сама "
                                  "обновит метаданные источников"}
         rows = [dict(r) for r in self.db.conn.execute(
-            """SELECT id, remote_id, webpage_url FROM videos
+            """SELECT id, remote_id, platform, webpage_url FROM videos
                 WHERE platform <> 'local'
                 ORDER BY id""")]
         if not rows:
@@ -2217,13 +2223,14 @@ class Api:
             if self._refresh_stop.is_set():
                 stopped = True
                 break
-            url = row["webpage_url"] or (
-                "https://www.youtube.com/watch?v=" + (row["remote_id"] or ""))
+            url = row["webpage_url"] or _fallback_url(row)
             current = ""
             try:
                 info = sources.fetch_video(url, settings=config,
                                            stop=self._refresh_stop)
-                data = normalize_video(info, origin="yt-dlp")
+                data = normalize_video(info,
+                                       platform=row.get("platform")
+                                       or "youtube", origin="yt-dlp")
                 vid, _created = repo.upsert_video(conn, data, full=True)
                 if vid:
                     # Данные только что пришли с площадки - вот честное

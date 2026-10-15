@@ -168,6 +168,15 @@ FIELDS: tuple[dict, ...] = (
         "default": True,
     },
     {
+        "key": "col_tags",
+        "type": "bool",
+        "section": "Библиотека",
+        "label": "Колонка «Теги»",
+        "hint": "Жанры/теги площадки у строки (например, у видео "
+                "PornHub); локальные пометки - в карточке видео.",
+        "default": True,
+    },
+    {
         "key": "_refresh_meta",
         "type": "action",
         "section": "Библиотека",
