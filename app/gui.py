@@ -1176,7 +1176,7 @@ class Api:
         request = request or {}
         url = str(request.get("url") or "").strip()
         if not url:
-            return {"error": "Вставьте ссылку на плейлист или канал"}
+            return {"error": "Вставьте ссылку на плейлист, канал или видео"}
         config = self._current_settings()
         mode = request.get("mode") or config.get("default_sync_mode") or "partial"
         if mode not in SYNC_MODES:
@@ -1197,9 +1197,9 @@ class Api:
             kind = sources.classify(url)["kind"]
         except Exception as exc:  # noqa: BLE001 - кривая ссылка не должна ронять окно
             return {"error": f"Ссылка не разобрана: {exc}"}
-        if kind not in ("playlist", "channel"):
-            return {"error": "Поддерживаются ссылки на плейлист и на канал; "
-                             "одиночное видео появится вместе с загрузчиком"}
+        if kind not in ("playlist", "channel", "video"):
+            return {"error": "Поддерживаются ссылки на плейлист, канал "
+                             "и одиночное видео"}
 
         with self._lock:
             if self._add.get("phase") in ("fetching", "committing"):

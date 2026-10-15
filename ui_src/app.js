@@ -3344,7 +3344,7 @@
 
     } else {
       title.textContent = "Добавить источник";
-      html = '<label class="field-label" for="add-url">Ссылка на плейлист или канал</label>' +
+      html = '<label class="field-label" for="add-url">Ссылка на плейлист, канал или видео</label>' +
         '<input type="text" id="add-url" autocomplete="off" spellcheck="false" ' +
         'placeholder="https://youtube.com/playlist?list=… или https://youtube.com/@channel" ' +
         'value="' + esc(addForm.url) + '">' +
@@ -5083,7 +5083,7 @@
         req = req || {};
         if (!(req.url || "").trim()) {
           return Promise.resolve(
-            { error: "Вставьте ссылку на плейлист или канал" });
+            { error: "Вставьте ссылку на плейлист, канал или видео" });
         }
         if (mockAddTimer) clearInterval(mockAddTimer);
         mockAdd = { phase: "fetching", mode: req.mode || "partial",

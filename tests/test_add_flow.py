@@ -129,6 +129,24 @@ class TestPhases(AddFlowCase):
         videos = [s for s in flow["stages"] if s["id"] == "videos"][0]
         self.assertEqual(videos["total"], 6)
 
+    def test_single_video_url_flows_through(self):
+        """Одиночная видео-ссылка (watch без list) - весь флоу до строки."""
+        api = self.api()
+        snap = fixture_snapshot(count=1)
+        snap["playlist"]["kind"] = "video"
+        snap["playlist"]["title"] = "Одно видео"
+        snap["url"] = "https://youtube.com/watch?v=vidfixtur01"
+        self.patch_fetch(snap)
+        self.assertTrue(api.add_start({
+            "url": "https://youtube.com/watch?v=vidfixtur01",
+            "mode": "partial"})["ok"], "видео-ссылка не должна отклоняться")
+        flow = self.wait_phase(api, "confirm")
+        self.assertEqual(flow["plan"]["counts"]["new_videos"], 1)
+        self.assertTrue(api.add_confirm()["ok"])
+        flow = self.wait_phase(api, "done")
+        self.assertEqual(flow["result"]["stats"]["new_videos"], 1)
+        self.assertEqual(api.poll(0)["stats"]["total"], 1)
+
     def test_full_mode_enqueues(self):
         # Качалку подменяем: здесь важен факт «полный режим поставил в
         # очередь и попросил воркер стартовать», а не сама загрузка.
@@ -225,9 +243,10 @@ class TestCancelAndErrors(AddFlowCase):
 
     def test_bad_url_is_rejected_before_network(self):
         api = self.api()
-        self.assertEqual(api.add_start({})["error"], "Вставьте ссылку на плейлист или канал")
-        res = api.add_start({"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"})
-        self.assertIn("плейлист и на канал", res["error"])
+        self.assertEqual(api.add_start({})["error"],
+                         "Вставьте ссылку на плейлист, канал или видео")
+        res = api.add_start({"url": "https://www.youtube.com/"})
+        self.assertIn("Поддерживаются", res.get("error", ""), res)
         self.assertEqual(api.poll(0)["add_flow"]["phase"], "idle")
 
     def test_fetch_error_is_shown_not_swallowed(self):
@@ -371,6 +390,46 @@ class TestChunking(unittest.TestCase):
         # укладывается в первый же запрос.
         self.assertEqual(calls, ["1-25"])
         self.assertEqual(len(snapshot["entries"]), 3)
+
+
+class TestVideoSnapshot(unittest.TestCase):
+    """_snapshot_video: одиночное видео - снапшот в общем формате."""
+
+    def test_wraps_single_full_entry(self):
+        info = {"id": "vidfixtur01", "title": "Одно видео",
+                "duration": 123, "view_count": 5, "like_count": 2,
+                "webpage_url": "https://youtu.be/vidfixtur01",
+                "upload_date": "20260101"}
+        calls = []
+
+        def fake(url, *, settings=None, stop=None):
+            calls.append(url)
+            return dict(info)
+
+        with mock.patch.object(sources, "fetch_video", side_effect=fake):
+            snap = sources._snapshot_video(
+                "https://youtu.be/vidfixtur01", settings={},
+                on_progress=lambda got, total: calls.append((got, total)),
+                stop=None, account_id=None)
+        self.assertEqual(calls[0], "https://youtu.be/vidfixtur01")
+        self.assertIn((1, 1), calls, "прогресс фиксированный: 1 из 1")
+        self.assertEqual(snap["total"], 1)
+        self.assertEqual(len(snap["entries"]), 1)
+        self.assertEqual(snap["playlist"]["kind"], "video")
+        entry = snap["entries"][0]
+        self.assertEqual(entry["remote_id"], "vidfixtur01")
+        self.assertEqual(entry["title"], "Одно видео")
+        self.assertEqual(entry["duration_s"], 123)
+        self.assertEqual(entry["like_count"], 2)
+        self.assertFalse(entry["unavailable"])
+
+    def test_no_video_raises(self):
+        with mock.patch.object(sources, "fetch_video",
+                               return_value={"id": ""}):
+            with self.assertRaises(sources.FetchError):
+                sources._snapshot_video("https://youtu.be/vidfixtur01",
+                                        settings={}, on_progress=None,
+                                        stop=None, account_id=None)
 
 
 if __name__ == "__main__":

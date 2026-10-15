@@ -125,7 +125,8 @@ def _migrate_v1(conn: sqlite3.Connection) -> None:
             description    TEXT,
             channel_id     INTEGER REFERENCES channels(id) ON DELETE SET NULL,
             kind           TEXT NOT NULL DEFAULT 'remote'
-                           CHECK (kind IN ('uploads','remote','local','mix')),
+                           CHECK (kind IN ('uploads','remote','local','mix',
+                                           'video')),
             url            TEXT,
             item_count     INTEGER,
             sync_mode      TEXT NOT NULL DEFAULT 'partial'
@@ -537,9 +538,69 @@ def _migrate_v8(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v9(conn: sqlite3.Connection) -> None:
+    """Тип источника 'video' - одиночное видео (добавление по ссылке).
+
+    CHECK в SQLite меняется только пересозданием таблицы: копируем
+    строки (id и связи playlist_items сохраняются - внешние ключи
+    ссылаются на id). Живая таблица шире v1-определения: v2 добавила
+    storage_id, v3 - account_id - переносим ВСЕ колонки явным списком.
+
+    Порядок бережёт ссылки: новая таблица строится под временным
+    именем, старая сбрасывается, имя возвращается через RENAME с
+    legacy_alter_table=ON - так ссылки playlist_items остаются на имя
+    «playlists» и после подмены попадают в новую таблицу.
+    """
+    conn.execute(
+        """
+        CREATE TABLE playlists_v9_new (
+            id             INTEGER PRIMARY KEY,
+            platform       TEXT NOT NULL,
+            remote_id      TEXT NOT NULL,
+            title          TEXT,
+            description    TEXT,
+            channel_id     INTEGER REFERENCES channels(id) ON DELETE SET NULL,
+            kind           TEXT NOT NULL DEFAULT 'remote'
+                           CHECK (kind IN ('uploads','remote','local','mix',
+                                           'video')),
+            url            TEXT,
+            item_count     INTEGER,
+            sync_mode      TEXT NOT NULL DEFAULT 'partial'
+                           CHECK (sync_mode IN ('full','partial','manual')),
+            raw_json       TEXT,
+            created_at     TEXT NOT NULL,
+            updated_at     TEXT NOT NULL,
+            last_synced_at TEXT,
+            storage_id     TEXT,
+            account_id     TEXT,
+            UNIQUE (platform, remote_id)
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO playlists_v9_new (id, platform, remote_id, title, "
+        "description, channel_id, kind, url, item_count, sync_mode, "
+        "raw_json, created_at, updated_at, last_synced_at, storage_id, "
+        "account_id) "
+        "SELECT id, platform, remote_id, title, description, channel_id, "
+        "kind, url, item_count, sync_mode, raw_json, created_at, "
+        "updated_at, last_synced_at, storage_id, account_id "
+        "FROM playlists"
+    )
+    conn.execute("DROP TABLE playlists")
+    conn.execute("PRAGMA legacy_alter_table = ON")
+    conn.execute("ALTER TABLE playlists_v9_new RENAME TO playlists")
+    conn.execute("PRAGMA legacy_alter_table = OFF")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS playlists_channel_idx "
+        "ON playlists(channel_id)"
+    )
+
+
 # Порядок важен: номер версии = индекс + 1.
 MIGRATIONS = (_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4,
-               _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8)
+               _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8,
+               _migrate_v9)
 
 
 class Database:

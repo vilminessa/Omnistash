@@ -20,13 +20,14 @@ import yt_dlp
 from . import google_auth
 from . import metadata
 from .metadata import flat_entry, normalize_playlist
+from .util import to_text
 
 CHUNK = 100        # записей на запрос (быстрый плоский синк)
 DEEP_CHUNK = 25    # записей на запрос в полном режиме: каждый чанк в десятки
                    # раз дороже (полный info на каждое видео) - и прогресс
                    # должен дышать чаще
 MAX_CHUNKS = 500   # защита от зацикливания (50 000 записей)
-SUPPORTED = ("playlist", "channel")
+SUPPORTED = ("playlist", "channel", "video")
 
 
 class FetchError(Exception):
@@ -159,13 +160,39 @@ def fetch_snapshot(url: str, *, settings: dict | None = None,
     kind = classify(url).get("kind")
     if kind not in SUPPORTED:
         raise FetchError(
-            "Поддерживаются ссылки на плейлист и на канал; "
-            "одиночное видео появится вместе с загрузчиком.")
+            "Поддерживаются ссылки на плейлист, канал и одиночное видео")
+    if kind == "video":
+        return _snapshot_video(url, settings=settings,
+                               on_progress=on_progress, stop=stop,
+                               account_id=account_id)
 
     with _account_cookiefile(account_id) as cookiefile:
         return _snapshot(url, kind, settings=settings,
                          on_progress=on_progress, stop=stop,
                          cookiefile=cookiefile)
+
+
+def _snapshot_video(url: str, *, settings: dict | None, on_progress,
+                    stop, account_id: str | None) -> dict:
+    """Одиночное видео: снапшот ИЗ ОДНОЙ записи (тот же формат).
+
+    Формат не меняется (playlist + entries) - весь дальнейший конвейер
+    (plan_diff/commit_plan/синки) работает как для плейлиста, просто
+    план содержит одно видео. Запрос - полный (fetch_video): карточка
+    получает лайки/дату/описание сразу, а не после «Обновить
+    метаданные». noplaylist гарантирует, что &list= в ссылке не
+    развернёт весь плейлист.
+    """
+    info = fetch_video(url, settings=settings, stop=stop)
+    video_id = to_text(info.get("id") or "")
+    if not video_id:
+        raise FetchError("площадка не вернула описание видео")
+    playlist = normalize_playlist(info, kind="video")
+    entry = flat_entry(info, position=1)
+    if on_progress:
+        on_progress(1, 1)               # фиксированная форма: 1 из 1
+    return {"playlist": playlist, "entries": [entry],
+            "total": 1, "url": url}
 
 
 def _snapshot(url: str, kind: str, *, settings: dict | None,
