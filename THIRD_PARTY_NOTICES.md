@@ -35,6 +35,7 @@ exe.
 | Компонент | Лицензия | Что это |
 |---|---|---|
 | yt-dlp | Unlicense (общественное достояние) | загрузка видео и метаданных с площадок; входит в exe полностью, включая экстракторы |
+| curl_cffi | MIT (в комплекте libcurl — «curl license») | имитация TLS-отпечатка браузера (настройка «Имитация браузера»), борьба с анти-бот 403/410 |
 | pywebview | BSD 3-Clause | окно интерфейса (webview поверх HTML) |
 | cryptography | Apache-2.0 OR BSD-3-Clause | Ed25519/X25519, ChaCha20-Poly1305, TLS, DPAPI-обвязка |
 | requests | Apache-2.0 | HTTP-клиент |

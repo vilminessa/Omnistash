@@ -96,19 +96,21 @@ class TestCookieFallback(RetryCase):
         self.assertEqual(captured[1].get("cookiesfrombrowser"),
                          ("firefox",), "первый рабочий браузер")
 
-    def test_410_with_chosen_browser_uses_it(self):
+    def test_410_with_chosen_browser_is_honest_error(self):
+        # Куки выбранного браузера уже подключены с самого начала - повтор
+        # с ними же бессмыслен, ошибка возвращается сразу.
         result, captured = self.run_plan(
-            ["err410", "ok"], settings={"browser_cookies": "firefox"})
-        self.assertEqual(captured[1].get("cookiesfrombrowser"),
-                         ("firefox",))
+            ["err410"], settings={"browser_cookies": "firefox"})
+        self.assertIsNotNone(result["error"])
+        self.assertEqual(len(captured), 1, "бесмысленных повторов нет")
 
     def test_410_without_browsers_is_honest_error(self):
         with mock.patch.object(google_auth, "BROWSER_CHOICES", ()):
             result, captured = self.run_plan(["err410"])
         self.assertIsNotNone(result["error"])
         self.assertEqual(len(captured), 1, "нечем пробовать - без повторов")
-        self.assertIn("площадка", result["error"],
-                      "человеческий текст площадки сохраняется")
+        self.assertIn("410", result["error"],
+                      "подсказка по факту ошибки сохраняется")
 
     def test_unrelated_error_not_retried(self):
         def factory(opts):
