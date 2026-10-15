@@ -711,7 +711,7 @@ class Api:
             self._health = mesh_health.HealthChecker(
                 probe_fn=self._health_probe,
                 devices_fn=self._health_devices,
-                on_result=self._health_record,
+                on_change=self._health_record,
                 log=self._log)
         if not self._health.running:
             self._health.start()
