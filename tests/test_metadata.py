@@ -109,6 +109,29 @@ class TestClassifyPh(unittest.TestCase):
         self.assertEqual(info["kind"], "video")
 
 
+class TestPlatformRegistry(unittest.TestCase):
+    """P1: реестр площадок - матчинг хостов и юр-флаги."""
+
+    def test_host_matching(self):
+        from app import platforms
+        self.assertEqual(platforms.by_host("www.youtube.com")["id"],
+                         "youtube")
+        self.assertEqual(platforms.by_host("m.youtu.be")["id"], "youtube")
+        self.assertEqual(platforms.by_host("www.pornhub.com")["id"],
+                         "pornhub")
+        # домен в середине чужого хоста - не площадка
+        self.assertIsNone(platforms.by_host("evilyoutube.com.example.org"))
+        self.assertIsNone(platforms.by_host(""))
+        self.assertIsNone(platforms.by_host("example.org"))
+
+    def test_adult_flags(self):
+        from app import platforms
+        self.assertTrue(platforms.is_adult("pornhub"))
+        self.assertFalse(platforms.is_adult("youtube"))
+        self.assertFalse(platforms.is_adult("нет-такой"))
+        self.assertEqual(platforms.adult_ids(), ("pornhub",))
+
+
 class TestNormalizeVideo(unittest.TestCase):
     def test_columns(self):
         data = normalize_video({

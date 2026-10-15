@@ -17,6 +17,7 @@ import json
 import re
 from urllib.parse import parse_qs, urlparse
 
+from . import platforms as platforms_mod
 from .util import iso_date, norm_title, to_int, to_text
 
 PLATFORM = "youtube"
@@ -249,7 +250,10 @@ def classify_url(url: str) -> dict:
     parsed = urlparse(text)
     host = (parsed.netloc or "").lower().split(":")[0]
     query = parse_qs(parsed.query)
-    platform = "pornhub" if host.endswith("pornhub.com") else PLATFORM
+    # Площадка по реестру (P1); без совпадения - youtube как раньше
+    # (исторический дефолт: весь мир был youtube).
+    matched = platforms_mod.by_host(host)
+    platform = str(matched["id"]) if matched else PLATFORM
     result = {"kind": "unknown", "url": text, "platform": platform,
               "video_id": None, "playlist_id": None, "channel_id": None,
               "handle": None, "tag": None}

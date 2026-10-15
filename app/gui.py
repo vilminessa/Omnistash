@@ -27,6 +27,7 @@ from . import downloader as downloader_mod
 from . import ffmpeg_installer as ffmpeg_mod
 from . import google_auth
 from . import legal as legal_mod
+from . import platforms as platforms_mod
 from . import repack as repack_mod
 from . import schedule as schedule_mod
 from . import settings_schema, sources
@@ -1218,10 +1219,10 @@ class Api:
         except Exception as exc:  # noqa: BLE001 - кривая ссылка не должна ронять окно
             return {"error": f"Ссылка не разобрана: {exc}"}
         kind = info.get("kind")
-        # Возрастная площадка (PH5): первый PH-URL требует явного
-        # подтверждения «мне18+» - окно вернёт adult_confirm, UI спросит
-        # и повторит add_start.
-        if (info.get("platform") == "pornhub"
+        # Возрастная площадка (PH5/P1): первый URL ВЗРОСЛОЙ площадки по
+        # флагу реестра требует явного «мне18+» - окно вернёт
+        # adult_confirm, UI спросит и повторит add_start.
+        if (platforms_mod.is_adult(info.get("platform"))
                 and not legal_mod.state().get("adult_ok")):
             return {"adult_confirm": True,
                     "error": "Возрастной контент: подтвердите, что вам "
