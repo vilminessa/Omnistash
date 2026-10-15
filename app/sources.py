@@ -112,7 +112,18 @@ def fetch_video(url: str, *, settings: dict | None = None,
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except yt_dlp.utils.DownloadError as exc:
-        raise FetchError(f"Площадка не ответила: {exc}") from exc
+        text = str(exc)
+        hint = ""
+        if ("Connection aborted" in text or "timed out" in text
+                or "410" in text or "403" in text):
+            # Площадка может быть недоступна из сети пользователя
+            # (блокировка региона/провайдера) - честная подсказка вместо
+            # молчаливого таймаута; лечится средствами доступа пользователя
+            # (VPN/прокси) или участием mesh (relay - этап 3).
+            hint = (" (площадка недоступна из вашей сети - возможно, "
+                    "региональная блокировка: поможет VPN/прокси, либо "
+                    "запрос участникам mesh)")
+        raise FetchError(f"Площадка не ответила: {exc}{hint}") from exc
     if not isinstance(info, dict) or not info.get("id"):
         raise FetchError("площадка не вернула описание видео")
     return info

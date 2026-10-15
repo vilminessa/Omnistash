@@ -81,6 +81,11 @@ class TestClassifyPh(unittest.TestCase):
         self.assertEqual(info["kind"], "video")
         self.assertEqual(info["video_id"], "ph5f12ab34cd567")
 
+    def test_embed_form_is_video(self):
+        info = classify_url("https://www.pornhub.com/embed/ph5f12ab34cd567")
+        self.assertEqual(info["kind"], "video")
+        self.assertEqual(info["video_id"], "ph5f12ab34cd567")
+
     def test_tag_page(self):
         info = classify_url("https://www.pornhub.com/video/tag/anal")
         self.assertEqual(info["kind"], "tag")

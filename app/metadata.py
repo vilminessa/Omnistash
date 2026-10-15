@@ -370,6 +370,11 @@ def _classify_ph(parsed, query: dict, result: dict) -> dict:
         result["kind"] = "channel"
         return result
     viewkey = (query.get("viewkey") or [None])[0]
+    if not viewkey:
+        # Формат «поделиться → embed»: id прямо в пути.
+        match = re.match(r"/embed/([A-Za-z0-9_-]{6,64})", path)
+        if match:
+            viewkey = match.group(1)
     if viewkey and _PH_VIEWKEY_RE.match(str(viewkey)):
         result["video_id"] = str(viewkey)
         result["kind"] = "video"
