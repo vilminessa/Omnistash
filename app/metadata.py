@@ -150,6 +150,40 @@ def normalize_video(info: dict, platform: str = PLATFORM, origin: str = "yt-dlp"
     }
 
 
+def _classify_vk(parsed, query: dict, result: dict) -> dict:
+    """VK-правила классификации (P5).
+
+    Форматы видео: `video?z=video-101_5` (современный адрес), классика
+    `/video-101_5` и `/video/-101_5` (owner_id_video_id - ровно то, что
+    yt-dlp кладёт в id), клипы `/@handle/clip123_5`. Владелец с одним
+    сегментом пути (`/python`, `/club123`) - канал. Сложные адреса
+    подборок не гадаем: честный unknown, живые ссылки уточним пробой.
+    """
+    path = parsed.path or ""
+    z = str((query.get("z") or [""])[0])
+    match = re.search(r"(-?\d+_\d+)", z)
+    if match:
+        result["video_id"] = match.group(1)
+        result["kind"] = "video"
+        return result
+    match = re.match(r"/video/(-?\d+_\d+)", path)
+    if not match:
+        match = re.match(r"/video(-?\d+_\d+)", path)
+    if not match:
+        match = re.search(r"/clip(-?\d+_\d+)", path)
+    if match:
+        result["video_id"] = match.group(1)
+        result["kind"] = "video"
+        return result
+    match = re.match(r"/([^/]+?)/?$", path)
+    if match and match.group(1) not in ("video", "clip", "wall",
+                                        "feed", "search", "groups",
+                                        "apps", "settings"):
+        result["handle"] = match.group(1)
+        result["kind"] = "channel"
+    return result
+
+
 def video_url(platform: str, remote_id: str) -> str | None:
     """Канонический URL видео по платформе (фолбэки и «открыть на
     площадке»): youtube-шаблон ломал бы PH-строки."""
@@ -159,6 +193,9 @@ def video_url(platform: str, remote_id: str) -> str | None:
     if platform == "pornhub":
         return ("https://www.pornhub.com/view_video.php?viewkey="
                 + remote_id)
+    if platform == "vk":
+        # remote_id = owner_id_video_id (напр. -101_12345)
+        return f"https://vk.com/video{remote_id}"
     return f"https://www.youtube.com/watch?v={remote_id}"
 
 
@@ -260,6 +297,8 @@ def classify_url(url: str) -> dict:
 
     if platform == "pornhub":
         return _classify_ph(parsed, query, result)
+    if platform == "vk":
+        return _classify_vk(parsed, query, result)
 
     playlist_id = (query.get("list") or [None])[0]
     if playlist_id and _PLAYLIST_ID_RE.match(str(playlist_id)):

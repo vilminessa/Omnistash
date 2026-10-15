@@ -132,6 +132,45 @@ class TestPlatformRegistry(unittest.TestCase):
         self.assertEqual(platforms.adult_ids(), ("pornhub",))
 
 
+class TestClassifyVk(unittest.TestCase):
+    """P5: классификация VK-ссылок."""
+
+    def test_video_forms(self):
+        cases = {
+            "https://vk.com/video?z=video-1015_44": "-1015_44",
+            "https://vk.com/video?z=-1015_44": "-1015_44",
+            "https://vk.com/video-1015_44": "-1015_44",
+            "https://vk.com/video/-1015_44": "-1015_44",
+            "https://vkvideo.ru/video-99_1": "-99_1",
+            "https://vk.com/absolut_video/clip99_1": "99_1",
+        }
+        for url, vid in cases.items():
+            info = classify_url(url)
+            self.assertEqual(info["platform"], "vk", url)
+            self.assertEqual(info["kind"], "video", url)
+            self.assertEqual(info["video_id"], vid, url)
+
+    def test_channel_form(self):
+        info = classify_url("https://vk.com/python")
+        self.assertEqual(info["kind"], "channel")
+        self.assertEqual(info["handle"], "python")
+        info = classify_url("https://vk.com/club12345")
+        self.assertEqual(info["kind"], "channel")
+
+    def test_reserved_paths_are_unknown(self):
+        self.assertEqual(classify_url("https://vk.com/search")["kind"],
+                         "unknown")
+
+    def test_video_url_canon(self):
+        from app.metadata import video_url
+        self.assertEqual(video_url("vk", "-1015_44"),
+                         "https://vk.com/video-1015_44")
+        self.assertEqual(video_url("pornhub", "ph5x1"),
+                         "https://www.pornhub.com/view_video.php?viewkey=ph5x1")
+        self.assertEqual(video_url("youtube", "dQw4w9WgXcQ"),
+                         "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+
+
 class TestNormalizeVideo(unittest.TestCase):
     def test_columns(self):
         data = normalize_video({

@@ -31,6 +31,13 @@ PLATFORMS: tuple = (
         "adult": True,
         "account": False,
     },
+    {
+        "id": "vk",
+        "label": "VK Видео",
+        "domains": ("vk.com", "vkvideo.ru", "mail.ru", "my.mail.ru"),
+        "adult": False,
+        "account": True,     # часть клипов требует входа (куки аккаунта)
+    },
 )
 
 _BY_ID = {item["id"]: item for item in PLATFORMS}
