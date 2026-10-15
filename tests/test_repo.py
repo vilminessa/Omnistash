@@ -352,6 +352,7 @@ class TestListVideosSort(RepoCase):
         self.assertEqual(self.titles(order={"col": "comments", "dir": "asc"})[:2],
                          ["альфа", "Бета"])
 
+
     def test_title_is_case_insensitive(self):
         self._seed()
         # Русская локаль без учёта регистра: «альфа» < «Бета» < «Гамма».
@@ -395,6 +396,40 @@ class TestListVideosSort(RepoCase):
         rows = repo.list_videos(self.conn, order={"col": "sync", "dir": "desc"})["rows"]
         self.assertEqual(rows[0]["title"], "Гамма")
 
+
+
+class TestAdultExclude(RepoCase):
+    """P2: взрослые площадки скрыты из ОБЩЕГО списка (только своей вкладкой)."""
+
+    def _seed(self):
+        repo.upsert_video(self.conn, {
+            "platform": "youtube", "remote_id": "vid000000001",
+            "title": "Обычное", "channel": None})
+        repo.upsert_video(self.conn, {
+            "platform": "pornhub", "remote_id": "ph00000001",
+            "title": "Возрастное", "channel": None})
+        repo.upsert_video(self.conn, {
+            "platform": "pornhub", "remote_id": "ph00000002",
+            "title": "Ещё возрастное", "channel": None})
+
+    def titles(self, **kwargs):
+        return [row["title"] for row in
+                repo.list_videos(self.conn, **kwargs)["rows"]]
+
+    def test_pool_hides_adult(self):
+        self._seed()
+        self.assertEqual(self.titles(exclude_adult=True), ["Обычное"])
+        # без флага (старое поведение) - всё видно
+        self.assertEqual(len(self.titles()), 3)
+
+    def test_platform_view_shows_only_hers(self):
+        self._seed()
+        adult = self.titles(platform="pornhub")
+        self.assertEqual(len(adult), 2)
+        self.assertNotIn("Обычное", adult)
+        # явный platform сильнее exclude (вкладка площадки работает)
+        self.assertEqual(
+            len(self.titles(platform="pornhub", exclude_adult=True)), 2)
 
 if __name__ == "__main__":
     unittest.main()

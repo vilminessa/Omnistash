@@ -19,6 +19,7 @@ import sqlite3
 from collections import Counter
 from pathlib import Path
 
+from . import platforms as platforms_mod
 from . import storages as storages_mod
 from .db import STATUSES, SYNC_MODES
 from .metadata import PLATFORM, local_key, video_key
@@ -833,6 +834,7 @@ def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
                 status: str | None = None, query: str = "",
                 rating_min: int | None = None, order: dict | None = None,
                 tag: str = "", platform: str = "",
+                exclude_adult: bool = False,
                 offset: int = 0, limit: int = 200) -> dict:
     """Строки таблицы библиотеки: (total, rows) для виртуализированного списка.
 
@@ -840,7 +842,8 @@ def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
     Поиск - по FTS5 (название, описание, локальные теги), фильтры - по
     статусу, рейтингу, ТЕГУ ПЛОЩАДКИ (slug из video_tags) и ПЛОЩАДКЕ
     (platform: вкладка 18+ показывает только pornhub), страница -
-    offset/limit.
+    offset/limit. exclude_adult (P2) прячет возрастные площадки из
+    ОБЩИХ списков - их вкладка «18+» отдельная.
     order: {"col": <ключ из ORDER_COLS>, "dir": "asc"|"desc"} - сортировка
     по белому списку: ключ из запроса окна попадает в SQL только через
     этот словарь, произвольный текст отвергается молча (дефолтная дата).
@@ -850,6 +853,12 @@ def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
     if platform:
         where.append("v.platform=?")
         args.append(str(platform))
+    elif exclude_adult:
+        adult = platforms_mod.adult_ids()
+        if adult:
+            marks = ",".join("?" * len(adult))
+            where.append(f"v.platform NOT IN ({marks})")
+            args.extend(adult)
     if scope.get("type") == "channel":
         where.append("v.channel_id=?")
         args.append(scope.get("id"))

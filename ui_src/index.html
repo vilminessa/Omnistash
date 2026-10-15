@@ -27,7 +27,7 @@
   <button class="tab active" data-tab="library">Библиотека</button>
   <button class="tab" data-tab="sync">Синхронизация</button>
   <button class="tab" data-tab="queue">Очередь <span class="badge" id="queue-badge" hidden>0</span></button>
-  <button class="tab" data-tab="adult">18+</button>
+  <span id="platform-tabs"></span>
   <button class="tab" data-tab="settings">Настройки</button>
 </nav>
 
@@ -248,12 +248,14 @@
   </section>
 
   <!-- ================= Настройки ================= -->
-  <!-- ================= 18+ (PornHub): отдельная вкладка, изолированная
-       от библиотеки; свои поиск/сортировка/чипсы тегов = PH3 ========= -->
-  <section class="panel" id="panel-adult" hidden>
+  <!-- ================= Платформенная вкладка (P2): одна панель на
+       любую площадку (контекст = platform); вкладки-кнопки динамические,
+       см. platforms_list ======================================= -->
+  <section class="panel" id="panel-platform" hidden>
     <div class="toolbar">
+      <b id="pf-title">Площадка</b>
       <input type="search" id="ph-search"
-             placeholder="Поиск в18+ по названию и описанию…" autocomplete="off">
+             placeholder="Поиск по названию и описанию…" autocomplete="off">
       <select id="ph-sort" title="Сортировка">
         <option value="date:desc">по дате (новые)</option>
         <option value="date:asc">по дате (старые)</option>
@@ -262,6 +264,8 @@
         <option value="tag:asc">по тегу (алфавит)</option>
       </select>
       <span class="spacer"></span>
+      <button class="btn ghost" id="pf-add"
+              title="Добавить видео/канал/плейлист этой площадки">+ Добавить</button>
       <span class="muted" id="ph-count"></span>
     </div>
     <div class="toolbar" id="ph-tags" aria-label="Фильтр по тегам"></div>

@@ -177,6 +177,14 @@ FIELDS: tuple[dict, ...] = (
         "default": True,
     },
     {
+        "key": "tabs_hidden",
+        "type": "str",
+        "section": "",
+        "label": "",
+        "hint": "Скрытые вкладки-площадки (id через запятую).",
+        "hidden": True, "default": "",
+    },
+    {
         "key": "_refresh_meta",
         "type": "action",
         "section": "Библиотека",

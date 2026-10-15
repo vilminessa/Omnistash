@@ -192,6 +192,7 @@
     if (changed("scan", snap.scan)) renderScan(snap.scan);
     if (changed("tree", snap.tree)) renderTree(snap.tree);
     if (changed("sources", snap.sources)) renderSources(snap.sources);
+    renderPlatformTabs();   // P2: вкладки-площадки (дедуп внутри)
     if (changed("runs", snap.runs)) renderRuns(snap.runs);
     if (changed("queue", snap.queue)) renderQueue(snap.queue);
     if (changed("dl", snap.dl)) {
@@ -1934,6 +1935,7 @@
         rating_min: state.ratingMin || null,
         order: state.sort && state.sort.col
           ? { col: state.sort.col, dir: state.sort.dir } : null,
+        exclude_adult: true,      // P2: взрослое - только на своей вкладке
         offset: page * PAGE, limit: PAGE
       }).then(function (res) {
         if (res) {
@@ -3531,48 +3533,88 @@
     Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (tab) {
       tab.classList.toggle("active", tab.dataset.tab === name);
     });
-    ["library", "sync", "queue", "settings", "adult"].forEach(function (panel) {
-      $("panel-" + panel).hidden = panel !== name;
+    ["library", "sync", "queue", "settings", "platform"].forEach(function (panel) {
+      var node = $("panel-" + panel);
+      if (node) node.hidden = panel !== name;
     });
     if (name === "library") paintGrid();
     // Карточка настроек рисуется из schema+storages: на вкладке её надо
     // перерисовать, иначе виджет хранилищ останется пустым (он рисовался
     // до того, как пришли данные).
     if (name === "settings") renderSettings();
-    if (name === "adult") { phLoad(true); phTags(); }
+    if (name === "platform") { phLoad(true); phTags(); }
   }
 
   /* ------------------------------------------------------------------ *
-   *  Вкладка 18+ (PH3): своя таблица, поиск, сортировка, чипсы тегов
+   *  Вкладки-площадки (P2): одна панель, контекст = platform
    * ------------------------------------------------------------------ */
 
-  var phState = { query: "", tag: "", sort: "date:desc",
-                  offset: 0, rows: [], total: 0, tags: [] };
+  var platState = { platform: "", label: "", adult: false, query: "",
+                    tag: "", sort: "date:desc",
+                    offset: 0, rows: [], total: 0, tags: [] };
+  var platTabsJson = "";
+
+  function openPlatform(id, label, adult) {
+    platState.platform = id;
+    platState.label = label || id;
+    platState.adult = !!adult;
+    $("pf-title").textContent = platState.label +
+      (platState.adult ? " · 18+" : "");
+    $("ph-search").placeholder = "Поиск на " + platState.label + "…";
+    switchTab("platform");
+  }
+
+  function renderPlatformTabs() {
+    call("platforms_list").then(function (res) {
+      if (!res || !res.ok) return;
+      var list = (res.platforms || []).filter(function (p) {
+        return p.count > 0 && !p.hidden;   // авто: только с контентом
+      });
+      var json = JSON.stringify(list);
+      if (json === platTabsJson) return;   // перерисовка при изменении
+      platTabsJson = json;
+      var box = $("platform-tabs");
+      box.innerHTML = list.map(function (p) {
+        return '<button class="tab" data-tab="pf:' + esc(p.id) +
+          '" data-label="' + esc(p.label) + '" data-adult="' +
+          (p.adult ? "1" : "") + '"' +
+          (p.adult ? ' title="Возрастной контент"' : "") + ">" +
+          esc(p.adult ? p.label + " 18+" : p.label) + "</button>";
+      }).join("");
+      Array.prototype.forEach.call(box.querySelectorAll(".tab"),
+        function (tab) {
+          tab.addEventListener("click", function () {
+            openPlatform(tab.dataset.tab.slice(3), tab.dataset.label,
+                         tab.dataset.adult === "1");
+          });
+        });
+    });
+  }
 
   function phLoad(reset) {
-    if (reset) { phState.offset = 0; phState.rows = []; }
-    var parts = phState.sort.split(":");
+    if (reset) { platState.offset = 0; platState.rows = []; }
+    var parts = platState.sort.split(":");
     call("list_videos", {
-      platform: "pornhub",
-      query: phState.query,
-      tag: phState.tag,
+      platform: platState.platform,
+      query: platState.query,
+      tag: platState.tag,
       order: { col: parts[0], dir: parts[1] },
-      offset: phState.offset,
+      offset: platState.offset,
       limit: 100
     }).then(function (res) {
       if (!res || res.error) { toast((res || {}).error || "Ошибка списка", true); return; }
-      phState.rows = phState.rows.concat(res.rows || []);
-      phState.total = res.total || 0;
+      platState.rows = platState.rows.concat(res.rows || []);
+      platState.total = res.total || 0;
       phRender();
     });
   }
 
   function phRender() {
     var body = $("ph-body");
-    var rows = phState.rows.map(function (row) {
+    var rows = platState.rows.map(function (row) {
       var duration = row.duration_s ? humanDuration(row.duration_s) : "—";
       var date = row.uploaded_at ? String(row.uploaded_at).slice(0, 10) : "—";
-      var views = row.view_count != null ? humanSize(row.view_count) : "—";
+      var views = row.view_count != null ? bigCount(row.view_count) : "—";
       return '<tr data-id="' + row.id + '" style="cursor:pointer">' +
         "<td>" + esc(row.title || row.key) + "</td>" +
         '<td class="muted">' + esc(row.channel || "—") + "</td>" +
@@ -3581,33 +3623,34 @@
         "<td>" + esc(views) + "</td></tr>";
     }).join("");
     body.innerHTML = rows;
-    $("ph-count").textContent = phState.total
-      ? "найдено: " + phState.total : "";
-    $("ph-empty").hidden = !!phState.rows.length;
-    if (!phState.rows.length) {
+    $("ph-count").textContent = platState.total
+      ? "найдено: " + platState.total : "";
+    $("ph-empty").hidden = !!platState.rows.length;
+    if (!platState.rows.length) {
       $("ph-empty").textContent = "Пока пусто: добавьте видео/канал/плейлист " +
-        "PornHub через «Добавить источник» — вкладка покажет их здесь.";
+        "ссылкой кнопкой «+ Добавить» — они появятся здесь.";
     }
-    $("ph-more").hidden = phState.rows.length >= phState.total;
+    $("ph-more").hidden = platState.rows.length >= platState.total;
     phTagsRender();
   }
 
   function phTagsRender() {
     var box = $("ph-tags");
-    var all = '<button class="btn ghost ph-tag' + (phState.tag ? "" : " active") +
+    var all = '<button class="btn ghost ph-tag' + (platState.tag ? "" : " active") +
       '" data-slug="">все</button>';
-    box.innerHTML = all + phState.tags.map(function (t) {
-      var active = phState.tag === t.slug ? " active" : "";
+    box.innerHTML = all + platState.tags.map(function (t) {
+      var active = platState.tag === t.slug ? " active" : "";
       return '<button class="btn ghost ph-tag' + active + '" data-slug="' +
         esc(t.slug) + '">' + esc(t.name) + " (" + t.n + ")</button>";
     }).join("");
   }
 
   function phTags() {
-    call("tags_popular", { platform: "pornhub", limit: 40 }).then(function (res) {
-      phState.tags = (res && res.ok) ? (res.tags || []) : [];
-      phTagsRender();
-    });
+    call("tags_popular", { platform: platState.platform, limit: 40 })
+      .then(function (res) {
+        platState.tags = (res && res.ok) ? (res.tags || []) : [];
+        phTagsRender();
+      });
   }
 
   function bindPh() {
@@ -3616,28 +3659,30 @@
     search.addEventListener("input", function () {
       clearTimeout(timer);
       timer = setTimeout(function () {
-        phState.query = search.value.trim();
+        platState.query = search.value.trim();
         phLoad(true);
       }, 300);
     });
     $("ph-sort").addEventListener("change", function (ev) {
-      phState.sort = ev.target.value;
+      platState.sort = ev.target.value;
       phLoad(true);
     });
     $("ph-more").addEventListener("click", function () {
-      phState.offset = phState.rows.length;
+      platState.offset = platState.rows.length;
       phLoad(false);
     });
     $("ph-tags").addEventListener("click", function (ev) {
       var btn = ev.target.closest ? ev.target.closest(".ph-tag") : null;
       if (!btn) return;
-      phState.tag = btn.dataset.slug || "";
+      platState.tag = btn.dataset.slug || "";
       phLoad(true);
     });
     $("ph-body").addEventListener("click", function (ev) {
       var tr = ev.target.closest ? ev.target.closest("tr[data-id]") : null;
       if (tr) openDetail(Number(tr.dataset.id));
     });
+    // P2: добавление ссылок прямо с вкладки площадки (та же воронка).
+    $("pf-add").addEventListener("click", function () { openAdd(); });
   }
 
   /* ------------------------------------------------------------------ *
@@ -4268,6 +4313,7 @@
       col_views: true, col_likes: true, col_comments: true, col_sync: true,
       col_tags: true,
       sort_col: "", sort_dir: "desc",
+      tabs_hidden: "",
       mesh_enabled: false, mesh_peers: "", mesh_port: 1000, mesh_upnp: true,
       mesh_encrypt: false, mesh_mdns: true, mesh_strict: false, mesh_nick: "",
       mesh_max_mb: 10, mesh_rate_mbit: 10,

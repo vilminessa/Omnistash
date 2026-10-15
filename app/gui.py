@@ -516,12 +516,36 @@ class Api:
                 order=request.get("order") or None,
                 tag=request.get("tag") or "",
                 platform=request.get("platform") or "",
+                exclude_adult=bool(request.get("exclude_adult")),
                 offset=int(request.get("offset") or 0),
                 limit=min(int(request.get("limit") or 200), 500),
             )
         except Exception as exc:  # noqa: BLE001 - окно должно увидеть ошибку
             self._log(f"Ошибка списка: {exc}")
             return {"total": 0, "rows": [], "error": str(exc)}
+
+    def platforms_list(self, request=None) -> dict:
+        """Платформы для вкладок (P2): реестр + наличие контента.
+
+        Авто-плюс-настройки: вкладка показывается для площадки со
+        строками в индексе, скрытые пользователем - в settings
+        tabs_hidden (список id через запятую).
+        """
+        counts = {str(row["platform"]): int(row["n"]) for row in
+                  self.db.conn.execute(
+                      "SELECT platform, COUNT(*) n FROM videos "
+                      "WHERE platform <> 'local' GROUP BY platform")}
+        hidden = {item.strip() for item in str(
+            self._current_settings().get("tabs_hidden") or "").split(",")
+            if item.strip()}
+        out = []
+        for item in platforms_mod.PLATFORMS:
+            pid = item["id"]
+            out.append({"id": pid, "label": item["label"],
+                        "adult": bool(item.get("adult")),
+                        "count": counts.get(pid, 0),
+                        "hidden": pid in hidden})
+        return {"ok": True, "platforms": out}
 
     def tags_popular(self, request=None) -> dict:
         """Теги площадки счётчиками - чипсы фильтра (PH3, вкладка 18+)."""

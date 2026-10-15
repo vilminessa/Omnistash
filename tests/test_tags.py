@@ -149,6 +149,26 @@ class TestAdultApi(GuiCase):
         filtered = api.list_videos({"platform": "pornhub", "tag": "solo"})
         self.assertEqual(filtered["total"], 1)
 
+    def test_platforms_list_counts_and_hidden(self):
+        """P2: вкладки-площадки - реестр + контент + скрытые."""
+        api = self.make_api()
+        repo.upsert_video(api.db.conn, {
+            "platform": "youtube", "remote_id": "yt1", "title": "YT",
+            "channel": None})
+        repo.upsert_video(api.db.conn, {
+            "platform": "pornhub", "remote_id": "ph1", "title": "PH",
+            "channel": None})
+        # youtube скрыт пользователем (настройку не трогаем - моком)
+        api._current_settings = lambda: {"tabs_hidden": "youtube"}
+        got = api.platforms_list()
+        self.assertTrue(got["ok"], got)
+        by_id = {p["id"]: p for p in got["platforms"]}
+        self.assertEqual(by_id["youtube"]["count"], 1)
+        self.assertTrue(by_id["youtube"]["hidden"], "скрытая вкладка")
+        self.assertEqual(by_id["pornhub"]["count"], 1)
+        self.assertFalse(by_id["pornhub"]["hidden"])
+        self.assertTrue(by_id["pornhub"]["adult"], "взрослый флаг реестра")
+
 
 if __name__ == "__main__":
     unittest.main()
