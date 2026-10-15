@@ -204,18 +204,31 @@ def playlist_kind(playlist_id: str) -> str:
     return "mix" if str(playlist_id or "").startswith("RD") else "remote"
 
 
-def classify_url(url: str) -> dict:
-    """Что перед нами: playlist / channel / video / unknown.
+# PH (PornHub): viewkey короче/длиннее youtube-стиля - свой шаблон.
+_PH_VIEWKEY_RE = re.compile(r"^[A-Za-z0-9_-]{6,64}$")
 
-    Порядок важен: `watch?v=ID&list=PL...` - это плейлист (именно так
-    пользователь и вставляет ссылки), одиночное видео - только когда
-    параметра list нет.
+
+def classify_url(url: str) -> dict:
+    """Что перед нами: playlist / channel / video / tag / unknown.
+
+    Платформа определяется доменом (PH1): youtube - дефолт и классика
+    (youtu.be/shorts/@handle), pornhub.com - свои правила (_classify_ph).
+
+    Для youtube порядок важен: `watch?v=ID&list=PL...` - это плейлист
+    (именно так пользователь и вставляет ссылки), одиночное видео -
+    только когда параметра list нет.
     """
     text = to_text(url) or ""
     parsed = urlparse(text)
+    host = (parsed.netloc or "").lower().split(":")[0]
     query = parse_qs(parsed.query)
-    result = {"kind": "unknown", "url": text, "video_id": None,
-              "playlist_id": None, "channel_id": None, "handle": None}
+    platform = "pornhub" if host.endswith("pornhub.com") else PLATFORM
+    result = {"kind": "unknown", "url": text, "platform": platform,
+              "video_id": None, "playlist_id": None, "channel_id": None,
+              "handle": None, "tag": None}
+
+    if platform == "pornhub":
+        return _classify_ph(parsed, query, result)
 
     playlist_id = (query.get("list") or [None])[0]
     if playlist_id and _PLAYLIST_ID_RE.match(str(playlist_id)):
@@ -249,5 +262,45 @@ def classify_url(url: str) -> dict:
     elif result["channel_id"] or result["handle"]:
         result["kind"] = "channel"
     elif result["video_id"]:
+        result["kind"] = "video"
+    return result
+
+
+def _classify_ph(parsed, query: dict, result: dict) -> dict:
+    """PornHub-правила классификации (PH1).
+
+    Форматы: /video/tag/<slug> - тег-страница; /playlist?id=... -
+    плейлист; профили (/pornstar/, /model/, /channels/, /users/ и
+    /video/uploaded?user=) - канал-загрузчик; viewkey=... - видео.
+    Нет video_id - не поддерживаемое место (поиск площадки и пр.), что
+    честно вернёт «unknown» в add-flow.
+    """
+    path = parsed.path or ""
+    match = re.match(r"/video/tag/([^/?#]+)", path)
+    if match:
+        result["tag"] = match.group(1)
+        result["kind"] = "tag"
+        return result
+    if path.startswith("/playlist"):
+        pid = (query.get("id") or query.get("playlist") or [None])[0]
+        # id у PH числовой и короче youtube-ового - свой шаблон.
+        if pid and re.match(r"^[A-Za-z0-9_-]{4,64}$", str(pid)):
+            result["playlist_id"] = str(pid)
+            result["kind"] = "playlist"
+        return result
+    if path.startswith("/video/uploaded"):
+        user = (query.get("user") or [None])[0]
+        if user:
+            result["handle"] = str(user)
+            result["kind"] = "channel"
+        return result
+    match = re.match(r"/(?:pornstar|model|channels|users)/([^/?#]+)", path)
+    if match:
+        result["handle"] = match.group(1)
+        result["kind"] = "channel"
+        return result
+    viewkey = (query.get("viewkey") or [None])[0]
+    if viewkey and _PH_VIEWKEY_RE.match(str(viewkey)):
+        result["video_id"] = str(viewkey)
         result["kind"] = "video"
     return result

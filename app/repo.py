@@ -324,6 +324,8 @@ def plan_diff(conn: sqlite3.Connection, snapshot: dict) -> dict:
     """
     entries = [e for e in (snapshot.get("entries") or []) if isinstance(e, dict)]
     playlist = dict(snapshot.get("playlist") or {})
+    # Платформа снапшота (PH1): youtube - дефолт старых снапшотов.
+    platform = str(playlist.get("platform") or PLATFORM)
 
     # 1. Что уже есть в индексе: видео одним запросом, каналы - вторым.
     remote_ids = [e["remote_id"] for e in entries if e.get("remote_id")]
@@ -332,7 +334,7 @@ def plan_diff(conn: sqlite3.Connection, snapshot: dict) -> dict:
         marks = ",".join("?" * len(chunk))
         rows = conn.execute(
             f"SELECT id, key FROM videos WHERE key IN ({marks})",
-            [video_key(PLATFORM, r) for r in chunk]).fetchall()
+            [video_key(platform, r) for r in chunk]).fetchall()
         known_ids.update(r["key"] for r in rows)
 
     channel_refs: dict[str, dict] = {}
@@ -345,13 +347,13 @@ def plan_diff(conn: sqlite3.Connection, snapshot: dict) -> dict:
         marks = ",".join("?" * len(chunk))
         rows = conn.execute(
             f"SELECT remote_id FROM channels WHERE platform=? AND remote_id IN ({marks})",
-            [PLATFORM, *chunk]).fetchall()
+            [platform, *chunk]).fetchall()
         known_channels.update(r["remote_id"] for r in rows)
 
     # 2. Плейлист и его текущие связи.
     row = conn.execute(
         "SELECT id, sync_mode FROM playlists WHERE platform=? AND remote_id=?",
-        (PLATFORM, playlist.get("remote_id"))).fetchone()
+        (platform, playlist.get("remote_id"))).fetchone()
     playlist_row = dict(row) if row else None
     linked: set[str] = set()
     if playlist_row:
@@ -370,7 +372,7 @@ def plan_diff(conn: sqlite3.Connection, snapshot: dict) -> dict:
         if entry.get("unavailable") or not remote_id:
             skipped += 1
             continue
-        key = video_key(PLATFORM, remote_id)
+        key = video_key(platform, remote_id)
         if key in seen:
             dupes += 1
             continue
@@ -436,6 +438,7 @@ def commit_plan(conn: sqlite3.Connection, snapshot: dict, plan: dict,
     for name in stages:
         stage(name, "wait")
     stats = dict(plan["counts"])
+    platform = str(snapshot["playlist"].get("platform") or PLATFORM)
 
     # Явный BEGIN/COMMIT: соединения работают в autocommit (иначе запись
     # воркера висела бы незакоммиченной и держала лок файла базы).
@@ -480,7 +483,7 @@ def commit_plan(conn: sqlite3.Connection, snapshot: dict, plan: dict,
         ids_by_key: dict[str, int] = {}
         for index, item in enumerate(todo, start=1):
             entry = item["entry"]
-            data = _entry_to_video(entry)
+            data = _entry_to_video(entry, platform)
             vid, _created = upsert_video(conn, data, full=False)
             if vid:
                 ids_by_key[item["key"]] = vid
@@ -516,7 +519,7 @@ def commit_plan(conn: sqlite3.Connection, snapshot: dict, plan: dict,
         stage("links", "active", 0, len(entries))
         gone = now_iso()
         for index, entry in enumerate(entries, start=1):
-            key = video_key(PLATFORM, entry["remote_id"])
+            key = video_key(platform, entry["remote_id"])
             vid = ids_by_key.get(key)
             if vid is None:
                 row = conn.execute("SELECT id FROM videos WHERE key=?", (key,)).fetchone()
@@ -543,7 +546,7 @@ def commit_plan(conn: sqlite3.Connection, snapshot: dict, plan: dict,
                     if e.get("unavailable") or not e.get("remote_id"))
         removed = 0
         if not holes:
-            current = {video_key(PLATFORM, e["remote_id"]) for e in entries}
+            current = {video_key(platform, e["remote_id"]) for e in entries}
             rows = conn.execute(
                 """SELECT pi.id, v.key FROM playlist_items pi
                      JOIN videos v ON v.id = pi.video_id
@@ -574,7 +577,7 @@ def commit_plan(conn: sqlite3.Connection, snapshot: dict, plan: dict,
     return stats
 
 
-def _entry_to_video(entry: dict) -> dict:
+def _entry_to_video(entry: dict, platform: str = PLATFORM) -> dict:
     """Запись снапшота -> аргумент upsert_video.
 
     raw_json здесь НЕ None: upsert с full=False сохраняет старую богатую
@@ -583,9 +586,9 @@ def _entry_to_video(entry: dict) -> dict:
     полный - полную.
     """
     return {
-        "platform": PLATFORM,
+        "platform": platform,
         "remote_id": entry.get("remote_id"),
-        "key": video_key(PLATFORM, entry.get("remote_id")),
+        "key": video_key(platform, entry.get("remote_id")),
         "title": entry.get("title"),
         "description": entry.get("description"),
         "uploaded_at": entry.get("uploaded_at"),

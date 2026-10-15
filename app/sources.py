@@ -19,7 +19,7 @@ import yt_dlp
 
 from . import google_auth
 from . import metadata
-from .metadata import flat_entry, normalize_playlist
+from .metadata import PLATFORM, flat_entry, normalize_playlist
 from .util import to_text
 
 CHUNK = 100        # записей на запрос (быстрый плоский синк)
@@ -157,23 +157,25 @@ def fetch_snapshot(url: str, *, settings: dict | None = None,
     account_id - аккаунт Google источника: «подтвердите, что не бот»
         проходится от имени привязанной учётки.
     """
-    kind = classify(url).get("kind")
+    info = classify(url)
+    kind = info.get("kind")
+    platform = str(info.get("platform") or PLATFORM)
     if kind not in SUPPORTED:
         raise FetchError(
             "Поддерживаются ссылки на плейлист, канал и одиночное видео")
     if kind == "video":
-        return _snapshot_video(url, settings=settings,
+        return _snapshot_video(url, platform=platform, settings=settings,
                                on_progress=on_progress, stop=stop,
                                account_id=account_id)
 
     with _account_cookiefile(account_id) as cookiefile:
-        return _snapshot(url, kind, settings=settings,
+        return _snapshot(url, kind, platform=platform, settings=settings,
                          on_progress=on_progress, stop=stop,
                          cookiefile=cookiefile)
 
 
-def _snapshot_video(url: str, *, settings: dict | None, on_progress,
-                    stop, account_id: str | None) -> dict:
+def _snapshot_video(url: str, *, platform: str, settings: dict | None,
+                    on_progress, stop, account_id: str | None) -> dict:
     """Одиночное видео: снапшот ИЗ ОДНОЙ записи (тот же формат).
 
     Формат не меняется (playlist + entries) - весь дальнейший конвейер
@@ -187,15 +189,16 @@ def _snapshot_video(url: str, *, settings: dict | None, on_progress,
     video_id = to_text(info.get("id") or "")
     if not video_id:
         raise FetchError("площадка не вернула описание видео")
-    playlist = normalize_playlist(info, kind="video")
-    entry = flat_entry(info, position=1)
+    playlist = normalize_playlist(info, kind="video", platform=platform)
+    entry = flat_entry(info, position=1, platform=platform)
     if on_progress:
         on_progress(1, 1)               # фиксированная форма: 1 из 1
     return {"playlist": playlist, "entries": [entry],
             "total": 1, "url": url}
 
 
-def _snapshot(url: str, kind: str, *, settings: dict | None,
+def _snapshot(url: str, kind: str, *, platform: str,
+              settings: dict | None,
               on_progress, stop, cookiefile) -> dict:
     delay = max(int((settings or {}).get("delay_ms") or 0), 0) / 1000.0
     # Размер чанка зависит от глубины: полный режим берёт по 25 записей
@@ -210,20 +213,24 @@ def _snapshot(url: str, kind: str, *, settings: dict | None,
 
     playlist_id = str(head.get("id") or "")
     playlist = normalize_playlist(
-        head, kind=("uploads" if kind == "channel"
-                    else metadata.playlist_kind(playlist_id)))
+        head, platform=platform,
+        kind=("uploads" if kind == "channel"
+              else ("remote" if platform != PLATFORM
+                    else metadata.playlist_kind(playlist_id))))
     total = int(head.get("playlist_count") or 0)
 
     playlist_channel = playlist.get("channel")
-    entries = _collect(head.get("entries"), playlist_channel, start=1)
+    entries = _collect(head.get("entries"), playlist_channel, start=1,
+                       platform=platform)
     got = len(entries)
     if on_progress:
         on_progress(got, total)
 
     # Последующие чанки идут по канонической ссылке: параметр si и прочий
-    # мусор из адреса пользователя только мешает пагинации.
+    # мусор из адреса пользователя только мешает пагинации (канонизация
+    # youtube-специфична: у других площадок своя механика пагинации).
     request_url = url
-    if metadata.classify_url(url)["playlist_id"]:
+    if platform == PLATFORM and metadata.classify_url(url)["playlist_id"]:
         request_url = ("https://www.youtube.com/playlist?list="
                        + metadata.classify_url(url)["playlist_id"])
 
@@ -241,7 +248,8 @@ def _snapshot(url: str, kind: str, *, settings: dict | None,
         chunk = _extract(request_url, f"{start}-{start + chunk_size - 1}",
                          settings, cookiefile)
         chunk_entries = _collect(chunk.get("entries") if isinstance(chunk, dict) else None,
-                                 playlist_channel, start=start)
+                                 playlist_channel, start=start,
+                                 platform=platform)
         chunks += 1
         if not chunk_entries:
             break
@@ -262,7 +270,8 @@ def _snapshot(url: str, kind: str, *, settings: dict | None,
             "total": total or len(entries), "url": request_url}
 
 
-def _collect(raw_entries, playlist_channel: dict | None, start: int) -> list[dict]:
+def _collect(raw_entries, playlist_channel: dict | None, start: int,
+             platform: str = PLATFORM) -> list[dict]:
     """Записи из yt-dlp -> нормализованный вид, с наследованием автора.
 
     У канала записи приходят БЕЗ channel/channel_id (yt-dlp не повторяет
@@ -273,7 +282,7 @@ def _collect(raw_entries, playlist_channel: dict | None, start: int) -> list[dic
     seen: set[str] = set()
     position = start
     for raw in (raw_entries or []):
-        item = flat_entry(raw, position)
+        item = flat_entry(raw, position, platform=platform)
         position += 1
         remote_id = item.get("remote_id")
         if remote_id:

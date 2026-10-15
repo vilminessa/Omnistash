@@ -71,6 +71,44 @@ class TestClassifyUrl(unittest.TestCase):
         self.assertEqual(playlist_kind("PLrAXtmRdnEQy6nuLMOV8u4"), "remote")
 
 
+class TestClassifyPh(unittest.TestCase):
+    """PH1: классификация PornHub-ссылок (своя платформа)."""
+
+    def test_viewkey_is_video(self):
+        info = classify_url(
+            "https://www.pornhub.com/view_video.php?viewkey=ph5f12ab34cd567")
+        self.assertEqual(info["platform"], "pornhub")
+        self.assertEqual(info["kind"], "video")
+        self.assertEqual(info["video_id"], "ph5f12ab34cd567")
+
+    def test_tag_page(self):
+        info = classify_url("https://www.pornhub.com/video/tag/anal")
+        self.assertEqual(info["kind"], "tag")
+        self.assertEqual(info["tag"], "anal")
+
+    def test_short_numeric_playlist(self):
+        info = classify_url("https://www.pornhub.com/playlist?id=98765432")
+        self.assertEqual(info["kind"], "playlist")
+        self.assertEqual(info["playlist_id"], "98765432")
+
+    def test_profiles_are_channels(self):
+        for url, handle in (
+                ("https://www.pornhub.com/video/uploaded?user=someguy",
+                 "someguy"),
+                ("https://www.pornhub.com/pornstar/some-star/videos/uploaded",
+                 "some-star"),
+                ("https://www.pornhub.com/model/some-model", "some-model")):
+            info = classify_url(url)
+            self.assertEqual(info["platform"], "pornhub", url)
+            self.assertEqual(info["kind"], "channel", url)
+            self.assertEqual(info["handle"], handle, url)
+
+    def test_youtube_untouched(self):
+        info = classify_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        self.assertEqual(info["platform"], "youtube")
+        self.assertEqual(info["kind"], "video")
+
+
 class TestNormalizeVideo(unittest.TestCase):
     def test_columns(self):
         data = normalize_video({

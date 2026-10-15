@@ -408,7 +408,8 @@ class TestVideoSnapshot(unittest.TestCase):
 
         with mock.patch.object(sources, "fetch_video", side_effect=fake):
             snap = sources._snapshot_video(
-                "https://youtu.be/vidfixtur01", settings={},
+                "https://youtu.be/vidfixtur01", platform="youtube",
+                settings={},
                 on_progress=lambda got, total: calls.append((got, total)),
                 stop=None, account_id=None)
         self.assertEqual(calls[0], "https://youtu.be/vidfixtur01")
@@ -428,6 +429,7 @@ class TestVideoSnapshot(unittest.TestCase):
                                return_value={"id": ""}):
             with self.assertRaises(sources.FetchError):
                 sources._snapshot_video("https://youtu.be/vidfixtur01",
+                                        platform="youtube",
                                         settings={}, on_progress=None,
                                         stop=None, account_id=None)
 
