@@ -452,6 +452,24 @@ def download(video: dict, settings: dict, *, stop: threading.Event,
                          cookiefile=cookiefile)
 
 
+def _cookie_browsers(settings: dict) -> list[str]:
+    """Браузеры для куки-фоллбэка при 410/403 (битые ABE - мимо).
+
+    Если пользователь уже выбрал браузер в настройках - только его (его
+    куки реально есть на диске); иначе пробуем по порядку. Пусто = нечем
+    пробовать (вернётся исходная ошибка с подсказкой).
+    """
+    chosen = str(settings.get("browser_cookies") or "none").strip().lower()
+    choices = getattr(google_auth, "BROWSER_CHOICES", ()) or ()
+    broken = getattr(google_auth, "BROKEN_BROWSERS", frozenset()) or frozenset()
+    if chosen in choices and chosen != "none":
+        order = [chosen]
+    else:
+        order = [name for name in ("firefox", "chrome", "brave")
+                 if name in choices]
+    return [name for name in order if name not in broken]
+
+
 def _download(video: dict, settings: dict, *, stop: threading.Event,
               on_progress=None, dest: str | None = None,
               overwrite: bool = False, cookiefile: "Path | None" = None) -> dict:
@@ -472,30 +490,62 @@ def _download(video: dict, settings: dict, *, stop: threading.Event,
     encoder = str(settings.get("transcode") or "none")
     ffmpeg = find_ffmpeg()
     embed = embed_mode(settings) and bool(ffmpeg)
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            if encoder in TRANSCODERS and ffmpeg:
-                # Перекодировка включается настройкой «Загрузка/Перекодировка».
-                # Без ffmpeg пропускаем её (очередь предупреждает) - качать
-                # без ffmpeg умеем, а вот тормозить очередь из-за настройки
-                # нельзя.
-                ydl.add_post_processor(TranscodePP(ydl, encoder=encoder))
-            if embed:
-                # Метаданные и обложка вшиваются стадией after_move - ПОСЛЕ
-                # перекодировки: встроенный в исходник HEVC-перекодчик взял
-                # бы только видеопоток и обложку потерял. Порядок важен:
-                # метаданные первыми (их remux не должен тронуть обложку),
-                # встраивание обложки - последним.
-                ydl.add_post_processor(FFmpegMetadataPP(ydl), when="after_move")
-                # already_have_thumbnail=False: после успеха PP сам удаляет
-                # файл обложки - в папке остаётся один mp4.
-                ydl.add_post_processor(EmbedThumbnailPP(ydl), when="after_move")
-            info = ydl.extract_info(url, download=True)
-    except DownloadCancelled:
-        return {"cancelled": True, "files": [], "info": {}, "error": None}
-    except yt_dlp.utils.DownloadError as exc:
-        return {"cancelled": False, "files": [], "info": {},
-                "error": _human_error(exc)}
+    # Фоллбэки по фактическим симптомам живой пары:
+    #  * имя файла не прошло Windows (query-мусор в title/id площадок,
+    #    длинный путь) -> повтор с ascii-именами (restrictfilenames);
+    #  * площадка ответила 410/403, а браузерные куки выключены - браузер
+    #    такие страницы открывает -> повтор со ВСЕМИ рабочими браузерами
+    #    по очереди (порядок: firefox, chrome, brave; битые ABE - мимо).
+    browser_fallbacks = [
+        {"cookiesfrombrowser": (name,)}
+        for name in _cookie_browsers(settings)
+    ]
+    attempt = 0
+    while True:
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                if encoder in TRANSCODERS and ffmpeg:
+                    # Перекодировка включается настройкой «Загрузка/Перекодировка».
+                    # Без ffmpeg пропускаем её (очередь предупреждает) - качать
+                    # без ffmpeg умеем, а вот тормозить очередь из-за настройки
+                    # нельзя.
+                    ydl.add_post_processor(TranscodePP(ydl, encoder=encoder))
+                if embed:
+                    # Метаданные и обложка вшиваются стадией after_move - ПОСЛЕ
+                    # перекодировки: встроенный в исходник HEVC-перекодчик взял
+                    # бы только видеопоток и обложку потерял. Порядок важен:
+                    # метаданные первыми (их remux не должен тронуть обложку),
+                    # встраивание обложки - последним.
+                    ydl.add_post_processor(FFmpegMetadataPP(ydl), when="after_move")
+                    # already_have_thumbnail=False: после успеха PP сам удаляет
+                    # файл обложки - в папке остаётся один mp4.
+                    ydl.add_post_processor(EmbedThumbnailPP(ydl), when="after_move")
+                info = ydl.extract_info(url, download=True)
+            break
+        except DownloadCancelled:
+            return {"cancelled": True, "files": [], "info": {},
+                    "error": None}
+        except yt_dlp.utils.DownloadError as exc:
+            text = str(exc)
+            if attempt == 0:
+                if "Invalid argument" in text or "Errno 22" in text:
+                    opts["restrictfilenames"] = True
+                    attempt += 1
+                    continue
+                if (re.search(r"HTTP Error (410|403)", text)
+                        and not cookiefile
+                        and not opts.get("cookiesfrombrowser")
+                        and browser_fallbacks):
+                    opts.update(browser_fallbacks.pop(0))
+                    attempt += 1
+                    continue
+            if browser_fallbacks and re.search(r"HTTP Error (410|403)",
+                                               text) and not cookiefile:
+                opts.update(browser_fallbacks.pop(0))
+                attempt += 1
+                continue
+            return {"cancelled": False, "files": [], "info": {},
+                    "error": _human_error(exc)}
 
     if not isinstance(info, dict):
         return {"cancelled": False, "files": [], "info": {},
