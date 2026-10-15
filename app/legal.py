@@ -8,7 +8,9 @@
 Флаги:
   aup_accepted_at    - дата/время принятия правил (строка, пусто = нет);
   first_send_accepted - предупреждение «передаёте файл другому лицу»
-                        принято (одноразово; mesh и wormhole).
+                        принято (одноразово; mesh и wormhole);
+  adult_ok            - подтверждение «мне есть 18» для возрастных
+                        площадок (PH-ссылки; дата принятия).
 """
 
 from __future__ import annotations
@@ -19,7 +21,8 @@ from pathlib import Path
 
 from .paths import legal_path
 
-_DEFAULTS = {"aup_accepted_at": "", "first_send_accepted": False}
+_DEFAULTS = {"aup_accepted_at": "", "first_send_accepted": False,
+             "adult_ok": ""}
 _KEYS = tuple(_DEFAULTS)
 
 
@@ -48,16 +51,20 @@ def state() -> dict:
     return _read()
 
 
-def accept(*, aup: bool = False, first_send: bool = False) -> dict:
+def accept(*, aup: bool = False, first_send: bool = False,
+           adult: bool = False) -> dict:
     """Зафиксировать согласия (вызывается только по явному действию
     человека из UI); возвращает свежее состояние.
 
-    Дата AUP пишется ОДИН раз: повторные «Принятия» не откатывают
+    Даты пишутся ОДИН раз: повторные «Принятия» не откатывают
     исходный факт (юридически важен первый момент).
     """
     data = _read()
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
     if aup and not data["aup_accepted_at"]:
-        data["aup_accepted_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        data["aup_accepted_at"] = stamp
+    if adult and not data["adult_ok"]:
+        data["adult_ok"] = stamp
     if first_send:
         data["first_send_accepted"] = True
     _write(data)

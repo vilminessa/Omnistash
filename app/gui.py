@@ -1214,9 +1214,19 @@ class Api:
                                   for item in google_auth.load_registry()):
             return {"error": "Аккаунт не найден - войдите заново"}
         try:
-            kind = sources.classify(url)["kind"]
+            info = sources.classify(url)
         except Exception as exc:  # noqa: BLE001 - кривая ссылка не должна ронять окно
             return {"error": f"Ссылка не разобрана: {exc}"}
+        kind = info.get("kind")
+        # Возрастная площадка (PH5): первый PH-URL требует явного
+        # подтверждения «мне18+» - окно вернёт adult_confirm, UI спросит
+        # и повторит add_start.
+        if (info.get("platform") == "pornhub"
+                and not legal_mod.state().get("adult_ok")):
+            return {"adult_confirm": True,
+                    "error": "Возрастной контент: подтвердите, что вам "
+                             "есть 18 лет и вы несёте ответственность за "
+                             "скачиваемое"}
         if kind not in ("playlist", "channel", "video"):
             return {"error": "Поддерживаются ссылки на плейлист, канал "
                              "и одиночное видео"}
@@ -2745,10 +2755,14 @@ class Api:
         """
         request = request or {}
         data = legal_mod.accept(aup=bool(request.get("aup")),
-                                first_send=bool(request.get("first_send")))
+                                first_send=bool(request.get("first_send")),
+                                adult=bool(request.get("adult")))
         if request.get("aup"):
             self._log("Правила использования (docs/ACCEPTABLE_USE.md) "
                       "приняты")
+        if request.get("adult"):
+            self._log("Подтверждено: пользователю есть 18 "
+                      "(возрастные площадки разрешены)")
         if request.get("first_send"):
             self._log("Предупреждение о передаче принято: файлы уходят "
                       "другим лицам - только в рамках ваших прав")

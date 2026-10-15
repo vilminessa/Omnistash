@@ -3437,10 +3437,27 @@
   function runAdd() {
     if (!addForm.url.trim()) { toast("Вставьте ссылку", true); return; }
     addForm.storageId = currentAddStorage();
-    call("add_start", { url: addForm.url.trim(), mode: addForm.mode,
-                        storage_id: addForm.storageId,
-                        account_id: addForm.accountId })
+    var payload = { url: addForm.url.trim(), mode: addForm.mode,
+                    storage_id: addForm.storageId,
+                    account_id: addForm.accountId };
+    call("add_start", payload)
       .then(function (res) {
+        // PH5: первая возрастная ссылка - явное подтверждение 18+.
+        if (res && res.adult_confirm) {
+          legalDialog(
+            "Возрастной контент",
+            "Эта площадка содержит материалы для взрослых. Подтвердите, " +
+            "что вам есть 18 лет, вы применяете эти материалы только для " +
+            "личного пользования и несёте ответственность за скачиваемое " +
+            "(docs/ACCEPTABLE_USE.md).",
+            "Мне есть 18 лет - подтверждаю"
+          ).then(function (ok) {
+            if (!ok) { toast("Ссылка не добавлена: подтверждение18+ "
+                             + "не получено", true); return; }
+            call("legal_accept", { adult: true, aup: true }).then(runAdd);
+          });
+          return;
+        }
         if (res && res.error) toast(res.error, true);
         else addOpen = true;
       });

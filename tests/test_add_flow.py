@@ -8,6 +8,7 @@
 import threading
 import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from app import repo as repo_mod
@@ -146,6 +147,24 @@ class TestPhases(AddFlowCase):
         flow = self.wait_phase(api, "done")
         self.assertEqual(flow["result"]["stats"]["new_videos"], 1)
         self.assertEqual(api.poll(0)["stats"]["total"], 1)
+
+    def test_adult_gate_blocks_until_confirmed(self):
+        """PH5: первый PH-URL требует подтверждения18+."""
+        import tempfile
+        api = self.api()
+        legal_file = Path(tempfile.mkdtemp()) / "legal.json"
+        with mock.patch("app.legal.legal_path",
+                        return_value=legal_file):
+            res = api.add_start({
+                "url": "https://www.pornhub.com/view_video.php?viewkey=ph5f12ab34cd567"})
+            self.assertTrue(res.get("adult_confirm"), res)
+            self.assertEqual(api.poll(0)["add_flow"]["phase"], "idle",
+                             "до согласия ничего не начинается")
+            api.legal_accept({"adult": True})
+            self.patch_fetch(fixture_snapshot(count=1))
+            res = api.add_start({
+                "url": "https://www.pornhub.com/view_video.php?viewkey=ph5f12ab34cd567"})
+            self.assertTrue(res.get("ok"), res)
 
     def test_full_mode_enqueues(self):
         # Качалку подменяем: здесь важен факт «полный режим поставил в
