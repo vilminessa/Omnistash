@@ -52,6 +52,8 @@
     viewMode: "list",       // «list»/«grid» - из настройки view_mode
     tileSize: "medium",     // «small»/«medium»/«large» - из tile_size
     sort: { col: "", dir: "desc" }, // сортировка списка (sort_col/sort_dir)
+    tag: "",               // P3: фильтр по тегу площадки в библиотеке
+    libTagsJson: "",       // дедуп рендера чипсов
     refresh: null,          // обновление метаданных с площадки (poll)
     mesh: null,             // запрос видео у участников (poll)
     detailId: null,         // открытая карточка (для обновления по mesh)
@@ -193,6 +195,7 @@
     if (changed("tree", snap.tree)) renderTree(snap.tree);
     if (changed("sources", snap.sources)) renderSources(snap.sources);
     renderPlatformTabs();   // P2: вкладки-площадки (дедуп внутри)
+    renderLibTags();        // P3: чипсы тегов библиотеки (дедуп внутри)
     if (changed("runs", snap.runs)) renderRuns(snap.runs);
     if (changed("queue", snap.queue)) renderQueue(snap.queue);
     if (changed("dl", snap.dl)) {
@@ -1935,6 +1938,7 @@
         rating_min: state.ratingMin || null,
         order: state.sort && state.sort.col
           ? { col: state.sort.col, dir: state.sort.dir } : null,
+        tag: state.tag || "",
         exclude_adult: true,      // P2: взрослое - только на своей вкладке
         offset: page * PAGE, limit: PAGE
       }).then(function (res) {
@@ -3591,6 +3595,27 @@
     });
   }
 
+  /* P3: чипсы тегов ОБЩЕЙ библиотеки - межсервисный словарь тегов. */
+  function renderLibTags() {
+    call("tags_popular", { limit: 40 }).then(function (res) {
+      var list = (res && res.ok) ? (res.tags || []) : [];
+      if (!list.length) { $("lib-tags").hidden = true; return; }
+      var json = JSON.stringify(list);
+      if (json === state.libTagsJson) return;
+      state.libTagsJson = json;
+      var box = $("lib-tags");
+      box.hidden = false;
+      box.innerHTML = '<button class="btn ghost ph-tag' +
+        (state.tag ? "" : " active") + '" data-slug="">все</button>' +
+        list.map(function (t) {
+          var active = state.tag === t.slug ? " active" : "";
+          return '<button class="btn ghost ph-tag' + active +
+            '" data-slug="' + esc(t.slug) + '">' + esc(t.name) +
+            " (" + t.n + ")</button>";
+        }).join("");
+    });
+  }
+
   function phLoad(reset) {
     if (reset) { platState.offset = 0; platState.rows = []; }
     var parts = platState.sort.split(":");
@@ -3683,6 +3708,15 @@
     });
     // P2: добавление ссылок прямо с вкладки площадки (та же воронка).
     $("pf-add").addEventListener("click", function () { openAdd(); });
+    // P3: фильтр по тегу в общей библиотеке (чипсы перерисовывает poll).
+    $("lib-tags").addEventListener("click", function (ev) {
+      var btn = ev.target.closest ? ev.target.closest(".ph-tag") : null;
+      if (!btn) return;
+      state.tag = btn.dataset.slug || "";
+      state.libTagsJson = "";         // перерисовать подсветку
+      renderGrid(true);
+      renderLibTags();
+    });
   }
 
   /* ------------------------------------------------------------------ *

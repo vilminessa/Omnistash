@@ -431,5 +431,21 @@ class TestAdultExclude(RepoCase):
         self.assertEqual(
             len(self.titles(platform="pornhub", exclude_adult=True)), 2)
 
+    def test_tag_filter_stacks_with_exclude(self):
+        """P3: теговый фильтр библиотеки стыкуется со скрытием взрослого."""
+        self._seed()
+        vid = self.conn.execute(
+            "SELECT id FROM videos WHERE title='Обычное'").fetchone()["id"]
+        repo.set_platform_tags(self.conn, vid, "youtube", ["Музыка"])
+        got = repo.list_videos(self.conn, exclude_adult=True, tag="музыка")
+        self.assertEqual([r["title"] for r in got["rows"]], ["Обычное"])
+        # взрослого с тем же тегом в общем фильтре нет
+        ph = self.conn.execute(
+            "SELECT id FROM videos WHERE platform='pornhub' LIMIT 1"
+        ).fetchone()["id"]
+        repo.set_platform_tags(self.conn, ph, "pornhub", ["Музыка"])
+        got = repo.list_videos(self.conn, exclude_adult=True, tag="музыка")
+        self.assertEqual(got["total"], 1)
+
 if __name__ == "__main__":
     unittest.main()
