@@ -579,6 +579,72 @@ class Api:
             if remove else 0
         return {"ok": True, "added": added, "removed": removed}
 
+    # ------------------------------------------------------------------ #
+    #  Fallback: подкачка из СЕТИ участников (площадка недоступна).
+    # ------------------------------------------------------------------ #
+
+    def mesh_request_video(self, request=None) -> dict:
+        """Запросить файл у участников сети (явное действие человека).
+
+        Сценарий: площадка заблокирована/упала, а файл есть у людей -
+        DHT-объявления и зеркала каталогов дают адреса держателей.
+        Запускается только по кнопке; результат - в журнале.
+        """
+        request = request or {}
+        url = str(request.get("url") or "").strip()
+        if not url:
+            return {"error": "Нужна ссылка на видео"}
+        try:
+            info = sources.classify(url)
+        except Exception as exc:  # noqa: BLE001 - кривая ссылка не должна валить
+            return {"error": f"Ссылка не разобрана: {exc}"}
+        remote_id = str(info.get("video_id") or "")
+        platform = str(info.get("platform") or "")
+        if not remote_id or not platform:
+            return {"error": "Из ссылки не видно ID видео - сеть не знает, "
+                             "что искать"}
+        config = self._current_settings()
+        if not config.get("mesh_enabled"):
+            return {"error": "Участие в mesh выключено: включите его в "
+                             "настройках (секция Mesh), чтобы запрашивать "
+                             "файлы у участников"}
+        with self._lock:
+            if self._mesh.get("running"):
+                return {"error": "Запрос к участникам уже идёт"}
+            self._mesh = {"running": True, "video_id": None,
+                          "title": f"сеть: {remote_id}", "error": None,
+                          "summary": None}
+        self._mesh_stop.clear()
+        self._busy = True
+        dest = str(config.get("dest_dir") or profile_dir())
+
+        def work() -> None:
+            try:
+                result = mesh_fetch.fetch_from_network(
+                    self.db.conn, remote_id, platform=platform,
+                    dest_dir=dest, log=self._log, stop=self._mesh_stop)
+            except Exception as exc:  # noqa: BLE001 - воркер не валит
+                self._log(f"Mesh: запрос в сеть упал: {exc}")
+                result = {"ok": False, "reason": str(exc)}
+            with self._lock:
+                self._mesh.update(
+                    running=False,
+                    summary=("Получено из сети участников"
+                             if result.get("ok")
+                             else f"Сеть не смогла: {result.get('reason')}"),
+                    error=None if result.get("ok")
+                    else result.get("reason"))
+                self._busy = False
+
+        thread = threading.Thread(target=work, name="omnistash-net-fetch",
+                                  daemon=True)
+        with self._lock:
+            self._mesh_thread = thread
+        thread.start()
+        self._log(f"Mesh: запрос файла {remote_id} ({platform}) у сети "
+                  "участников (площадка недоступна)")
+        return {"ok": True, "remote_id": remote_id}
+
     def platforms_list(self, request=None) -> dict:
         """Платформы для вкладок (P2): реестр + наличие контента.
 

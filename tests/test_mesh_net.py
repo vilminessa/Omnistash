@@ -321,6 +321,76 @@ class TestLimits(MeshNetCase):
                          "шифропоток не должен начинаться сверх лимита")
 
 
+class TestNetworkFetch(MeshNetCase):
+    """Fallback: подкачка из сети участников при недоступной площадке."""
+
+    def _mirror(self, digest, title="Клип"):
+        """Зеркало каталога: видели строку у устройства; ключ - наш
+        (в тестах оба узла в одном процессе, канал откроется)."""
+        origin = identity.get_identity()[1].hex()
+        self.db_b.conn.execute(
+            "INSERT INTO mesh_catalog (origin, remote_id, title, "
+            "duration_s, sha256, synced_at, updated_at, addr, fetched_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (origin, "vid000000001", title, 213, digest,
+             "2026-10-11T09:00:00", "2026-10-11T09:00:00",
+             f"127.0.0.1:{self.port}", "2026-10-11T09:00:00"))
+        repo.truststore_add(self.db_b.conn, origin,
+                            addr=f"127.0.0.1:{self.port}")
+        return origin
+
+    def test_network_sources_from_catalog(self):
+        holder = self.seed_holder()
+        self.seed_receiver()
+        self._mirror(holder["digest"])
+        addrs, expects = mesh_fetch.network_sources(
+            self.db_b.conn, "vid000000001")
+        self.assertIn(f"127.0.0.1:{self.port}", addrs)
+        self.assertEqual(expects.get(f"127.0.0.1:{self.port}"),
+                         identity.get_identity()[1].hex())
+
+    def test_fetch_from_network_via_mirror(self):
+        """Площадка недоступна - файл приходит из сети участников."""
+        holder = self.seed_holder()
+        self.seed_receiver()
+        self._mirror(holder["digest"])
+        dest = self.root / "net-out"
+        dest.mkdir()
+        logs = []
+        with mock.patch.object(mesh_verify, "probe",
+                               return_value={"checked": True, "ok": None,
+                                             "errors": []}):
+            result = mesh_fetch.fetch_from_network(
+                self.db_b.conn, "vid000000001", platform="youtube",
+                dest_dir=str(dest), log=logs.append)
+        self.assertTrue(result["ok"], result)
+        files = list(dest.glob("*.mp4"))
+        self.assertEqual(len(files), 1, files)
+        from app.indexer import file_hash
+        self.assertEqual(file_hash(files[0]), holder["digest"],
+                         "sha256 сверен с подписанным манифестом")
+        # строка появилась в индексе (контент виден в библиотеке)
+        row = self.db_b.conn.execute(
+            "SELECT id FROM videos WHERE key='youtube:vid000000001'"
+        ).fetchone()
+        self.assertIsNotNone(row, "строка должна создаться")
+        # провенанс помечен сетью
+        payload = self.db_b.conn.execute(
+            "SELECT format_json FROM files WHERE video_id=?",
+            (row["id"],)).fetchone()
+        self.assertIn("from_network", payload["format_json"])
+
+    def test_network_fetch_empty_reason(self):
+        self.seed_holder()
+        self.seed_receiver()
+        result = mesh_fetch.fetch_from_network(
+            self.db_b.conn, "vid000000001", platform="youtube",
+            dest_dir=str(self.root))
+        self.assertFalse(result["ok"])
+        self.assertIn("не знает", result["reason"],
+                      "честный вердикт: сеть не объявила файл")
+
+
 class TestRestore(MeshNetCase):
     """Полный путь восстановления: от манифеста до скачанной строки."""
 

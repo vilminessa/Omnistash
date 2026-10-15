@@ -348,3 +348,141 @@ def restore_friend(conn, catalog_row: dict, addr: str, dest_dir, *,
     log(f"Mesh: забрано у друга «{title}» ({human_size(os.path.getsize(final))}, "
         f"sha {digest[:16]}… сверен, провенанс origin=friend)")
     return True
+
+
+def network_sources(conn, remote_id: str, log=None):
+    """(addrs, expects) держателей файла: DHT-объявления + наши каталоги.
+
+    DHT - случайные участники, объявившие этот файл; каталоги (B3) -
+    адреса устройств, у которых видели строку (last_addr + история
+    адресов v8), с ожиданием их ключа (expects).
+    """
+    from .. import repo
+    log = log or (lambda message: None)
+    addrs: list = []
+    expects: dict = {}
+    node = dht.current()
+    if node is not None and node.running:
+        for found in node.lookup_sync(remote_id):
+            addr = str(found.get("addr") or "")
+            if addr and addr not in addrs:
+                addrs.append(addr)
+        log(f"Mesh: сеть - адреса из DHT: {len(addrs)}")
+    for row in conn.execute(
+            "SELECT DISTINCT origin FROM mesh_catalog WHERE remote_id=?",
+            (remote_id,)):
+        origin = str(row["origin"] or "").lower()
+        if not origin:
+            continue
+        device = repo.truststore_get(conn, origin) or {}
+        candidates = [str(device.get("last_addr") or "")]
+        candidates += [str(item["addr"]) for item
+                       in repo.peer_addr_list(conn, origin, 20)]
+        for addr in candidates:
+            if addr and addr not in addrs:
+                addrs.append(addr)
+                expects.setdefault(addr, origin)
+    return addrs, expects
+
+
+def fetch_from_network(conn, remote_id: str, *, platform: str, dest_dir,
+                       title_hint: str = "", log=None, stop=None) -> dict:
+    """Подкачать файл из СЕТИ участников (fallback недоступной площадки).
+
+    Сценарий: площадка заблокирована/упала, а контент есть у людей
+    («случайный участник, объявивший файл», или устройство из нашего
+    каталога). Барьеры сохраняются: подпись манифеста, стоп-лист, отзыв
+    доверия; strict НЕ применяется - запрос от человека явный (он и
+    есть «разрешение», а не фоновая автоподкачка).
+
+    Возвращает {"ok": bool, "path"?, "digest"?, "reason"?}; строку
+    создаёт при необходимости (title_hint/из зеркала каталога).
+    """
+    log = log or (lambda message: None)
+    from .. import repo
+    from ..util import now_iso
+    banned = feedback.banned_set(conn)
+    addrs, expects = network_sources(conn, remote_id, log)
+    title = str(title_hint or "").strip()
+    if not title:
+        row = conn.execute(
+            "SELECT title FROM mesh_catalog WHERE remote_id=? "
+            "AND title <> '' ORDER BY fetched_at DESC LIMIT 1",
+            (remote_id,)).fetchone()
+        title = str(row["title"]) if row else ""
+    if not addrs:
+        return {"ok": False,
+                "reason": "участники не объявили этот файл - сеть его "
+                          "не знает (попробуйте позже или включите "
+                          "помощь участникам у владельца файла)"}
+    pairs = client.collect_manifests(remote_id, addrs,
+                                    expects=expects or None)
+    pairs = [(a, item) for a, item in pairs
+             if manifest.verify(item) is None]
+    pairs = _drop_revoked(conn, pairs, log)
+    digest = client.pick_digest(pairs, banned)
+    if not digest:
+        return {"ok": False,
+                "reason": "нет пригодных манифестов (стоп-лист, подпись "
+                          "или адресаты недоступны)"}
+    decision = verify.review(digest, own_digest=None,
+                             manifests=[item for _a, item in pairs],
+                             banned=banned)
+    if not decision["ok"]:
+        return {"ok": False, "reason": decision["reason"]}
+    peer, item = next(
+        ((a, m) for a, m in pairs
+         if m.get("sha256") == digest and manifest.verify(m) is None),
+        (None, None))
+    if not peer:
+        return {"ok": False, "reason": "носитель манифеста недоступен"}
+    part = os.path.join(str(dest_dir), f".network_{remote_id}.part")
+    try:
+        client.fetch(remote_id, peer, part, expect=str(item.get("pubkey")
+                                                        or "") or None,
+                     stop=stop)
+        got = file_hash(part)
+        if got != digest:
+            raise RuntimeError(f"хеш не сошёлся (заявлено {digest[:16]}…, "
+                               f"получено {got[:16]}…)")
+        structure = verify.probe(part, None)
+        if structure["ok"] is False:
+            raise RuntimeError("структурная проверка: "
+                               + "; ".join(structure["errors"]))
+        ext = client.sniffer_ext(part)
+        name = sanitize_name(title or remote_id)
+        final = os.path.join(str(dest_dir), f"{name} [{remote_id}].{ext}")
+        os.replace(part, final)
+    except Exception as exc:  # noqa: BLE001 - честный отказ в журнал
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        log(f"Mesh: подкачка из сети не удалась: {exc}")
+        return {"ok": False, "reason": str(exc)}
+    # Строка в индексе: подкачанный контент должен быть виден.
+    row = conn.execute(
+        "SELECT id FROM videos WHERE key=?",
+        (f"{platform}:{remote_id}",)).fetchone()
+    if row:
+        vid = int(row["id"])
+    else:
+        vid, _created = repo.upsert_video(conn, {
+            "platform": platform, "remote_id": remote_id,
+            "title": title or f"участники: {remote_id}",
+            "channel": None}, full=False)
+    size = os.path.getsize(final)
+    if vid:
+        repo.record_file(conn, vid, final, "video", size=size,
+                         mtime=os.path.getmtime(final), digest=got,
+                         format_json=json.dumps({
+                             "source": "mesh", "peer": str(item.get("pubkey")
+                                                            or ""),
+                             "from_network": True, "fetched_at": now_iso(),
+                         }, ensure_ascii=False))
+        repo.peer_addr_add(conn, str(item.get("pubkey") or ""), peer,
+                           "fetch")
+    log(f"Mesh: подкачано из сети «{title or remote_id}» "
+        f"({human_size(size)}, sha {digest[:16]}… сверен, "
+        f"источник {peer})")
+    return {"ok": True, "path": final, "digest": digest, "peer": peer}

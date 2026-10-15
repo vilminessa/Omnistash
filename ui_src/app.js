@@ -3565,8 +3565,25 @@
           });
           return;
         }
-        if (res && res.error) toast(res.error, true);
-        else addOpen = true;
+        if (res && res.error) {
+          // Fallback «сеть omnistash»: площадка недоступна из сети
+          // пользователя - человек явно может запросить файл у участников.
+          if (/Площадка не ответила|недоступна из вашей сети/.test(res.error) &&
+              /viewkey|embed|video/i.test(addForm.url)) {
+            if (confirm(res.error + "\n\nЗапросить этот файл у участников "
+                + "сети Omnistash (DHT и каталоги участников)?")) {
+              call("mesh_request_video", { url: addForm.url.trim() })
+                .then(function (r2) {
+                  if (r2 && r2.error) toast(r2.error, true);
+                  else toast("Запрос участникам запущен - ход в журнале");
+                });
+            }
+            return;
+          }
+          toast(res.error, true);
+          return;
+        }
+        addOpen = true;
       });
   }
 
