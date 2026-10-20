@@ -668,6 +668,74 @@ class Api:
                         "hidden": pid in hidden})
         return {"ok": True, "platforms": out}
 
+    # ------------------------------------------------------------------ #
+    #  Каталог площадок (site-like browsing)
+    # ------------------------------------------------------------------ #
+
+    def catalog_list(self, request=None) -> dict:
+        request = request or {}
+        try:
+            platform = str(request.get("platform") or "").lower()
+            mode = str(request.get("mode") or "trending")
+            query = str(request.get("query") or "")
+            page = int(request.get("page") or 1)
+            force = bool(request.get("force"))
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"Некорректный запрос: {exc}"}
+        if not platform:
+            return {"error": "Нужна площадка"}
+        # 18+ гейт для взрослых платформ
+        plat = platforms_mod.by_id(platform) or {}
+        if plat.get("adult") and not self._legal_ok():
+            return {"error": "Требуется подтверждение 18+", "need_adult": True}
+        settings = self._current_settings()
+        if not settings.get("mesh_enabled") and platform in ("youtube", "pornhub"):
+            pass
+        try:
+            from . import catalog
+            res = catalog.fetch(platform, mode=mode, query=query, page=page,
+                                settings=settings, force=force)
+        except catalog.CatalogError as exc:
+            msg = str(exc)
+            if "недоступна" in msg.lower() and settings.get("mesh_enabled"):
+                return {"error": msg, "can_mesh": True,
+                        "can_retry": True}
+            if "недоступна" in msg.lower():
+                return {"error": msg, "can_retry": True}
+            return {"error": msg}
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc)}
+        # Обогащение: уже ли в библиотеке
+        items = res.get("items") or []
+        try:
+            keys = []
+            for it in items:
+                pid = str(it.get("platform") or platform)
+                vid = str(it.get("video_id") or "")
+                if vid:
+                    keys.append(f"{pid}:{vid}")
+            added = set()
+            if keys:
+                qmarks = ",".join("?" for _ in keys)
+                for row in self.db.conn.execute(
+                        f"SELECT key FROM videos WHERE key IN ({qmarks})", keys):
+                    added.add(str(row["key"]))
+            for it in items:
+                pid = str(it.get("platform") or platform)
+                vid = str(it.get("video_id") or "")
+                if vid and f"{pid}:{vid}" in added:
+                    it["added"] = True
+        except Exception:
+            pass
+        res["items"] = items
+        return res
+
+    def catalog_search(self, request=None) -> dict:
+        request = request or {}
+        request = dict(request)
+        request["mode"] = "search"
+        return self.catalog_list(request)
+
     def tags_popular(self, request=None) -> dict:
         """Теги площадки счётчиками - чипсы фильтра (PH3, вкладка 18+)."""
         request = request or {}

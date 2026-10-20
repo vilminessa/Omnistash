@@ -265,8 +265,13 @@
   <section class="panel" id="panel-platform" hidden>
     <div class="toolbar">
       <b id="pf-title">Площадка</b>
+      <div class="seg" id="pf-view" title="Режим просмотра">
+        <button class="seg-btn active" data-view="library">Библиотека</button>
+        <button class="seg-btn" data-view="catalog">Каталог</button>
+      </div>
       <input type="search" id="ph-search"
              placeholder="Поиск по названию и описанию…" autocomplete="off">
+      <input type="search" id="cat-search" placeholder="Поиск по {площадка}..." autocomplete="off" hidden>
       <select id="ph-sort" title="Сортировка">
         <option value="date:desc">по дате (новые)</option>
         <option value="date:asc">по дате (старые)</option>
@@ -277,26 +282,36 @@
       <span class="spacer"></span>
       <button class="btn ghost" id="pf-add"
               title="Добавить видео/канал/плейлист этой площадки">+ Добавить</button>
+      <button class="btn ghost" id="cat-refresh" hidden title="Обновить">↻ Обновить</button>
       <span class="muted" id="ph-count"></span>
     </div>
     <div class="toolbar" id="ph-tags" aria-label="Фильтр по тегам"></div>
-    <div class="table-wrap">
-      <table class="table">
-        <thead>
-          <tr>
-            <th>Название</th>
-            <th>Канал</th>
-            <th style="width:72px">Время</th>
-            <th style="width:100px">Дата</th>
-            <th style="width:92px">Просмотры</th>
-          </tr>
-        </thead>
-        <tbody id="ph-body"></tbody>
-      </table>
+    <div id="ph-library-wrap">
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Название</th>
+              <th>Канал</th>
+              <th style="width:72px">Время</th>
+              <th style="width:100px">Дата</th>
+              <th style="width:92px">Просмотры</th>
+            </tr>
+          </thead>
+          <tbody id="ph-body"></tbody>
+        </table>
+      </div>
+      <div class="empty" id="ph-empty" hidden></div>
+      <div style="padding:8px; text-align:center">
+        <button class="btn ghost" id="ph-more" hidden>Показать ещё</button>
+      </div>
     </div>
-    <div class="empty" id="ph-empty" hidden></div>
-    <div style="padding:8px; text-align:center">
-      <button class="btn ghost" id="ph-more" hidden>Показать ещё</button>
+    <div id="cat-wrap" hidden>
+      <div class="empty" id="cat-empty" hidden></div>
+      <div id="cat-grid" class="card-grid"></div>
+      <div style="padding:12px; text-align:center">
+        <button class="btn ghost" id="cat-more" hidden>Загрузить ещё</button>
+      </div>
     </div>
   </section>
 

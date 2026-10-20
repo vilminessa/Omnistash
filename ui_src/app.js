@@ -3675,6 +3675,8 @@
                     tag: "", sort: "date:desc",
                     offset: 0, rows: [], total: 0, tags: [] };
   var platTabsJson = "";
+  var catalogState = { platform: "", view: "library", query: "", page: 1,
+                       items: [], loading: false, ended: false, loaded: false };
 
   function openPlatform(id, label, adult) {
     platState.platform = id;
@@ -3683,6 +3685,25 @@
     $("pf-title").textContent = platState.label +
       (platState.adult ? " · 18+" : "");
     $("ph-search").placeholder = "Поиск на " + platState.label + "…";
+    // Сброс каталога при смене площадки
+    catalogState.platform = id;
+    catalogState.query = "";
+    var cs = $("cat-search");
+    if (cs) cs.value = "";
+    catalogState.page = 1;
+    catalogState.items = [];
+    catalogState.loaded = false;
+    catalogState.ended = false;
+    var pfv = $("pf-view");
+    if (pfv) {
+      pfv.querySelectorAll(".seg-btn").forEach(function (x) { x.classList.toggle("active", x.dataset.view === "library"); });
+    }
+    $("ph-library-wrap").hidden = false;
+    $("cat-wrap").hidden = true;
+    $("ph-search").hidden = false;
+    $("ph-sort").hidden = false;
+    if ($("cat-search")) $("cat-search").hidden = true;
+    if ($("cat-refresh")) $("cat-refresh").hidden = true;
     switchTab("platform");
   }
 
@@ -3796,6 +3817,98 @@
       });
   }
 
+  function catLoad(reset, force) {
+    if (catalogState.loading) return;
+    if (reset) { catalogState.page = 1; catalogState.items = []; catalogState.ended = false; }
+    if (catalogState.ended && !reset) return;
+    catalogState.loading = true;
+    var grid = $("cat-grid");
+    var empty = $("cat-empty");
+    var more = $("cat-more");
+    if (reset) {
+      grid.innerHTML = '<div class="muted">Загрузка...</div>';
+      empty.hidden = true;
+    }
+    more.hidden = true;
+    call("catalog_list", {
+      platform: catalogState.platform,
+      mode: catalogState.query ? "search" : "trending",
+      query: catalogState.query,
+      page: catalogState.page,
+      force: !!force
+    }).then(function (res) {
+      if (reset) grid.innerHTML = "";
+      catalogState.loading = false;
+      if (!res || res.error) {
+        if (reset) {
+          empty.hidden = false;
+          if (res && res.need_adult) {
+            empty.textContent = "Требуется подтверждение 18+. Включите доступ в настройках/возрастном гейте.";
+          } else if (res && res.can_mesh) {
+            empty.innerHTML = (res.error || "Площадка недоступна из вашей сети") +
+              ' <button class="btn ghost" id="cat-mesh">Запросить у участников сети Omnistash</button> <button class="btn ghost" id="cat-retry">Повторить</button>';
+            setTimeout(function () {
+              var m = $("cat-mesh"); if (m) m.onclick = function () { call("mesh_request_video", { url: "" }); toast("Укажите ссылку в вкладке Библиотека для запроса"); };
+              var r = $("cat-retry"); if (r) r.onclick = function () { catLoad(true); };
+            }, 0);
+          } else {
+            empty.textContent = res.error || "Не удалось загрузить каталог";
+            var r2 = document.createElement("button");
+            r2.className = "btn ghost";
+            r2.textContent = "Повторить";
+            r2.onclick = function () { catLoad(true); };
+            empty.appendChild(document.createElement("br"));
+            empty.appendChild(r2);
+          }
+        } else {
+          toast(res.error || "Ошибка каталога", true);
+        }
+        catalogState.loaded = true;
+        return;
+      }
+      var items = res.items || [];
+      if (reset) catalogState.items = items;
+      else catalogState.items = catalogState.items.concat(items);
+      if (!items.length) catalogState.ended = true;
+      catalogState.loaded = true;
+      if (!catalogState.items.length) {
+        empty.hidden = false;
+        empty.textContent = "Каталог пуст";
+        return;
+      }
+      empty.hidden = true;
+      var html = catalogState.items.map(function (it) {
+        var dur = it.duration_s ? humanDuration(it.duration_s) : "";
+        var views = it.views != null ? bigCount(it.views) : "";
+        var meta = [views ? views + " просмотров" : "", it.author ? it.author : ""].filter(Boolean).join(" · ");
+        var addBtn = it.added ? '<span class="muted">В библиотеке</span>' : '<button class="btn small cat-add">+ Добавить</button>';
+        return '<div class="cat-card' + (it.added ? " added" : "") + '" data-id="' + esc(it.video_id) + '" data-url="' + esc(it.url) + '" data-title="' + esc(it.title) + '" data-thumb="' + esc(it.thumb || "") + '" data-dur="' + esc(dur) + '" data-views="' + esc(views) + '" data-author="' + esc(it.author || "") + '">' +
+          '<div class="cat-thumb"><img src="' + esc(it.thumb || "") + '" onerror="this.style.display=\'none\'"><div class="cat-dur">' + esc(dur) + '</div></div>' +
+          '<div class="cat-body"><div class="cat-title">' + esc(it.title) + '</div><div class="cat-meta">' + esc(meta) + '</div></div>' +
+          '<div class="cat-actions">' + addBtn + '</div>' +
+        '</div>';
+      }).join("");
+      grid.innerHTML = html;
+      more.hidden = catalogState.ended;
+      if (!catalogState.ended) {
+        // бесконечный скролл + кнопка
+        more.style.display = "";
+        setTimeout(function () {
+          var io = new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting && !catalogState.loading && !catalogState.ended) {
+                catalogState.page += 1;
+                catLoad(false);
+                io.disconnect();
+              }
+            });
+          }, { rootMargin: "200px" });
+          io.observe(more);
+        }, 0);
+      }
+    });
+  }
+
   function bindPh() {
     var search = $("ph-search");
     var timer = null;
@@ -3826,6 +3939,60 @@
     });
     // P2: добавление ссылок прямо с вкладки площадки (та же воронка).
     $("pf-add").addEventListener("click", function () { openAdd(); });
+    // Каталог
+    var pfView = $("pf-view");
+    if (pfView) {
+      pfView.querySelectorAll(".seg-btn").forEach(function (b) {
+        b.addEventListener("click", function () {
+          pfView.querySelectorAll(".seg-btn").forEach(function (x) { x.classList.remove("active"); });
+          b.classList.add("active");
+          var v = b.dataset.view;
+          catalogState.view = v;
+          $("ph-library-wrap").hidden = (v !== "library");
+          $("cat-wrap").hidden = (v !== "catalog");
+          $("ph-search").hidden = (v !== "library");
+          $("ph-sort").hidden = (v !== "library");
+          $("cat-search").hidden = (v !== "catalog");
+          $("cat-refresh").hidden = (v !== "catalog");
+          if (v === "catalog" && !catalogState.loaded) catLoad(true);
+        });
+      });
+    }
+    var catSearch = $("cat-search");
+    if (catSearch) {
+      var ctimer = null;
+      catSearch.addEventListener("input", function () {
+        clearTimeout(ctimer);
+        ctimer = setTimeout(function () {
+          catalogState.query = catSearch.value.trim();
+          catLoad(true);
+        }, 300);
+      });
+    }
+    $("cat-refresh").addEventListener("click", function () { catLoad(true, true); });
+    $("cat-more").addEventListener("click", function () { catLoad(false); });
+    $("cat-grid").addEventListener("click", function (ev) {
+      var card = ev.target.closest ? ev.target.closest(".cat-card") : null;
+      if (!card) return;
+      var id = card.dataset.id;
+      var url = card.dataset.url;
+      var title = card.dataset.title;
+      var thumb = card.dataset.thumb;
+      var dur = card.dataset.dur || "";
+      var views = card.dataset.views || "";
+      var author = card.dataset.author || "";
+      if (ev.target.closest && (ev.target.closest(".cat-title") || ev.target.closest(".cat-thumb"))) {
+        // Мини-диалог добавления: заполним форму
+        $("add-url").value = url;
+        openAdd();
+        return;
+      }
+      if (ev.target.closest && ev.target.closest(".cat-add")) {
+        $("add-url").value = url;
+        openAdd();
+        return;
+      }
+    });
     // P3: фильтр по тегу в общей библиотеке (чипсы перерисовывает poll).
     $("lib-tags").addEventListener("click", function (ev) {
       var btn = ev.target.closest ? ev.target.closest(".ph-tag") : null;
