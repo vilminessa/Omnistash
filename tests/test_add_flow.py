@@ -421,8 +421,11 @@ class TestVideoSnapshot(unittest.TestCase):
                 "upload_date": "20260101"}
         calls = []
 
-        def fake(url, *, settings=None, stop=None):
+        seen = {}
+
+        def fake(url, *, settings=None, stop=None, cookiefile=None):
             calls.append(url)
+            seen["cookiefile"] = cookiefile
             return dict(info)
 
         with mock.patch.object(sources, "fetch_video", side_effect=fake):
@@ -432,6 +435,8 @@ class TestVideoSnapshot(unittest.TestCase):
                 on_progress=lambda got, total: calls.append((got, total)),
                 stop=None, account_id=None)
         self.assertEqual(calls[0], "https://youtu.be/vidfixtur01")
+        self.assertIsNone(seen["cookiefile"],
+                          "без привязанного аккаунта куки не подставляются")
         self.assertIn((1, 1), calls, "прогресс фиксированный: 1 из 1")
         self.assertEqual(snap["total"], 1)
         self.assertEqual(len(snap["entries"]), 1)

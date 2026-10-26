@@ -1553,7 +1553,7 @@ class Api:
                              "скачиваемое"}
         if kind not in ("playlist", "channel", "video"):
             return {"error": "Поддерживаются ссылки на плейлист, канал "
-                             "и одиночное видео"}
+                             "и одиночное видео", "kind": "unsupported"}
 
         with self._lock:
             if self._add.get("phase") in ("fetching", "committing"):
@@ -1681,17 +1681,21 @@ class Api:
             self._finish_fetch(None, None, error=None, aborted=True)
             return
         except sources.FetchError as exc:
-            self._finish_fetch(None, None, error=str(exc))
+            self._finish_fetch(None, None, error=str(exc),
+                               kind=getattr(exc, "kind", "network"))
             return
         except Exception as exc:  # noqa: BLE001 - сбой площадки не должен молчать
             self._log("Индексация упала: " + str(exc))
-            self._finish_fetch(None, None, error=f"Не удалось получить источник: {exc}")
+            self._finish_fetch(None, None,
+                               error=f"Не удалось получить источник: {exc}",
+                               kind="network")
             return
 
         plan = repo.plan_diff(self.db.conn, snapshot)
         self._finish_fetch(snapshot, plan)
 
-    def _finish_fetch(self, snapshot, plan, *, error=None, aborted=False) -> None:
+    def _finish_fetch(self, snapshot, plan, *, error=None, aborted=False,
+                      kind=None) -> None:
         # Пользователь мог нажать «Отмена», пока запрос ещё шёл: маленький
         # плейлист успевает прийти целиком, но снимать план в этом случае
         # уже поздно - он просил остановиться.
@@ -1699,10 +1703,15 @@ class Api:
             aborted, error, snapshot, plan = True, None, None, None
         with self._lock:
             if aborted:
-                self._add.update(phase="idle", fetch=None, plan=None, error=None)
+                self._add.update(phase="idle", fetch=None, plan=None,
+                                 error=None, error_kind=None)
                 self._status = "Готов."
             elif error:
-                self._add.update(phase="error", fetch=None, plan=None, error=error)
+                # kind - причина отказа (unavailable/blocked/bot/network):
+                # UI по ней предлагает обход/VPN, запрос у участников сети
+                # или вход в аккаунт, а не единый «попробовать снова».
+                self._add.update(phase="error", fetch=None, plan=None,
+                                 error=error, error_kind=kind or "network")
                 self._status = "Ошибка"
             else:
                 counts = plan["counts"]

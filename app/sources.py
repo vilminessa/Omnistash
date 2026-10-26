@@ -31,11 +31,71 @@ SUPPORTED = ("playlist", "channel", "video")
 
 
 class FetchError(Exception):
-    """Площадка не ответила или вернула то, что мы не просили."""
+    """Площадка не ответила или вернула то, что мы не просили.
+
+    kind - причина, чтобы интерфейс ветвил подсказки честно:
+      unavailable - само видео недоступно на площадке (удалено, приватное,
+        возрастное, geo-ограничение): это НЕ блокировка нашей сети, повтор
+        с ней не поможет; файл может лежать у участников mesh (тогда
+        помогает запрос у сети);
+      blocked     - площадка недоступна из сети пользователя (Connection
+        reset/timeout/403/410/429): лечится обходом/VPN или mesh;
+      bot         - площадка требует подтверждение человека («не бот»,
+        вход в аккаунт): лечится привязкой аккаунта или куки браузера;
+      network     - прочий сетевой отказ;
+      empty       - площадка ответила, но описания нет.
+    """
+
+    def __init__(self, message: str, kind: str = "network") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 class Aborted(Exception):
     """Пользователь нажал «Отмена» между чанками - БД не тронута."""
+
+
+def classify_failure(text: str) -> str:
+    """Причина отказа площадки по тексту ответа (один путь для всех мест).
+
+    Порядок важен: «недоступно на площадке» важнее «недоступна из сети» -
+    если площадка сама сказала «Offline/unavailable», повтор с VPN ничего
+    не даст и подсказка про блокировку была бы ложью.
+    """
+    lowered = clean_text(text).lower()
+    if ("confirm you're not a bot" in lowered or "sign in to confirm" in lowered
+            or "age-restricted" in lowered and "sign in" in lowered
+            or "bot check" in lowered):
+        return "bot"
+    if ("offline" in lowered or "video unavailable" in lowered
+            or "unavailable" in lowered or "private video" in lowered
+            or "removed" in lowered or "does not exist" in lowered
+            or "no longer available" in lowered or "404" in lowered):
+        return "unavailable"
+    if ("timed out" in lowered or "connection" in lowered
+            or "reset by peer" in lowered or " refused" in lowered
+            or "403" in lowered or "410" in lowered or "429" in lowered
+            or "network" in lowered or "unable to download webpage" in lowered):
+        return "blocked"
+    return "network"
+
+
+def failure_message(kind: str, detail: str) -> str:
+    """Человеческий текст отказа по его причине (detail - ответ площадки)."""
+    if kind == "unavailable":
+        return ("Видео недоступно на площадке: удалено, приватное, "
+                "возрастное или geo-ограничение - повтор не поможет. Если "
+                "файл есть у участников сети Omnistash, его можно запросить "
+                "у них")
+    if kind == "blocked":
+        return (f"Площадка не ответила: {detail} (недоступна из вашей сети - "
+                "возможно, региональная блокировка: поможет обход/VPN, либо "
+                "запрос участникам mesh)")
+    if kind == "bot":
+        return ("Площадка требует подтверждение, что вы человек: привяжите "
+                "аккаунт Google в настройках или включите куки из браузера, "
+                "затем повторите")
+    return f"Площадка не ответила: {detail}"
 
 
 def _opts(settings: dict | None) -> dict:
@@ -96,17 +156,23 @@ def _extract(request_url: str, items: str, settings: dict | None = None,
         with _youtube(opts) as ydl:
             return ydl.extract_info(request_url, download=False)
     except yt_dlp.utils.DownloadError as exc:
-        raise FetchError(f"Площадка не ответила: {clean_text(exc)}") from exc
+        detail = clean_text(exc)
+        kind = classify_failure(detail)
+        raise FetchError(failure_message(kind, detail), kind=kind) from exc
 
 
-def fetch_video(url: str, *, settings: dict | None = None,
-                stop=None) -> dict:
+def fetch_video(url: str, *, settings: dict | None = None, stop=None,
+                cookiefile=None) -> dict:
     """Полные метаданные ОДНОГО видео (без файлов).
 
     Этим же конвейером пользуется кнопка «Обновить метаданные»: полный
     запрос несёт то, чего нет в плоском списке плейлиста - лайки,
-    комменты, дату публикации, описание и обложку. Один запрос на видео,
+    комменты, дату публикации, описание и обложка. Один запрос на видео,
     поэтому stop проверяется между видео (в воркере), а не здесь.
+
+    cookiefile - куки привязанного аккаунта источника (F2): раньше для
+    одиночного видео они не применялись, поэтому возрастное/приватное
+    видео не добавлялось даже с входом в аккаунт.
     """
     settings = settings or {}
     opts = {
@@ -117,27 +183,26 @@ def fetch_video(url: str, *, settings: dict | None = None,
         "socket_timeout": 25,
         "retries": max(int(settings.get("retries") or 0), 1),
     }
-    browser_opt = google_auth.browser_cookie_option(settings)
-    if browser_opt:
-        opts["cookiesfrombrowser"] = browser_opt
+    if cookiefile:
+        opts["cookiefile"] = str(cookiefile)
+    else:
+        browser_opt = google_auth.browser_cookie_option(settings)
+        if browser_opt:
+            # Режим «куки из браузера»: копий нет, читает сам yt-dlp.
+            opts["cookiesfrombrowser"] = browser_opt
     try:
         with _youtube(opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except yt_dlp.utils.DownloadError as exc:
         text = clean_text(exc)
-        hint = ""
-        if ("Connection aborted" in text or "timed out" in text
-                or "410" in text or "403" in text):
-            # Площадка может быть недоступна из сети пользователя
-            # (блокировка региона/провайдера) - честная подсказка вместо
-            # молчаливого таймаута; лечится средствами доступа пользователя
-            # (VPN/прокси) или участием mesh (relay - этап 3).
-            hint = (" (площадка недоступна из вашей сети - возможно, "
-                    "региональная блокировка: поможет VPN/прокси, либо "
-                    "запрос участникам mesh)")
-        raise FetchError(f"Площадка не ответила: {text}{hint}") from exc
+        kind = classify_failure(text)
+        raise FetchError(failure_message(kind, text), kind=kind) from exc
+    except Exception as exc:  # noqa: BLE001 - кривой ответ = честный отказ
+        text = clean_text(exc)
+        kind = classify_failure(text)
+        raise FetchError(failure_message(kind, text), kind=kind) from exc
     if not isinstance(info, dict) or not info.get("id"):
-        raise FetchError("площадка не вернула описание видео")
+        raise FetchError("площадка не вернула описание видео", kind="empty")
     return info
 
 
@@ -185,7 +250,8 @@ def fetch_snapshot(url: str, *, settings: dict | None = None,
     platform = str(info.get("platform") or PLATFORM)
     if kind not in SUPPORTED:
         raise FetchError(
-            "Поддерживаются ссылки на плейлист, канал и одиночное видео")
+            "Поддерживаются ссылки на плейлист, канал и одиночное видео",
+            kind="unsupported")
     if kind == "video":
         return _snapshot_video(url, platform=platform, settings=settings,
                                on_progress=on_progress, stop=stop,
@@ -208,10 +274,14 @@ def _snapshot_video(url: str, *, platform: str, settings: dict | None,
     метаданные». noplaylist гарантирует, что &list= в ссылке не
     развернёт весь плейлист.
     """
-    info = fetch_video(url, settings=settings, stop=stop)
+    # Куки аккаунта источника на время запроса: приватное/возрастное
+    # видео добавляется только под входом, иначе площадка отказывает.
+    with _account_cookiefile(account_id) as cookiefile:
+        info = fetch_video(url, settings=settings, stop=stop,
+                           cookiefile=cookiefile)
     video_id = to_text(info.get("id") or "")
     if not video_id:
-        raise FetchError("площадка не вернула описание видео")
+        raise FetchError("площадка не вернула описание видео", kind="empty")
     playlist = normalize_playlist(info, kind="video", platform=platform)
     entry = flat_entry(info, position=1, platform=platform)
     if on_progress:

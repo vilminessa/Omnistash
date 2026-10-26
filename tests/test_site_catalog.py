@@ -270,10 +270,12 @@ class TestPagination(CatalogCase):
 
     def test_empty_next_page_is_end_not_error(self):
         """Следняя страница пустая - это конец листа, а не ошибка «повтори»."""
-        with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
-                               scripted([{"entries": []}, {"entries": []},
-                                         {"entries": []}])):
-            res = catalog.fetch(platform="youtube", page=2, force=True)
+        with mock.patch.object(catalog, "_probe",
+                               lambda url, settings: "ok"):
+            with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
+                                   scripted([{"entries": []}, {"entries": []},
+                                             {"entries": []}])):
+                res = catalog.fetch(platform="youtube", page=2, force=True)
         self.assertTrue(res["ok"])
         self.assertEqual(res["items"], [])
         self.assertFalse(res["has_more"])

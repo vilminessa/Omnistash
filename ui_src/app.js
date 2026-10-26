@@ -203,7 +203,16 @@
       updateBotNote();
     }
     if (changed("sync", snap.sync)) renderSync(snap.sync);
-    if (changed("add", snap.add_flow)) renderAddFlow(snap.add_flow);
+    if (changed("add", snap.add_flow)) {
+      var flow = snap.add_flow;
+      // Карточка каталога, которая отказала как «недоступна на площадке»,
+      // гасится до перезагрузки каталога: повторные попытки по той же
+      // ссылке бессмысленны (видео удалено/приватное/geo).
+      if (flow && flow.phase === "error" && flow.error_kind === "unavailable") {
+        markCatalogUnavailable(flow.url);
+      }
+      renderAddFlow(flow);
+    }
     if (changed("migrate", snap.migrate)) {
       state.migrate = snap.migrate;
       if (!$("migrate-overlay").hidden) renderMigrateBody();
@@ -3452,9 +3461,25 @@
     } else if (flow.phase === "error") {
       title.textContent = "Не получилось";
       html = '<div class="notice err">' + esc(flow.error || "Неизвестная ошибка") +
-        "</div><div class=\"card-actions\">" +
-        '<button class="btn" data-act="close">Закрыть</button>' +
-        '<button class="btn primary" data-act="retry">Попробовать снова</button></div>';
+        "</div>";
+      var actions = '<button class="btn" data-act="close">Закрыть</button>';
+      // Подсказки по причине отказа (kind из gui): площадка сама сказала
+      // «недоступно» - повтор не поможет, но файл может быть у участников
+      // сети; сеть блокирует площадку - обход/VPN или тот же запрос у сети;
+      // анти-бот - вход в аккаунт.
+      var kind = flow.error_kind || "";
+      if (kind === "unavailable" || kind === "blocked") {
+        actions += '<button class="btn ghost" data-act="mesh">' +
+          "Запросить у участников сети</button>";
+        actions += '<button class="btn ghost" data-act="site">' +
+          "Открыть на площадке</button>";
+      }
+      if (kind === "bot") {
+        actions += '<button class="btn ghost" data-act="site">' +
+          "Открыть на площадке</button>";
+      }
+      actions += '<button class="btn primary" data-act="retry">Попробовать снова</button>';
+      html += '<div class="card-actions">' + actions + "</div>";
 
     } else {
       title.textContent = "Добавить источник";
@@ -3566,20 +3591,10 @@
           return;
         }
         if (res && res.error) {
-          // Fallback «сеть omnistash»: площадка недоступна из сети
-          // пользователя - человек явно может запросить файл у участников.
-          if (/Площадка не ответила|недоступна из вашей сети/.test(res.error) &&
-              /viewkey|embed|video/i.test(addForm.url)) {
-            if (confirm(res.error + "\n\nЗапросить этот файл у участников "
-                + "сети Omnistash (DHT и каталоги участников)?")) {
-              call("mesh_request_video", { url: addForm.url.trim() })
-                .then(function (r2) {
-                  if (r2 && r2.error) toast(r2.error, true);
-                  else toast("Запрос участникам запущен - ход в журнале");
-                });
-            }
-            return;
-          }
+          // Асинхронный отказ площадки приходит позже - в фазе error
+          // диалога, где есть кнопки «запросить у сети» и «открыть на
+          // площадке» по причине отказа. Здесь только короткие отказ
+          // сиюминутных проверок (ссылка, аккаунт, возраст, очередь).
           toast(res.error, true);
           return;
         }
@@ -3600,6 +3615,21 @@
       return;
     }
     if (action === "retry") { closeAdd(); setTimeout(openAdd, 60); return; }
+    if (action === "mesh") {
+      // Явный запрос файла у участников сети (DHT + каталоги участников):
+      // файл мог сохраниться у кого-то раньше, даже когда площадка
+      // недоступна или видео удалено.
+      call("mesh_request_video", { url: addForm.url.trim() })
+        .then(function (res) {
+          if (res && res.error) toast(res.error, true);
+          else toast("Запрос участникам запущен - ход в журнале");
+        });
+      return;
+    }
+    if (action === "site") {
+      call("open_url", addForm.url.trim());
+      return;
+    }
     if (action === "queue") { closeAdd(); switchTab("queue"); return; }
     if (action === "pick-all") {
       Array.prototype.forEach.call(
@@ -4101,6 +4131,18 @@
     catRender();
   }
 
+  function markCatalogUnavailable(url) {
+    if (!url || !catalogState.items.length) return;
+    var hit = false;
+    catalogState.items.forEach(function (it) {
+      if (it.url === url || (it.video_id && url.indexOf(it.video_id) !== -1)) {
+        it.failed = true;
+        hit = true;
+      }
+    });
+    if (hit && catalogState.view === "catalog") catRender();
+  }
+
   function catRender() {
     var grid = $("cat-grid");
     var more = $("cat-more");
@@ -4120,11 +4162,13 @@
                   it.author ? it.author : "",
                   people ? "исполнители: " + people : ""]
         .filter(Boolean).join(" · ");
-      var action = it.added
-        ? '<span class="muted">В библиотеке</span>'
-        : '<button class="btn small cat-add" data-i="' + i + '">+ Добавить</button>';
+      var action = it.failed
+        ? '<span class="muted">недоступно на площадке</span>'
+        : it.added
+          ? '<span class="muted">В библиотеке</span>'
+          : '<button class="btn small cat-add" data-i="' + i + '">+ Добавить</button>';
       return '<div class="cat-card' + (it.added ? " added" : "") +
-        '" data-i="' + i + '">' +
+        (it.failed ? " failed" : "") + '" data-i="' + i + '">' +
         '<div class="cat-thumb" data-i="' + i + '"' +
         ' title="' + esc(it.title) + '">' +
         (it.thumb ? '<img src="' + esc(it.thumb) + '" loading="lazy" ' +
@@ -4309,6 +4353,11 @@
       if (!node) return;
       var item = catalogState.items[Number(node.dataset.i)];
       if (!item || !item.url) { toast("У карточки нет ссылки", true); return; }
+      if (item.failed) {
+        toast("Это видео недоступно на площадке (удалено, приватное или "
+              + "geo-ограничение): повтор не поможет", true);
+        return;
+      }
       addForm.url = item.url;
       openAdd();                       // диалог со ссылкой уже вставлена
       if (add) runAdd();               // кнопка «Добавить» - сразу план
