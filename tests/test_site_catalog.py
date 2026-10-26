@@ -33,13 +33,17 @@ PH_HTML = """
     <img src="https://pix.phncdn.com/th.jpg" alt="Первый клип">
   </a>
   <span class="title"><a href="/view_video.php?viewkey=abc123">Первый клип</a></span>
+  <div class="tags">
+    <a href="/video/tag/uncut">uncut</a>
+    <a href="/video/tag/glasses">glasses</a>
+    <a href="/model/made-of-two">Made of Two</a>
+  </div>
 </div>
 <div class="phimage">
   <a href="/view_video.php?viewkey=def456" title="Второй &quot;клип&quot;">
     <img src="https://pix.phncdn.com/th2.jpg">
   </a>
 </div>
-<div class="footer">не карточка</div>
 """
 
 
@@ -140,6 +144,29 @@ class TestCards(CatalogCase):
         self.assertIsNone(first["views"])
         self.assertEqual(res["items"][1]["title"], 'Второй "клип"',
                          "html-escape в title разворачивается")
+        self.assertEqual(first["tags"], ["uncut", "glasses"],
+                         "теги карточки - ссылки /video/tag/... рядом")
+        self.assertEqual(first["people"], ["Made of Two"],
+                         "исполнители карточки - ссылки /model/... рядом")
+        self.assertEqual(res["items"][1]["tags"], [],
+                         "теги берутся из своей карточки, не со всей страницы")
+        self.assertEqual(res["items"][1]["people"], [],
+                         "исполнители - тоже из своей карточки")
+
+    def test_ph_tag_page(self):
+        """Тег из карточек - страница тега площадки (тот же разбор карточек)."""
+        urls = []
+
+        def record(url, settings):
+            urls.append(url)
+            return PH_HTML
+
+        with mock.patch.object(catalog, "_http_get", record):
+            res = catalog.fetch(platform="pornhub", mode="tag", query="uncut",
+                                force=True)
+        self.assertIn("/video/tag/uncut", urls[0])
+        self.assertTrue(res["ok"])
+        self.assertEqual(len(res["items"]), 2)
 
     def test_ph_search_page_param(self):
         urls = []

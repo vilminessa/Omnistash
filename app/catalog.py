@@ -138,12 +138,14 @@ def _thumbnail(raw: dict) -> str | None:
 
 
 def _normalize(raw, platform: str) -> dict | None:
-    """Запись yt-dlp -> карточка каталога (общий формат для всех площадок)."""
+    """Запись источника (yt-dlp или карточка страницы) -> общий формат."""
     if not isinstance(raw, dict):
         return None                 # приватное/удалённое: дырка в списке
     remote_id = to_text(raw.get("id"))
     if not remote_id:
         return None
+    tags = raw.get("tags")
+    people = raw.get("people")
     return {
         "url": _canonical(to_text(raw.get("url")) or to_text(raw.get("webpage_url")),
                           platform, remote_id),
@@ -156,6 +158,12 @@ def _normalize(raw, platform: str) -> dict | None:
         "author": (to_text(raw.get("channel")) or to_text(raw.get("uploader"))
                    or to_text(raw.get("artist"))),
         "author_id": to_text(raw.get("channel_id")) or to_text(raw.get("uploader_id")),
+        # Теги площадки со страницы карточек (PH): фильтр каталога по тегу.
+        "tags": [str(tag)[:40] for tag in tags][:6]
+                if isinstance(tags, list) else [],
+        # Исполнители карточки (PH): чипсы фильтра - клик делает поиск по имени.
+        "people": [str(person)[:40] for person in people][:4]
+                  if isinstance(people, list) else [],
         "added": False,             # обогащается в gui по ключу строки
     }
 
@@ -327,33 +335,62 @@ _PH_ANCHOR_RE = re.compile(
     r'<a\s[^>]*href="/view_video\.php\?viewkey=([A-Za-z0-9]+)"[^>]*'
     r'title="([^"]{2,200})"', re.S)
 _PH_IMG_RE = re.compile(r'<img[^>]*?(?:src|data-src)="([^"]+)"', re.S)
+_PH_TAG_RE = re.compile(r'<a\s[^>]*href="/video/tag/([^"?/]+)"', re.S)
+_PH_PERSON_RE = re.compile(
+    r'<a\s[^>]*href="/(?:pornstar|model|channels|users)/([^"?/]+)"[^>]*>'
+    r'([^<]{2,40})<', re.S)
+
+
+_PH_BLOCK_RE = re.compile(r'class="phimage"')
 
 
 def _parse_ph_cards(html: str) -> list[dict]:
     """Карточки со страницы PornHub.
 
-    Актуальная разметка площадки (2026): обёртка phimage + ссылка
-    «href=view_video.php?viewkey=… title=Название» + <img> превью внутри.
-    Длительность и просмотры в HTML страницы не лежат ( их подгружает JS)
-    - карточка честно показывается без них. Дубли одной ссылки (обложка и
-    заголовок - два anchor'а) схлопываются по viewkey.
+    Актуальная разметка площадки (2026): карточка начинается с обёртки
+    phimage, внутри - ссылка «href=view_video.php?viewkey=… title=Название»,
+    <img> превью, исполнительница/исполнитель (usernameWrap) и теги, если
+    страница их отдаёт. Границы карточки берём по обёрткам phimage: окно
+    фиксированной длины не ловит блок исполнителя ( он в нескольких
+    килобайтах после заголовка из-за отступов разметки).
+    Длительность и просмотры в HTML страницы не лежат (их подгружает JS) -
+    карточка честно показывается без них. Дубли одной ссылки схлопываются
+    по viewkey.
     """
     import html as html_mod
+    marks = [match.start() for match in _PH_BLOCK_RE.finditer(html)]
     out: list[dict] = []
     seen: set[str] = set()
-    for match in _PH_ANCHOR_RE.finditer(html):
-        remote_id = match.group(1)
+    for index, start in enumerate(marks):
+        end = marks[index + 1] if index + 1 < len(marks) else len(html)
+        segment = html[start:end]
+        title = _PH_ANCHOR_RE.search(segment)
+        if not title:
+            continue
+        remote_id = title.group(1)
         if remote_id in seen:
             continue
         seen.add(remote_id)
-        thumb = _PH_IMG_RE.search(html, match.end(), match.end() + 900)
+        thumb = _PH_IMG_RE.search(segment)
+        tags: list[str] = []
+        for tag in _PH_TAG_RE.finditer(segment):
+            slug = to_text(tag.group(1))
+            if slug and slug not in tags:
+                tags.append(slug)
+        people: list[str] = []
+        for person in _PH_PERSON_RE.finditer(segment):
+            name = to_text(html_mod.unescape(person.group(2)))
+            if name and name not in people:
+                people.append(name)
         out.append({
             "id": remote_id,
-            "title": to_text(html_mod.unescape(match.group(2))) or remote_id,
+            "title": to_text(html_mod.unescape(title.group(2))) or remote_id,
             "url": "https://www.pornhub.com/view_video.php?viewkey=" + remote_id,
             "duration": None,
             "thumbnail": to_text(thumb.group(1)) if thumb else None,
             "view_count": None,
+            "tags": tags[:6],
+            "people": people[:4],
         })
     return out
 
@@ -361,7 +398,10 @@ def _parse_ph_cards(html: str) -> list[dict]:
 def _fetch_pornhub(mode: str, query: str, start: int, end: int,
                    settings: dict | None, log=None) -> list:
     page = (start - 1) // PAGE_SIZE + 1
-    if mode == "search" and query:
+    if mode == "tag" and query:
+        url = (f"https://www.pornhub.com/video/tag/{query}"
+               + (f"?page={page}" if page > 1 else ""))
+    elif mode == "search" and query:
         url = (f"https://www.pornhub.com/video/search?search={query}"
                + (f"&page={page}" if page > 1 else ""))
     else:

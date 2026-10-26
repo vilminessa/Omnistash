@@ -3675,9 +3675,9 @@
                     tag: "", sort: "date:desc",
                     offset: 0, rows: [], total: 0, tags: [] };
   var platTabsJson = "";
-  var catalogState = { platform: "", view: "library", query: "", page: 1,
-                       items: [], loading: false, ended: false, loaded: false,
-                       pollTimer: null };
+  var catalogState = { platform: "", view: "library", query: "", tag: "",
+                       page: 1, items: [], loading: false, ended: false,
+                       loaded: false, pollTimer: null };
 
   function openPlatform(id, label, adult, hasCatalog) {
     platState.platform = id;
@@ -3692,8 +3692,10 @@
     // Сброс каталога при смене площадки
     catalogState.platform = id;
     catalogState.query = "";
+    catalogState.tag = "";
     var cs = $("cat-search");
     if (cs) cs.value = "";
+    if ($("cat-tags")) { $("cat-tags").hidden = true; $("cat-tags").innerHTML = ""; }
     catalogState.page = 1;
     catalogState.items = [];
     catalogState.loaded = false;
@@ -3890,8 +3892,11 @@
     more.hidden = true;
     call("site_catalog", {
       platform: catalogState.platform,
-      mode: catalogState.query ? "search" : "trending",
-      query: catalogState.query,
+      // Тег со карточек (PH) - страница тега площадки; поиск - строка
+      // человека; иначе тренды.
+      mode: catalogState.tag ? "tag"
+                             : (catalogState.query ? "search" : "trending"),
+      query: catalogState.tag || catalogState.query,
       page: catalogState.page,
       force: !!force
     }).then(function (res) {
@@ -3956,6 +3961,50 @@
     }, 350);
   }
 
+  function catTagsRender() {
+    // Чипсы из самих карточек: исполнители (клик = поиск площадки по имени)
+    // и теги, если площадка их отдаёт на списочной странице.
+    var box = $("cat-tags");
+    var people = {};
+    var tags = {};
+    catalogState.items.forEach(function (it) {
+      (it.people || []).forEach(function (person) {
+        people[person] = (people[person] || 0) + 1;
+      });
+      (it.tags || []).forEach(function (tag) {
+        tags[tag] = (tags[tag] || 0) + 1;
+      });
+    });
+    var top = function (counts) {
+      return Object.keys(counts).sort(function (a, b) {
+        return counts[b] - counts[a];
+      }).slice(0, 18);
+    };
+    var plist = top(people);
+    var tlist = top(tags);
+    if (!plist.length && !tlist.length && !catalogState.query && !catalogState.tag) {
+      box.hidden = true;
+      box.innerHTML = "";
+      return;
+    }
+    var chips = '<button class="btn ghost ph-tag' +
+      (!catalogState.query && !catalogState.tag ? " active" : "") +
+      '" data-clear="1">все</button>';
+    plist.forEach(function (person) {
+      var active = catalogState.query === person ? " active" : "";
+      chips += '<button class="btn ghost ph-tag' + active +
+        '" data-person="' + esc(person) + '">' + esc(person) +
+        " (" + people[person] + ")</button>";
+    });
+    tlist.forEach(function (tag) {
+      var active = catalogState.tag === tag ? " active" : "";
+      chips += '<button class="btn ghost ph-tag' + active +
+        '" data-tag="' + esc(tag) + '">' + esc(tag) + " (" + tags[tag] + ")</button>";
+    });
+    box.hidden = false;
+    box.innerHTML = chips;
+  }
+
   function catApply(reset, res) {
     if (reset) {
       catalogState.items = res.items || [];
@@ -3972,6 +4021,7 @@
     }
     catalogState.ended = !res.has_more;
     catalogState.loaded = true;
+    catTagsRender();
     if (!catalogState.items.length) {
       $("cat-grid").innerHTML = "";
       $("cat-more").hidden = true;
@@ -3982,8 +4032,11 @@
     $("cat-grid").innerHTML = catalogState.items.map(function (it, i) {
       var dur = it.duration_s ? humanDuration(it.duration_s) : "";
       var views = it.views != null ? bigCount(it.views) : "";
+      var people = (it.people || []).slice(0, 2).join(", ");
       var meta = [views ? views + " просмотров" : "",
-                  it.author ? it.author : ""].filter(Boolean).join(" · ");
+                  it.author ? it.author : "",
+                  people ? "исполнители: " + people : ""]
+        .filter(Boolean).join(" · ");
       var action = it.added
         ? '<span class="muted">В библиотеке</span>'
         : '<button class="btn small cat-add" data-i="' + i + '">+ Добавить</button>';
@@ -4080,6 +4133,7 @@
           $("ph-sort").hidden = (v !== "library");
           $("cat-search").hidden = (v !== "catalog");
           $("cat-refresh").hidden = (v !== "catalog");
+          $("cat-tags").hidden = (v !== "catalog");
           if (v !== "catalog") {
             // Уход из «Каталога»: опрос статуса останавливаем (загрузка
             // воркера безвредна, но её результат не нужен на другой вкладке).
@@ -4099,12 +4153,30 @@
         clearTimeout(ctimer);
         ctimer = setTimeout(function () {
           catalogState.query = catSearch.value.trim();
+          catalogState.tag = "";      // поиск человека сбивает фильтр по тегу
           catLoad(true);
         }, 300);
       });
     }
     $("cat-refresh").addEventListener("click", function () { catLoad(true, true); });
     $("cat-more").addEventListener("click", function () { catLoad(false); });
+    $("cat-tags").addEventListener("click", function (ev) {
+      var btn = ev.target.closest ? ev.target.closest(".ph-tag") : null;
+      if (!btn) return;
+      if (btn.dataset.clear) {
+        catalogState.query = "";
+        catalogState.tag = "";
+        $("cat-search").value = "";
+      } else if (btn.dataset.person) {
+        // Исполнитель: поиск площадки по имени (то же поле поиска).
+        catalogState.query = btn.dataset.person;
+        catalogState.tag = "";
+        $("cat-search").value = btn.dataset.person;
+      } else {
+        catalogState.tag = btn.dataset.tag || "";
+      }
+      catLoad(true);
+    });
     $("cat-cancel").addEventListener("click", function () {
       call("site_catalog_cancel").then(function () {
         clearTimeout(catalogState.pollTimer);
