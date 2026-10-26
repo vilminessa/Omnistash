@@ -8,6 +8,7 @@
 
 import json
 import os
+import re
 import tempfile
 import threading
 import unittest
@@ -53,9 +54,18 @@ class FakeYDL:
 
     def extract_info(self, url, download=True):
         outtmpl = self.opts.get("outtmpl") or ""
-        path = outtmpl % {"title": "Ролик", "id": "abcdefghijk",
-                          "ext": "mp4", "channel": "Автор",
-                          "upload_date": "20250101"}
+        fields = {"title": "Ролик", "id": "abcdefghijk",
+                  "ext": "mp4", "channel": "Автор",
+                  "upload_date": "20250101"}
+
+        def substitute(match):
+            value = fields.get(match.group(1), "NA")
+            limit = match.group(2)
+            return value[:int(limit)] if limit else value
+
+        # Поддерживаем и "%(title)s", и байтовый лимит "%(id).60B",
+        # который build_opts ставит на id (как в yt-dlp, но без сети).
+        path = re.sub(r"%\((\w+)\)(?:\.(\d+)B|s)", substitute, outtmpl)
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "wb") as handle:
             handle.write(b"video-bytes")

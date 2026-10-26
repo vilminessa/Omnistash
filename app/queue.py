@@ -33,6 +33,8 @@ class DownloadWorker:
                        "bot_hint": False}
         # Раз за сессию предупреждаем, что без ffmpeg идёт тихая деградация.
         self._ffmpeg_warned = False
+        # ...и что имитация браузера включена без установленной curl_cffi.
+        self._cffi_warned = False
 
     # ------------------------------------------------------------------ #
 
@@ -140,6 +142,17 @@ class DownloadWorker:
             self._log("ffmpeg не найден: склейка видео+аудио, метаданные и "
                       "субтитры в файл, перекодировка - недоступны"
                       f"{extra}; установка кнопкой в настройках, «Загрузка»")
+        if (not self._cffi_warned
+                and str(settings.get("impersonate") or "off") != "off"
+                and downloader.impersonate_target(settings) is None):
+            # Имитация включена, но недоступна (нет библиотеки или цели):
+            # качается обычным отпечатком - юзер должен знать, почему
+            # площадка может отвечать 403/410. Ровно один раз за сессию.
+            self._cffi_warned = True
+            self._log("имитация браузера включена, но недоступна: "
+                      "не установлена библиотека curl_cffi или цель не "
+                      "поддерживается - запрос уйдёт обычным отпечатком "
+                      "Python; установите: pip install curl_cffi")
         target, error = self._resolve_target(conn, row, settings)
         if error:
             repo.set_status(conn, [row["id"]], "failed")

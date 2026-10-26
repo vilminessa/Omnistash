@@ -49,8 +49,16 @@ binaries = []
 hiddenimports = []
 # yt_dlp собирает обновления по сети (extractor'ы подгружаются сами), webview
 # тянет свои DLL и бэкенды - collect_all берёт их целиком, хуки не гадят.
-for pkg in ("yt_dlp", "webview"):
-    tmp_ret = collect_all(pkg)
+# curl_cffi (имитация отпечатка браузера, настройка «Имитация браузера»)
+# необязательна: нет в среде сборки - exe собирается без неё, программа
+# деградирует мягко (без имитации, о чём пишет журнал).
+for pkg in ("yt_dlp", "webview", "curl_cffi"):
+    try:
+        tmp_ret = collect_all(pkg)
+    except Exception:
+        if pkg == "curl_cffi":
+            continue
+        raise
     datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 # Интерфейс: ui.py читает ui_src/{index.html,app.css,app.js} и вшивает в страницу.

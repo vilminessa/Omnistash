@@ -26,6 +26,7 @@ from pathlib import Path
 import yt_dlp
 from yt_dlp.postprocessor.ffmpeg import (FFmpegMetadataPP, FFmpegPostProcessor,
                                          FFmpegPostProcessorError)
+from yt_dlp.postprocessor.metadataparser import MetadataParserPP
 
 try:
     # yt-dlp 2025+ вынес встроение обложки в отдельный модуль.
@@ -41,6 +42,19 @@ from .paths import base_dir
 # Ограничение по высоте: качество -> максимальная высота (None = без предела).
 HEIGHT_LIMIT = {"best": None, "high": 1080, "mid": 720, "low": 480}
 SUB_LANGS = {"none": [], "ru": ["ru.*"], "en": ["en.*"], "all": ["all"]}
+
+# Query-мусор в строковых метаданных: generic-извлечение тянет хвост
+# CDN-параметров («generic video #?srcIp=1.2.3.4&pr=40&expires=…»), путь из
+# шаблона разрастается за MAX_PATH (260) и Windows отдаёт Errno 22 даже на
+# валидных именах. Чистим на стадии pre_process - ДО подстановки в шаблон
+# (работа эквивалентна --replace-in-metadata). Режем от «#?»/«?» с word=
+# сразу после: легитимные «Почему так?» и «#теги» без «=» не затрагиваются.
+_JUNK_TAIL_RE = r"(?s)(?:^|\s)#?[?#][\w.-]{1,40}=[\s\S]*$"
+_JUNK_FIELDS = ("title", "channel", "uploader", "creator")
+# id в ИМЕНИ файла ограничиваем (в БД уходит полный): мусорные id
+# generic-извлечения - это query целиком, сотни символов. Настоящие id
+# (yt - 11 знаков, vk - ~20, twitch - до 32) в лимит не попадают.
+_ID_FIELD_LIMIT = 60
 
 # Перекодировка в HEVC: кодировщик -> аргументы ffmpeg. Порядок ключей =
 # порядок вариантов в настройке; GPU-кодировщики при неудаче падают на
@@ -295,6 +309,10 @@ def build_opts(settings: dict, dest_dir: str | Path, *, stop: threading.Event,
     settings = settings or {}
     template = str(settings.get("output_template")
                    or "%(title)s [%(id)s].%(ext)s")
+    # Часть [%(id)s] в имени обязательна (индекс узнаёт файлы по ID-токену),
+    # но её длину ограничиваем: мусорный id площадки не должен рвать путь.
+    template = re.sub(r"%\(id\)s",
+                      f"%(id).{_ID_FIELD_LIMIT}B", template)
     # Шаблон целиком кладётся в подпапку назначения: он сам может содержать
     # папки («%(channel)s/%(upload_date)s - …»), их создаст yt-dlp.
     outtmpl = os.path.join(str(dest_dir), template)
@@ -338,6 +356,17 @@ def build_opts(settings: dict, dest_dir: str | Path, *, stop: threading.Event,
         "windowsfilenames": True,
         "ignoreerrors": False,
         "progress_hooks": [hook],
+        # Чистка query-мусора в метаданных (см. _JUNK_TAIL_RE): стадия
+        # pre_process в yt-dlp выполняется ДО prepare_filename, т.е. до
+        # подстановки полей в имя файла.
+        "postprocessors": [{
+            "key": "MetadataParser",
+            "actions": [
+                *((MetadataParserPP.Actions.REPLACE, field, _JUNK_TAIL_RE, "")
+                  for field in _JUNK_FIELDS),
+            ],
+            "when": "pre_process",
+        }],
     }
     ffmpeg = find_ffmpeg()
     if ffmpeg:
@@ -361,6 +390,13 @@ def build_opts(settings: dict, dest_dir: str | Path, *, stop: threading.Event,
     # её в файл, EmbedThumbnailPP вшивает и удаляет файл после успеха.
     if settings.get("save_thumb", True) or (embed_mode(settings) and ffmpeg):
         opts["writethumbnail"] = True
+
+    # Имитация TLS-отпечатка браузера (анти-бот: 403/410 без неё). Только
+    # при установленной curl_cffi и доступной цели; без них тихо пропускаем -
+    # предупреждение печатает очередь ровно один раз (как для ffmpeg).
+    impersonate = impersonate_target(settings)
+    if impersonate is not None:
+        opts["impersonate"] = impersonate
 
     return opts
 
@@ -452,6 +488,72 @@ def download(video: dict, settings: dict, *, stop: threading.Event,
                          cookiefile=cookiefile)
 
 
+_CFFI_OK: bool | None = None
+
+
+def curl_cffi_available() -> bool:
+    """Имитация TLS-отпечатка доступна (curl_cffi установлена).
+
+    Результат кэшируется: проверка при каждой загрузке очереди.
+    """
+    global _CFFI_OK
+    if _CFFI_OK is None:
+        try:
+            import curl_cffi  # noqa: F401
+            _CFFI_OK = True
+        except ImportError:
+            _CFFI_OK = False
+    return _CFFI_OK
+
+
+_IMPERSONATE_CACHE: dict = {}
+
+
+def impersonate_target(settings: dict):
+    """Цель имитации браузера для yt-dlp или None (выкл/недоступна).
+
+    yt-dlp ждёт объект ImpersonateTarget, а не строку (строка в параметре
+    падает ассертом). Наличие цели у обработчика проверяется через
+    YoutubeDL - публичного API у yt-dlp для этого ещё нет. Кэш: цель
+    вычисляется один раз за сессию на каждое имя.
+    """
+    name = str(settings.get("impersonate") or "off").strip().lower()
+    if not name or name == "off":
+        return None
+    if name in _IMPERSONATE_CACHE:
+        return _IMPERSONATE_CACHE[name]
+    target = None
+    if curl_cffi_available():
+        try:
+            from yt_dlp.networking.impersonate import ImpersonateTarget
+            candidate = ImpersonateTarget.from_str(name)
+            probe = yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True})
+            if probe._impersonate_target_available(candidate):
+                target = candidate
+        except Exception:  # noqa: BLE001 - любая ошибка = цель недоступна
+            target = None
+    _IMPERSONATE_CACHE[name] = target
+    return target
+
+
+def _cookie_browsers(settings: dict) -> list[str]:
+    """Браузеры для куки-фоллбэка при 410/403 (битые ABE - мимо).
+
+    Если пользователь уже выбрал браузер в настройках - только его (его
+    куки реально есть на диске); иначе пробуем по порядку. Пусто = нечем
+    пробовать (вернётся исходная ошибка с подсказкой).
+    """
+    chosen = str(settings.get("browser_cookies") or "none").strip().lower()
+    choices = getattr(google_auth, "BROWSER_CHOICES", ()) or ()
+    broken = getattr(google_auth, "BROKEN_BROWSERS", frozenset()) or frozenset()
+    if chosen in choices and chosen != "none":
+        order = [chosen]
+    else:
+        order = [name for name in ("firefox", "chrome", "brave")
+                 if name in choices]
+    return [name for name in order if name not in broken]
+
+
 def _download(video: dict, settings: dict, *, stop: threading.Event,
               on_progress=None, dest: str | None = None,
               overwrite: bool = False, cookiefile: "Path | None" = None) -> dict:
@@ -466,36 +568,82 @@ def _download(video: dict, settings: dict, *, stop: threading.Event,
         # Копия привязанного аккаунта важнее браузерного режима.
         opts["cookiefile"] = str(cookiefile)
     else:
-        browser_opt = google_auth.browser_cookie_option(settings)
-        if browser_opt:
-            opts["cookiesfrombrowser"] = browser_opt
+        # Куки из файла (cookies.txt): приоритетный путь для браузеров с
+        # шифрованием куки (Chrome 127+ ABE) - файл экспортируется вручную.
+        file_pref = str(settings.get("cookies_file") or "").strip()
+        if file_pref:
+            opts["cookiefile"] = os.path.expandvars(
+                os.path.expanduser(file_pref))
+        else:
+            browser_opt = google_auth.browser_cookie_option(settings)
+            if browser_opt:
+                opts["cookiesfrombrowser"] = browser_opt
     encoder = str(settings.get("transcode") or "none")
     ffmpeg = find_ffmpeg()
     embed = embed_mode(settings) and bool(ffmpeg)
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            if encoder in TRANSCODERS and ffmpeg:
-                # Перекодировка включается настройкой «Загрузка/Перекодировка».
-                # Без ffmpeg пропускаем её (очередь предупреждает) - качать
-                # без ffmpeg умеем, а вот тормозить очередь из-за настройки
-                # нельзя.
-                ydl.add_post_processor(TranscodePP(ydl, encoder=encoder))
-            if embed:
-                # Метаданные и обложка вшиваются стадией after_move - ПОСЛЕ
-                # перекодировки: встроенный в исходник HEVC-перекодчик взял
-                # бы только видеопоток и обложку потерял. Порядок важен:
-                # метаданные первыми (их remux не должен тронуть обложку),
-                # встраивание обложки - последним.
-                ydl.add_post_processor(FFmpegMetadataPP(ydl), when="after_move")
-                # already_have_thumbnail=False: после успеха PP сам удаляет
-                # файл обложки - в папке остаётся один mp4.
-                ydl.add_post_processor(EmbedThumbnailPP(ydl), when="after_move")
-            info = ydl.extract_info(url, download=True)
-    except DownloadCancelled:
-        return {"cancelled": True, "files": [], "info": {}, "error": None}
-    except yt_dlp.utils.DownloadError as exc:
-        return {"cancelled": False, "files": [], "info": {},
-                "error": _human_error(exc)}
+    # Фоллбэки по фактическим симптомам живой пары:
+    #  * имя файла не прошло Windows (query-мусор в title/id площадок,
+    #    длинный путь) -> повтор с ascii-именами (restrictfilenames);
+    #  * площадка ответила 410/403, а браузерные куки выключены - браузер
+    #    такие страницы открывает -> повтор со ВСЕМИ рабочими браузерами
+    #    по очереди (порядок: firefox, chrome, brave; битые ABE - мимо).
+    browser_fallbacks = [
+        {"cookiesfrombrowser": (name,)}
+        for name in _cookie_browsers(settings)
+    ]
+    attempt = 0
+    while True:
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                if encoder in TRANSCODERS and ffmpeg:
+                    # Перекодировка включается настройкой «Загрузка/Перекодировка».
+                    # Без ffmpeg пропускаем её (очередь предупреждает) - качать
+                    # без ffmpeg умеем, а вот тормозить очередь из-за настройки
+                    # нельзя.
+                    ydl.add_post_processor(TranscodePP(ydl, encoder=encoder))
+                if embed:
+                    # Метаданные и обложка вшиваются стадией after_move - ПОСЛЕ
+                    # перекодировки: встроенный в исходник HEVC-перекодчик взял
+                    # бы только видеопоток и обложку потерял. Порядок важен:
+                    # метаданные первыми (их remux не должен тронуть обложку),
+                    # встраивание обложки - последним.
+                    ydl.add_post_processor(FFmpegMetadataPP(ydl), when="after_move")
+                    # already_have_thumbnail=False: после успеха PP сам удаляет
+                    # файл обложки - в папке остаётся один mp4.
+                    ydl.add_post_processor(EmbedThumbnailPP(ydl), when="after_move")
+                info = ydl.extract_info(url, download=True)
+            break
+        except DownloadCancelled:
+            return {"cancelled": True, "files": [], "info": {},
+                    "error": None}
+        except yt_dlp.utils.DownloadError as exc:
+            text = str(exc)
+            # Куки уже подключены (аккаунт или cookies_file) - подменять
+            # их браузерными нечего и не нужно.
+            has_cookies = bool(cookiefile or opts.get("cookiefile"))
+            if attempt == 0:
+                if "Invalid argument" in text or "Errno 22" in text:
+                    opts["restrictfilenames"] = True
+                    attempt += 1
+                    continue
+                if (re.search(r"HTTP Error (410|403)", text)
+                        and not has_cookies
+                        and not opts.get("cookiesfrombrowser")
+                        and browser_fallbacks):
+                    opts.update(browser_fallbacks.pop(0))
+                    attempt += 1
+                    continue
+            if browser_fallbacks and re.search(r"HTTP Error (410|403)",
+                                               text) and not has_cookies:
+                # Следующий браузер из списка - только если он отличается
+                # от уже подключённых кук (повтор с теми же бессмыслен).
+                nxt = browser_fallbacks[0].get("cookiesfrombrowser")
+                if opts.get("cookiesfrombrowser") != nxt:
+                    opts.update(browser_fallbacks.pop(0))
+                    attempt += 1
+                    continue
+            return {"cancelled": False, "files": [], "info": {},
+                    "error": _human_error(exc)}
 
     if not isinstance(info, dict):
         return {"cancelled": False, "files": [], "info": {},
@@ -559,6 +707,15 @@ def _human_error(exc: Exception) -> str:
         return "площадка требует вход в аккаунт"
     if "requested format is not available" in low:
         return "формат недоступен - попробуйте другое качество"
+    if "http error 410" in low:
+        # 410 = страницу убрали ИЛИ площадка отдаёт её только «своим»
+        # (куки браузера, включая возрастной cookie площадки).
+        return ("страница недоступна (410): откройте её в браузере и "
+                "экспортируйте куки - путь к файлу укажите в настройках, "
+                "«Загрузка», поле «Куки из файла»")
+    if "http error 403" in low or "forbidden" in low:
+        return ("площадка отклонила запрос (403): включите имитацию "
+                "браузера и/или куки в настройках, «Загрузка»")
     if "unable to download" in low or "http error 4" in low:
         return "площадка не отдала файл (временный сбой?)"
     return text.strip()[:300]
