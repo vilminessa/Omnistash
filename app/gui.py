@@ -27,6 +27,7 @@ from . import downloader as downloader_mod
 from . import ffmpeg_installer as ffmpeg_mod
 from . import google_auth
 from . import legal as legal_mod
+from . import catalog
 from . import platforms as platforms_mod
 from . import repack as repack_mod
 from . import schedule as schedule_mod
@@ -650,7 +651,8 @@ class Api:
 
         Авто-плюс-настройки: вкладка показывается для площадки со
         строками в индексе, скрытые пользователем - в settings
-        tabs_hidden (список id через запятую).
+        tabs_hidden (список id через запятую). catalog - есть ли
+        браузер каталога для площадки (site_catalog).
         """
         counts = {str(row["platform"]): int(row["n"]) for row in
                   self.db.conn.execute(
@@ -665,76 +667,84 @@ class Api:
             out.append({"id": pid, "label": item["label"],
                         "adult": bool(item.get("adult")),
                         "count": counts.get(pid, 0),
-                        "hidden": pid in hidden})
+                        "hidden": pid in hidden,
+                        "catalog": pid in catalog.FETCHERS})
         return {"ok": True, "platforms": out}
 
     # ------------------------------------------------------------------ #
-    #  Каталог площадок (site-like browsing)
+    #  Каталог площадок (site-like browsing). Имена «site_*»: mesh-зеркало
+    #  индекса уже занимает catalog_* (B3, диалог «Участники»).
     # ------------------------------------------------------------------ #
 
-    def catalog_list(self, request=None) -> dict:
+    def site_catalog(self, request=None) -> dict:
+        """Страница карточек площадки (тренды/поиск), без скачивания."""
         request = request or {}
         try:
             platform = str(request.get("platform") or "").lower()
             mode = str(request.get("mode") or "trending")
             query = str(request.get("query") or "")
-            page = int(request.get("page") or 1)
+            page = max(int(request.get("page") or 1), 1)
             force = bool(request.get("force"))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - кривой запрос = понятный отказ
             return {"error": f"Некорректный запрос: {exc}"}
         if not platform:
             return {"error": "Нужна площадка"}
-        # 18+ гейт для взрослых платформ
+        # Возраст: взрослая площадка только после явного подтверждения 18+
+        # (то же правило, что у add_start).
         plat = platforms_mod.by_id(platform) or {}
-        if plat.get("adult") and not self._legal_ok():
-            return {"error": "Требуется подтверждение 18+", "need_adult": True}
+        if plat.get("adult") and not legal_mod.state().get("adult_ok"):
+            return {"error": "Нужно подтверждение 18+ (возрастной гейт)",
+                    "need_adult": True}
         settings = self._current_settings()
-        if not settings.get("mesh_enabled") and platform in ("youtube", "pornhub"):
-            pass
         try:
-            from . import catalog
             res = catalog.fetch(platform, mode=mode, query=query, page=page,
-                                settings=settings, force=force)
+                                settings=settings, force=force,
+                                log=self._log)
         except catalog.CatalogError as exc:
-            msg = str(exc)
-            if "недоступна" in msg.lower() and settings.get("mesh_enabled"):
-                return {"error": msg, "can_mesh": True,
-                        "can_retry": True}
-            if "недоступна" in msg.lower():
-                return {"error": msg, "can_retry": True}
-            return {"error": msg}
-        except Exception as exc:  # noqa: BLE001
-            return {"error": str(exc)}
-        # Обогащение: уже ли в библиотеке
-        items = res.get("items") or []
-        try:
-            keys = []
-            for it in items:
-                pid = str(it.get("platform") or platform)
-                vid = str(it.get("video_id") or "")
-                if vid:
-                    keys.append(f"{pid}:{vid}")
-            added = set()
-            if keys:
-                qmarks = ",".join("?" for _ in keys)
-                for row in self.db.conn.execute(
-                        f"SELECT key FROM videos WHERE key IN ({qmarks})", keys):
-                    added.add(str(row["key"]))
-            for it in items:
-                pid = str(it.get("platform") or platform)
-                vid = str(it.get("video_id") or "")
-                if vid and f"{pid}:{vid}" in added:
-                    it["added"] = True
-        except Exception:
-            pass
-        res["items"] = items
+            payload = {"error": str(exc), "kind": getattr(exc, "kind", "empty")}
+            if payload["kind"] == "blocked":
+                payload["can_retry"] = True
+                if settings.get("mesh_enabled"):
+                    payload["can_mesh"] = True
+            return payload
+        except Exception as exc:  # noqa: BLE001 - воркер окна не валит
+            return {"error": str(exc), "kind": "empty"}
+        res["items"] = self._mark_in_library(res.get("items") or [], platform)
         return res
 
-    def catalog_search(self, request=None) -> dict:
+    def site_catalog_more(self, request=None) -> dict:
+        """Следующая страница каталога (infinite scroll)."""
+        request = dict(request or {})
+        request["page"] = max(int(request.get("page") or 1), 1)
+        return self.site_catalog(request)
+
+    def site_catalog_clear(self, request=None) -> dict:
+        """Сброс кэша карточек (одной площадки или всех)."""
         request = request or {}
-        request = dict(request)
-        request["mode"] = "search"
-        return self.catalog_list(request)
+        platform = str(request.get("platform") or "").lower() or None
+        return {"ok": True, "removed": catalog.clear_cache(platform)}
+
+    def _mark_in_library(self, items: list, platform: str) -> list:
+        """Пометка «уже в библиотеке» по ключу строки (platform:remote_id)."""
+        keys = [f"{str(it.get('platform') or platform)}:"
+                f"{str(it.get('video_id') or '')}"
+                for it in items if it.get("video_id")]
+        if not keys:
+            return items
+        try:
+            marks = ",".join("?" for _ in keys)
+            present = {str(row["key"]) for row in
+                       self.db.conn.execute(
+                           f"SELECT key FROM videos WHERE key IN ({marks})",
+                           keys)}
+        except Exception:  # noqa: BLE001 - пометка не должна портить список
+            return items
+        for item in items:
+            key = (f"{str(item.get('platform') or platform)}:"
+                   f"{str(item.get('video_id') or '')}")
+            if key in present:
+                item["added"] = True
+        return items
 
     def tags_popular(self, request=None) -> dict:
         """Теги площадки счётчиками - чипсы фильтра (PH3, вкладка 18+)."""
