@@ -91,6 +91,52 @@ def to_text(value) -> str | None:
     return text or None
 
 
+def clean_text(value) -> str:
+    """Текст без ANSI-escape'ов ([0;31m и подобные).
+
+    Логгер yt-dlp кладёт коды цвета в str(исключения), и они проходят в
+    журнал приложения и в диалог пользователя - там они мусор, а не
+    форматирование (журнал - plain text).
+    """
+    text = str(value or "")
+    return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text).strip()
+
+
+class QuietLogger:
+    """Logger для yt-dlp: `params["logger"]` должен иметь методы
+    error/warning/info (в текущей версии это объект, не вызываемая).
+
+    quiet=True логгер НЕ глушит: без него «ERROR: [youtube:tab] …»
+    печатается в консоль и лезет ANSI-кодами в журнал. Сюда пишем только
+    ошибки, и уже без escape-кодов; info/warning - молчат.
+    """
+
+    def __init__(self, sink=None) -> None:
+        self.sink = sink          # callable(text) -> журнал приложения
+
+    def error(self, message) -> None:
+        if self.sink:
+            self.sink(clean_text(message))
+
+    def warning(self, message) -> None:
+        pass                      # предупреждения площадки не нужны в журнале
+
+    def info(self, message) -> None:
+        pass                      # прогресс каталога считаем из ответа
+
+    def debug(self, message) -> None:
+        pass                      # отладочные строки площадки нам не нужны
+
+    def write_debug(self, message) -> None:
+        pass
+
+    def to_screen(self, message) -> None:
+        pass                      # «печатается в консоль» - не печатается
+
+    def to_stderr(self, message) -> None:
+        pass
+
+
 def human_size(size) -> str:
     """Байты -> «1.4 ГиБ» (бинарные единицы: так считают диски и файловые системы)."""
     try:

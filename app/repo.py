@@ -296,6 +296,32 @@ def tags_popular(conn: sqlite3.Connection, platform: str | None = None,
              LIMIT ?""", args)]
 
 
+def channels_recent(conn: sqlite3.Connection, platform: str | None = None,
+                    limit: int = 12) -> list[dict]:
+    """Каналы, чьи видео сохранялись (или добавлены как источник-канал).
+
+    Порядок - по последнему синку/скачиванию строки канала: «свежие
+    загрузки» человека. Канал без строк и без источника-загрузок не
+    участвует: каталог по нему показывать нечего.
+    """
+    where = "WHERE c.platform=?" if platform else ""
+    args = [platform] if platform else []
+    args.append(int(limit))
+    return [dict(row) for row in conn.execute(
+        f"""SELECT c.remote_id, c.title, c.url,
+                   COUNT(v.id) AS n,
+                   MAX(COALESCE(v.synced_at, v.downloaded_at, v.updated_at))
+                       AS recent
+              FROM channels c
+              LEFT JOIN videos v ON v.channel_id = c.id
+              LEFT JOIN playlists p ON p.channel_id = c.id AND p.kind = 'uploads'
+              {where}
+              GROUP BY c.id
+              HAVING n > 0 OR p.id IS NOT NULL
+              ORDER BY recent DESC, n DESC
+              LIMIT ?""", args)]
+
+
 def ensure_playlist(conn: sqlite3.Connection, data: dict) -> int:
     """Плейлист (источник) по (platform, remote_id): создать или освежить.
 

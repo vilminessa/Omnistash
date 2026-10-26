@@ -35,10 +35,10 @@ import yt_dlp
 
 from . import metadata
 from .paths import profile_dir
-from .util import to_int, to_text
+from .util import QuietLogger, clean_text, iso_date, to_int, to_text
 
 PAGE_SIZE = 30          # карточек на страницу каталога
-CACHE_TTL = {"trending": 600, "home": 600, "search": 300}
+CACHE_TTL = {"trending": 600, "home": 600, "search": 300, "channels": 600}
 
 
 class CatalogError(Exception):
@@ -56,15 +56,17 @@ def cache_dir() -> str:
     return path
 
 
-def _cache_file(platform: str, mode: str, query: str, page: int) -> str:
-    raw = f"{mode}|{query or ''}|{page}"
+def _cache_file(platform: str, mode: str, query: str, page: int,
+                scope: str = "") -> str:
+    raw = f"{mode}|{query or ''}|{page}|{scope or ''}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
     return os.path.join(cache_dir(), f"{platform}.{digest}.json")
 
 
-def _cache_get(platform: str, mode: str, query: str, page: int) -> dict | None:
+def _cache_get(platform: str, mode: str, query: str, page: int,
+               scope: str = "") -> dict | None:
     try:
-        with open(_cache_file(platform, mode, query, page), "r",
+        with open(_cache_file(platform, mode, query, page, scope), "r",
                   encoding="utf-8") as handle:
             data = json.load(handle)
     except (OSError, ValueError):
@@ -77,11 +79,11 @@ def _cache_get(platform: str, mode: str, query: str, page: int) -> dict | None:
 
 
 def _cache_set(platform: str, mode: str, query: str, page: int,
-               data: dict) -> None:
+               data: dict, scope: str = "") -> None:
     payload = dict(data)
     payload["_ts"] = time.time()
     try:
-        with open(_cache_file(platform, mode, query, page), "w",
+        with open(_cache_file(platform, mode, query, page, scope), "w",
                   encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False)
     except OSError:
@@ -155,6 +157,9 @@ def _normalize(raw, platform: str) -> dict | None:
         "thumb": _thumbnail(raw),
         "duration_s": to_int(raw.get("duration")),
         "views": to_int(raw.get("view_count")),
+        # Дата выхода (RSS канала даёт точную; flat-списки страниц - нет).
+        "uploaded_at": iso_date(raw.get("upload_date")
+                                or raw.get("release_date")),
         "author": (to_text(raw.get("channel")) or to_text(raw.get("uploader"))
                    or to_text(raw.get("artist"))),
         "author_id": to_text(raw.get("channel_id")) or to_text(raw.get("uploader_id")),
@@ -168,9 +173,15 @@ def _normalize(raw, platform: str) -> dict | None:
     }
 
 
+def _clean(text) -> str:
+    """Текст без ANSI-кодов (см. util.clean_text): журнал и диалоги
+    должны быть читаемыми, логгер yt-dlp добавляет коды цвета."""
+    return clean_text(text)
+
+
 def _blocked(exc: BaseException) -> bool:
     """Сетевой отказ (блокировка/таймаут) против «площадка ответила пусто»."""
-    text = str(exc).lower()
+    text = _clean(exc).lower()
     return ("timed out" in text or "connection" in text or "reset" in text
             or " refused" in text or "403" in text or "410" in text
             or "429" in text or "network" in text)
@@ -211,7 +222,7 @@ def _probe(url: str, settings: dict | None) -> str:
         with urllib.request.urlopen(request, timeout=min(timeout, 15)) as got:
             status = got.status
     except Exception as exc:  # noqa: BLE001 - код ответа тоже отказ
-        text = str(exc)
+        text = _clean(exc)
         if _blocked(exc) or "403" in text or "410" in text or "429" in text:
             return "blocked"
         return "error"
@@ -220,8 +231,8 @@ def _probe(url: str, settings: dict | None) -> str:
     return "ok"
 
 
-def _opts(settings: dict | None, start: int, end: int) -> dict:
-    """Плоский режим без download: карточки одним запросом, диапазон N..M."""
+def _opts(settings: dict | None) -> dict:
+    """Плоский режим без download: карточки одним запросом, без файлов."""
     settings = settings or {}
     opts = {
         "skip_download": True,
@@ -231,7 +242,6 @@ def _opts(settings: dict | None, start: int, end: int) -> dict:
         "extract_flat": "in_playlist",
         "socket_timeout": 25,
         "retries": max(int(settings.get("retries") or 0), 1),
-        "playlist_items": f"{start}-{end}",
     }
     try:
         from . import google_auth
@@ -241,6 +251,18 @@ def _opts(settings: dict | None, start: int, end: int) -> dict:
     except Exception:  # noqa: BLE001 - куки не должны валить каталог
         pass
     return opts
+
+
+def _youtube(opts: dict, start: int, end: int, log=None):
+    """YoutubeDL с молчаливым логгером и диапазоном записей страницы.
+
+    quiet=True не глушит ERROR логгера: логгер молчит отдельно, иначе
+    консоль и журнал забиваются строками «ERROR: [youtube:tab] …».
+    """
+    opts = dict(opts)
+    opts["playlist_items"] = f"{start}-{end}"
+    opts["logger"] = QuietLogger(log)     # молчит в консоли, ошибки - в журнал
+    return yt_dlp.YoutubeDL(opts)
 
 
 def _entries(info) -> list:
@@ -254,15 +276,16 @@ def _entries(info) -> list:
     return []
 
 
-def _extract_candidates(urls: list[str], opts: dict,
-                        settings: dict | None, log=None) -> list:
+def _extract_candidates(urls: list[str], opts: dict, start: int, end: int,
+                        settings: dict | None, log=None) -> tuple[list, bool]:
     """Первый успешный ответ: пробой нескольких адресов одной площадки.
 
-    feed/trending в плоском режиме отдаёт пусто чаще, чем страница
-    результатов - поэтому тренды пробуем и через результаты по «trending».
+    Страница выдаётся диапазоном записей (playlist_items): YouTube
+    догружает continuation сам, поэтому страницы 2..N дают новые id.
     Пустой список различаем честно: unsupported (yt-dlp не умеет такие
-    страницы вообще) и blocked (площадка отвечает 403/410 на блокировку
-    из сети пользователя) против «пусто на этой странице».
+    страницы), blocked (403/410 на блокировку из сети пользователя) и
+    «пусто на этой странице». Логгер молчит (см. _youtube), отказ -
+    только в журнале приложения.
     """
     known = [url for url in urls if _supported(url)]
     if not known:
@@ -271,14 +294,19 @@ def _extract_candidates(urls: list[str], opts: dict,
             "поддерживаются) - добавляйте контент ссылкой", kind="unsupported")
     for url in known:
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
+            with _youtube(opts, start, end, log) as ydl:
                 info = ydl.extract_info(url, download=False)
         except yt_dlp.utils.DownloadError as exc:
             if _blocked(exc):
+                message = _clean(exc)
+                if log:
+                    log(f"Каталог: {url} -> {message}")
                 raise CatalogError(
                     "Площадка не ответила (недоступна из вашей сети - "
                     "поможет VPN/прокси или запрос участникам mesh)",
                     kind="blocked") from exc
+            if log:
+                log(f"Каталог: {url} -> {_clean(exc)} (пробуем следующий адрес)")
             continue                # не сетевой отказ: пробуем следующий адрес
         except Exception as exc:  # noqa: BLE001 - extractor-глюк не фатален
             if _blocked(exc):
@@ -286,25 +314,47 @@ def _extract_candidates(urls: list[str], opts: dict,
             continue
         entries = _entries(info)
         if entries:
-            return entries
+            # Полный диапазон = страница ещё есть; меньше запроса = конец.
+            return entries, len(entries) >= PAGE_SIZE
     if _probe(known[0], settings) == "blocked":
         raise CatalogError(
             "Площадка недоступна из вашей сети (403/410 на страницу) - "
             "поможет VPN/прокси; если контент есть у участников mesh, его "
             "можно запросить из карточки или по ссылке", kind="blocked")
-    return []
+    return [], False
 
 
-def _fetch_youtube(mode: str, query: str, start: int, end: int,
-                   settings: dict | None, log=None) -> list:
-    opts = _opts(settings, start, end)
-    if mode == "search" and query:
+def _fetch_youtube(mode: str, query: str, page: int,
+                   settings: dict | None, log=None,
+                   channels: list[dict] | None = None) -> tuple[list, bool]:
+    if mode == "channels":
+        if not channels:
+            raise CatalogError(
+                "Нет каналов: добавьте плейлист или канал ссылкой — каталог "
+                "«новое от каналов» соберётся по ним", kind="empty")
+        return _fetch_youtube_channels(channels, settings, log)
+    opts = _opts(settings)
+    start = (page - 1) * PAGE_SIZE + 1
+    end = page * PAGE_SIZE
+    if mode == "channel" and query:
+        # Страница загрузок канала: newest-first, диапазоном записей.
+        urls = [query if query.startswith("http")
+                else f"https://www.youtube.com/channel/{query}/videos"]
+    elif mode == "search" and query:
         urls = [f"https://www.youtube.com/results?search_query={query}"]
     else:
-        urls = ["https://www.youtube.com/feed/trending",
-                "https://www.youtube.com/results?search_query=trending",
+        # feed/trending мёртв (редирект на главную) - тренды через
+        # страницу результатов по «trending».
+        urls = ["https://www.youtube.com/results?search_query=trending",
                 "https://www.youtube.com/feed/topics-music"]
-    return _extract_candidates(urls, opts, settings, log)
+    entries, full = _extract_candidates(urls, opts, start, end, settings, log)
+    if mode == "channel":
+        # Страница загрузок канала конечна: короткая или пустая страница
+        # означает конец истории.
+        return entries, full
+    # Тренды и поиск открыты: YouTube не отдаёт «конец списка» - конец
+    # решает UI (пустая или полностью дублированная страница).
+    return entries, True
 
 
 def _http_get(url: str, settings: dict | None) -> str:
@@ -323,7 +373,7 @@ def _http_get(url: str, settings: dict | None) -> str:
         with urllib.request.urlopen(request, timeout=min(timeout, 20)) as got:
             return got.read().decode("utf-8", "ignore")
     except Exception as exc:  # noqa: BLE001 - честный отказ в kind
-        text = str(exc)
+        text = _clean(exc)
         raise CatalogError(
             "Площадка не ответила (недоступна из вашей сети - поможет "
             "VPN/прокси или запрос участникам mesh)",
@@ -395,9 +445,15 @@ def _parse_ph_cards(html: str) -> list[dict]:
     return out
 
 
-def _fetch_pornhub(mode: str, query: str, start: int, end: int,
-                   settings: dict | None, log=None) -> list:
-    page = (start - 1) // PAGE_SIZE + 1
+def _fetch_pornhub(mode: str, query: str, page: int,
+                   settings: dict | None, log=None,
+                   channels: list[dict] | None = None) -> tuple[list, bool]:
+    """Карточки страницы PH. Страница площадки - параметром ?page=N.
+
+    Площадка отдаёт ~44 карточки на страницу; has_more решаем по длине
+    (не по нашему PAGE_SIZE), иначе «Загрузить ещё» зависало бы на
+    первой странице.
+    """
     if mode == "tag" and query:
         url = (f"https://www.pornhub.com/video/tag/{query}"
                + (f"?page={page}" if page > 1 else ""))
@@ -411,13 +467,100 @@ def _fetch_pornhub(mode: str, query: str, start: int, end: int,
     cards = _parse_ph_cards(html)
     if log:
         log(f"Каталог PornHub: {len(cards)} карточек со страницы {url}")
-    return cards
+    return cards, len(cards) >= PAGE_SIZE
 
 
 FETCHERS = {
     "youtube": _fetch_youtube,
     "pornhub": _fetch_pornhub,
 }
+
+
+# ---------------------------- RSS каналов ---------------------------- #
+# YouTube отдаёт ленту канала (последние ~15 загрузок) с точной датой
+# публикации - единственный дешёвый способ получить «свежее от каналов»
+# с сортировкой по дате: flat-список страницы канала дат не несёт.
+
+_RSS_ENTRY_RE = re.compile(r"<entry>(.*?)</entry>", re.S)
+_RSS_ID_RE = re.compile(r"<yt:videoId>([^<]+)")
+_RSS_TITLE_RE = re.compile(r"<title>([^<]+)")
+_RSS_PUB_RE = re.compile(r"<published>([^<]+)")
+_RSS_THUMB_RE = re.compile(r'<media:thumbnail url="([^"]+)"')
+_RSS_VIEWS_RE = re.compile(r'<media:statistics views="([^"]+)"')
+_RSS_UPDATED_RE = re.compile(r"<updated>([^<]+)")
+
+CHANNELS_MAX = 12         # каналов вMerge одной страницы каталога
+
+
+def _rss_feed_url(channel: dict) -> str | None:
+    """Адрес ленты канала: по UC-id или по ссылке канала."""
+    remote_id = to_text(channel.get("remote_id")) or ""
+    if remote_id.startswith("UC"):
+        return ("https://www.youtube.com/feeds/videos.xml"
+                f"?channel_id={remote_id}")
+    url = to_text(channel.get("url")) or ""
+    match = re.search(r"/channel/(UC[A-Za-z0-9_-]{22})", url)
+    if match:
+        return ("https://www.youtube.com/feeds/videos.xml"
+                f"?channel_id={match.group(1)}")
+    return None
+
+
+def _parse_rss(xml: str, channel_title: str | None) -> list[dict]:
+    """Лента канала -> записи карточек (id, title, дата, превью, просмотры)."""
+    out: list[dict] = []
+    for chunk in _RSS_ENTRY_RE.finditer(xml):
+        entry = chunk.group(1)
+        video_id = _RSS_ID_RE.search(entry)
+        if not video_id:
+            continue
+        title = _RSS_TITLE_RE.search(entry)
+        published = _RSS_PUB_RE.search(entry) or _RSS_UPDATED_RE.search(entry)
+        thumb = _RSS_THUMB_RE.search(entry)
+        views = _RSS_VIEWS_RE.search(entry)
+        out.append({
+            "id": video_id.group(1),
+            "title": to_text(title.group(1)) if title else video_id.group(1),
+            "url": f"https://www.youtube.com/watch?v={video_id.group(1)}",
+            "upload_date": published.group(1) if published else None,
+            "thumbnail": to_text(thumb.group(1)) if thumb else None,
+            "view_count": to_int(views.group(1)) if views else None,
+            "channel": channel_title,
+        })
+    return out
+
+
+def _fetch_youtube_channels(channels: list[dict], settings: dict | None,
+                            log=None) -> tuple[list, bool]:
+    """Последние загрузки каналов человека (RSS), сортировка по дате.
+
+    Один GET на канал (дешеве, чем разворачивать страницы каналов),
+    датировано - поэтому сортировка «новые» работает честно. Лента
+    отдаёт ~15 последних загрузок: глубокая история канала - режим
+    «канал» (страница загрузок), где дат нет.
+    """
+    records: list[dict] = []
+    failed = 0
+    for channel in channels[:CHANNELS_MAX]:
+        feed = _rss_feed_url(channel)
+        if not feed:
+            continue
+        try:
+            xml = _http_get(feed, settings)
+        except CatalogError as exc:
+            if getattr(exc, "kind", "") == "blocked":
+                raise
+            failed += 1
+            continue
+        records += _parse_rss(xml, to_text(channel.get("title")))
+    if log:
+        log(f"Каталог каналов: {len(records)} записей с "
+            f"{min(len(channels), CHANNELS_MAX)} каналов"
+            + (f", {failed} недоступно" if failed else ""))
+    # Новые сверху; без даты - в конец (не выдумываем порядок).
+    records.sort(key=lambda item: str(item.get("upload_date") or ""),
+                 reverse=True)
+    return records, False
 
 
 def _args(platform: str, mode: str, query: str, page) -> tuple[str, str, str, int]:
@@ -434,14 +577,14 @@ def _args(platform: str, mode: str, query: str, page) -> tuple[str, str, str, in
 
 
 def peek(platform: str, mode: str = "trending", query: str = "",
-         page: int = 1) -> dict | None:
+         page: int = 1, channels: list[dict] | None = None) -> dict | None:
     """Кэш карточек без обращения к сети.
 
     Повторное открытие вкладки отдаётся мгновенно (и без воркера): кэш
     свежий - сетевой запрос не нужен вообще.
     """
     platform, mode, query, page = _args(platform, mode, query, page)
-    cached = _cache_get(platform, mode, query, page)
+    cached = _cache_get(platform, mode, query, page, _scope(channels))
     if not cached:
         return None
     cached.pop("_ts", None)
@@ -449,12 +592,22 @@ def peek(platform: str, mode: str = "trending", query: str = "",
     return cached
 
 
+def _scope(channels: list[dict] | None) -> str:
+    """Кэш-ключ режима «каналы»: список каналов (их id) часть запроса."""
+    if not channels:
+        return ""
+    return ",".join(str(item.get("remote_id") or item.get("url") or "")
+                    for item in channels[:CHANNELS_MAX])
+
+
 def fetch(platform: str, mode: str = "trending", query: str = "", page: int = 1,
-          settings: dict | None = None, force: bool = False, log=None) -> dict:
+          settings: dict | None = None, force: bool = False, log=None,
+          channels: list[dict] | None = None) -> dict:
     """Страница карточек площадки: метаданные без скачивания."""
     platform, mode, query, page = _args(platform, mode, query, page)
+    scope = _scope(channels)
     if not force:
-        cached = _cache_get(platform, mode, query, page)
+        cached = _cache_get(platform, mode, query, page, scope)
         if cached:
             cached.pop("_ts", None)
             cached["source"] = "cache"
@@ -463,9 +616,8 @@ def fetch(platform: str, mode: str = "trending", query: str = "", page: int = 1,
     if not fetcher:
         raise CatalogError("Каталог этой площадки не поддерживается",
                            kind="unsupported")
-    start = (page - 1) * PAGE_SIZE + 1
-    end = page * PAGE_SIZE
-    raw = fetcher(mode, query, start, end, settings, log)
+    raw, has_more = fetcher(mode, query, page, settings, log,
+                            channels=channels)
     # Дедуп по video_id: разные адреса одной площадки дают одни и те же
     # записи, а «Загрузить ещё» не должен плодить копии.
     items: list = []
@@ -479,12 +631,20 @@ def fetch(platform: str, mode: str = "trending", query: str = "", page: int = 1,
         seen.add(item["video_id"])
         items.append(item)
     if not items:
+        if page > 1:
+            # Пустая (или дублированная) следующая страница = конец списка,
+            # а не ошибка: интерфейс должен остановиться, не показывать
+            # «повторить» на пустом месте.
+            result = {"ok": True, "items": [], "has_more": False,
+                      "source": "site", "platform": platform, "mode": mode,
+                      "query": query, "page": page, "end": True}
+            _cache_set(platform, mode, query, page, result, scope)
+            return result
         raise CatalogError(
             "Площадка ответила, но карточек на этой странице нет "
             "(попробуйте поиск или «Обновить»)", kind="empty")
-    result = {"ok": True, "items": items,
-              "has_more": len(raw) >= PAGE_SIZE, "source": "site",
-              "platform": platform, "mode": mode, "query": query,
-              "page": page}
-    _cache_set(platform, mode, query, page, result)
+    result = {"ok": True, "items": items, "has_more": has_more,
+              "source": "site", "platform": platform, "mode": mode,
+              "query": query, "page": page}
+    _cache_set(platform, mode, query, page, result, scope)
     return result

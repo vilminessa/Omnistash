@@ -697,8 +697,14 @@ class Api:
         mode, query, page, force = parsed["mode"], parsed["query"], \
             parsed["page"], parsed["force"]
         settings = self._current_settings()
+        # «Новое от каналов» - список каналов человека (те, чьи видео
+        # сохранялись или добавлены как источник-канал).
+        channels = None
+        if mode == "channels":
+            channels = repo.channels_recent(self.db.conn, platform,
+                                            limit=catalog.CHANNELS_MAX)
         if not force:
-            cached = catalog.peek(platform, mode, query, page)
+            cached = catalog.peek(platform, mode, query, page, channels)
             if cached:
                 cached["items"] = self._mark_in_library(cached.get("items")
                                                         or [], platform)
@@ -723,7 +729,7 @@ class Api:
             try:
                 res = catalog.fetch(platform, mode=mode, query=query,
                                     page=page, settings=settings, force=force,
-                                    log=self._log)
+                                    log=self._log, channels=channels)
                 items = self._mark_in_library(res.get("items") or [], platform)
                 payload = {"items": items, "has_more": res.get("has_more"),
                            "source": res.get("source"), "error": None,
@@ -793,6 +799,22 @@ class Api:
         request = dict(request or {})
         request["page"] = max(int(request.get("page") or 1), 1)
         return self.site_catalog(request)
+
+    def site_catalog_channels(self, request=None) -> dict:
+        """Каналы человека для чипсов каталога (P3): кто добавлен/сохранял.
+
+        Список по последнему синку: первые - самые «свежие» каналы; чипс
+        даёт режим «channel» (страница загрузок канала) и RSS-режим
+        «channels» (новое от всех сразу, с датами).
+        """
+        request = request or {}
+        platform = str(request.get("platform") or "").lower() or None
+        try:
+            limit = min(int(request.get("limit") or catalog.CHANNELS_MAX), 40)
+        except Exception:  # noqa: BLE001
+            limit = catalog.CHANNELS_MAX
+        rows = repo.channels_recent(self.db.conn, platform, limit=limit)
+        return {"ok": True, "channels": rows}
 
     def site_catalog_clear(self, request=None) -> dict:
         """Сброс кэша карточек (одной площадки или всех)."""

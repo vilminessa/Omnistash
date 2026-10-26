@@ -68,8 +68,9 @@ class TestBrowserOptionInTransports(ProfileCase):
         created = {}
 
         class FakeYDL:
-            def __init__(self, opts):
+            def __init__(self, opts, **kwargs):
                 created["opts"] = opts
+                created["kwargs"] = kwargs
 
             def __enter__(self):
                 return self
@@ -94,8 +95,9 @@ class TestBrowserOptionInTransports(ProfileCase):
         created = {}
 
         class FakeYDL:
-            def __init__(self, opts):
+            def __init__(self, opts, **kwargs):
                 created["opts"] = opts
+                created["kwargs"] = kwargs
 
             def __enter__(self):
                 return self

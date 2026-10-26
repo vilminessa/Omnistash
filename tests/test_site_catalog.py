@@ -15,6 +15,7 @@ from app import legal as legal_mod
 from app import repo
 from app.catalog import CACHE_TTL, CatalogError, PAGE_SIZE
 from app.gui import Api
+from app.util import QuietLogger
 
 
 def entry(remote_id="vid1", **overrides):
@@ -58,8 +59,9 @@ def scripted(responses):
     class Ydl:
         calls = []
 
-        def __init__(self, opts):
-            self.opts = dict(opts)
+        def __init__(self, opts, **kwargs):
+            self.opts = dict(opts)      # logger и playlist_items - в params
+            self.kwargs = kwargs
 
         def __enter__(self):
             return self
@@ -225,11 +227,57 @@ class TestPagination(CatalogCase):
         self.assertTrue(res["has_more"])
         self.assertEqual(len(res["items"]), PAGE_SIZE)
 
-    def test_short_page_ends(self):
+    def test_trending_search_are_open_pages(self):
+        """Тренды/поиск открыты: короткая страница ещё не значит «конец».
+
+        YouTube не отдаёт признак конца списка - листание заканчивает UI,
+        когда страница пришла пустой или полностью дублированной.
+        """
         with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
                                scripted([{"entries": [entry(), entry("vid2")]}])):
-            res = catalog.fetch(platform="youtube")
+            res = catalog.fetch(platform="youtube", mode="trending",
+                                force=True)
+        self.assertTrue(res["has_more"])
+
+    def test_channel_page_ends_on_short_page(self):
+        """Страница загрузок канала конечна: короткая страница = конец."""
+        with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
+                               scripted([{"entries": [entry(), entry("vid2")]}])):
+            res = catalog.fetch(platform="youtube", mode="channel",
+                                query="https://www.youtube.com/channel/UC"
+                                      + "a" * 22 + "/videos", force=True)
         self.assertFalse(res["has_more"])
+
+    def test_ph_has_more_by_page_length(self):
+        """PH отдаёт ~44 карточки на страницу: has_more по длине страницы,
+        а не по нашему PAGE_SIZE (иначе «Загрузить ещё» вставал бы)."""
+        big = "\n".join(
+            f'<div class="phimage"><a href="/view_video.php?viewkey=k{i}"'
+            f' title="К {i}"><img src="t{i}.jpg"></a></div>'
+            for i in range(31))
+        urls = []
+
+        def record(url, settings):
+            urls.append(url)
+            return big
+
+        with mock.patch.object(catalog, "_http_get", record):
+            first = catalog.fetch(platform="pornhub", force=True)
+            self.assertTrue(first["has_more"])
+            self.assertEqual(len(first["items"]), 31)
+            catalog.fetch(platform="pornhub", page=2, force=True)
+        self.assertIn("page=2", urls[1], "вторая страница - параметр страницы")
+
+    def test_empty_next_page_is_end_not_error(self):
+        """Следняя страница пустая - это конец листа, а не ошибка «повтори»."""
+        with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
+                               scripted([{"entries": []}, {"entries": []},
+                                         {"entries": []}])):
+            res = catalog.fetch(platform="youtube", page=2, force=True)
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["items"], [])
+        self.assertFalse(res["has_more"])
+        self.assertTrue(res.get("end"))
 
     def test_trending_falls_back_to_results(self):
         """feed/trending в плоском режиме часто пуст - пробуем results."""
@@ -408,6 +456,158 @@ class TestFailures(CatalogCase):
         self.assertEqual(len(fake.calls), 1, "кэш ошибки не блокирует повтор")
 
 
+class TestSilence(CatalogCase):
+    """Шум: логгер yt-dlp молчит, текст отказов - без ANSI."""
+
+    def test_extractor_logger_is_silent(self):
+        """Логгер передаётся молчаливый: ERROR yt-dlp не печатает в консоль.
+
+        quiet=True логгер не глушит - без SilentLogger строки
+        «ERROR: [youtube:tab] …» забивают консоль и журнал.
+        """
+        fake = scripted([{"entries": [entry()]}])
+        with mock.patch.object(catalog.yt_dlp, "YoutubeDL", fake):
+            catalog.fetch(platform="youtube", mode="trending", force=True)
+        logger = fake.calls[0][1]["logger"]
+        self.assertIsInstance(logger, QuietLogger)
+        self.assertTrue(hasattr(logger, "error") and hasattr(logger, "warning")
+                        and hasattr(logger, "info"))
+
+    def test_logger_error_goes_to_journal_without_ansi(self):
+        """Логгер пишет ошибку в журнал (без ANSI) и молчит в остальном."""
+        from app.util import QuietLogger as QL
+        messages = []
+        logger = QL(messages.append)
+        logger.error("\x1b[0;31mERROR:\x1b[0m 410 Gone")
+        logger.warning("warn me")
+        logger.info("progress")
+        self.assertEqual(messages, ["ERROR: 410 Gone"])
+
+    def test_clean_text_strips_ansi(self):
+        self.assertEqual(catalog._clean("\x1b[0;31mERROR:\x1b[0m 410 Gone"),
+                         "ERROR: 410 Gone")
+        self.assertEqual(catalog._clean(None), "")
+
+    def test_failure_logs_clean_message(self):
+        """Отказ страницы пишется в журнал без escape-кодов."""
+        err = catalog.yt_dlp.utils.DownloadError(
+            "\x1b[0;31mERROR:\x1b[0m [youtube:tab] redirect")
+        messages = []
+        with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
+                               scripted([err, {"entries": [entry()]}])), \
+             mock.patch.object(catalog, "_supported", lambda url: True):
+            catalog.fetch(platform="youtube", mode="trending", force=True,
+                          log=messages.append)
+        joined = "\n".join(messages)
+        self.assertNotIn("\x1b", joined)
+        self.assertIn("redirect", joined)
+
+
+RSS_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://schemas.microsoft.com/2005/Atom"
+      xmlns:media="http://search.yahoo.com/mrss/">
+  <title>Канал</title>
+  <entry>
+    <yt:videoId>old1</yt:videoId>
+    <title>Старое видео</title>
+    <published>2026-10-01T10:00:00+00:00</published>
+    <media:group>
+      <media:thumbnail url="https://i.ytimg.com/vi/old1/hqdefault.jpg"/>
+      <media:statistics views="700"/>
+    </media:group>
+  </entry>
+  <entry>
+    <yt:videoId>new2</yt:videoId>
+    <title>Новое видео</title>
+    <published>2026-10-25T10:00:00+00:00</published>
+    <media:group>
+      <media:thumbnail url="https://i.ytimg.com/vi/new2/hqdefault.jpg"/>
+      <media:statistics views="900"/>
+    </media:group>
+  </entry>
+</feed>
+"""
+
+CHANNELS = [{"remote_id": "UC" + "a" * 22, "title": "Канал",
+             "url": "https://www.youtube.com/channel/UC" + "a" * 22}]
+
+
+class TestChannelsMode(CatalogCase):
+    """Режим «новое от каналов»: лента канала (RSS) с датой публикации.
+
+    Flat-список страницы канала дат не несёт, поэтому свежее от каналов
+    берётся из RSS: один дешёвый GET на канал, сортировка по дате честная.
+    """
+
+    def test_rss_cards_sorted_by_date(self):
+        urls = []
+
+        def record(url, settings):
+            urls.append(url)
+            return RSS_XML
+
+        with mock.patch.object(catalog, "_http_get", record):
+            res = catalog.fetch(platform="youtube", mode="channels",
+                                channels=CHANNELS, force=True)
+        self.assertIn("feeds/videos.xml", urls[0])
+        self.assertIn("channel_id=UC", urls[0])
+        self.assertEqual([item["video_id"] for item in res["items"]],
+                         ["new2", "old1"], "новые сверху")
+        self.assertEqual(res["items"][0]["uploaded_at"], "2026-10-25")
+        self.assertEqual(res["items"][0]["views"], 900)
+        self.assertEqual(res["items"][0]["thumb"],
+                         "https://i.ytimg.com/vi/new2/hqdefault.jpg")
+        self.assertFalse(res["has_more"], "лента отдаёт последние ~15 - дальше листать нечем")
+
+    def test_channels_scope_cached_separately(self):
+        """Список каналов - часть кэш-ключа: другой список не берётся из кэша."""
+        calls = []
+
+        def record(url, settings):
+            calls.append(url)
+            return RSS_XML
+
+        with mock.patch.object(catalog, "_http_get", record):
+            catalog.fetch(platform="youtube", mode="channels",
+                          channels=CHANNELS)
+            catalog.fetch(platform="youtube", mode="channels",
+                          channels=CHANNELS)         # кэш
+            other = [{"remote_id": "UC" + "b" * 22, "title": "Другой"}]
+            catalog.fetch(platform="youtube", mode="channels",
+                          channels=other, force=False)
+        self.assertEqual(len(calls), 2,
+                         "тот же список - из кэша, новый список - запрос")
+
+    def test_channels_blocked_propagates(self):
+        with mock.patch.object(catalog, "_http_get",
+                               raising(CatalogError("Площадка не ответила",
+                                                    kind="blocked"))):
+            with self.assertRaises(CatalogError) as ctx:
+                catalog.fetch(platform="youtube", mode="channels",
+                              channels=CHANNELS, force=True)
+        self.assertEqual(ctx.exception.kind, "blocked")
+
+    def test_channels_without_channels(self):
+        """Ни одного канала - честный текст, а не пустой экран молча."""
+        with self.assertRaises(CatalogError) as ctx:
+            catalog.fetch(platform="youtube", mode="channels", channels=[])
+        self.assertEqual(ctx.exception.kind, "empty")
+        self.assertIn("канал", str(ctx.exception))
+
+    def test_channel_page_mode_paginates(self):
+        """Один канал: страница загрузок диапазонно (глубже, но без дат)."""
+        with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
+                               scripted([{"entries": [entry("vid1")]}])) as fake:
+            catalog.fetch(platform="youtube", mode="channel",
+                          query="https://www.youtube.com/channel/UC" + "a" * 22
+                                + "/videos", force=True)
+        self.assertEqual(fake.calls[0][0],
+                         "https://www.youtube.com/channel/UC" + "a" * 22
+                         + "/videos")
+        self.assertEqual(fake.calls[0][1]["playlist_items"],
+                         f"1-{PAGE_SIZE}")
+
+
 class ApiCatalogCase(unittest.TestCase):
     """Api: site-каталог не конфликтует с mesh-каталогом (catalog_* заняты)."""
 
@@ -507,7 +707,7 @@ class ApiCatalogCase(unittest.TestCase):
     def test_cancel_drops_result(self):
         """Отмена: карточки не применяются, статус говорит «отменено»."""
         class Slow:
-            def __init__(self, opts):
+            def __init__(self, opts, **kwargs):
                 self.opts = dict(opts)
 
             def __enter__(self):
@@ -554,6 +754,44 @@ class ApiCatalogCase(unittest.TestCase):
         res = self.api.site_catalog_clear({"platform": "youtube"})
         self.assertTrue(res["ok"])
         self.assertEqual(res["removed"], 1)
+
+    def test_channels_endpoint_lists_library_channels(self):
+        repo.upsert_video(self.api.db.conn,
+                          {"platform": "youtube", "remote_id": "vid1",
+                           "title": "Клип",
+                           "channel": {"platform": "youtube",
+                                       "remote_id": "UC" + "a" * 22,
+                                       "title": "Канал", "handle": None,
+                                       "url": "https://www.youtube.com/channel/UC"
+                                              + "a" * 22, "fallback": False}},
+                          full=False)
+        res = self.api.site_catalog_channels({"platform": "youtube"})
+        self.assertTrue(res["ok"])
+        self.assertEqual([item["remote_id"] for item in res["channels"]],
+                         ["UC" + "a" * 22])
+        self.assertEqual(res["channels"][0]["n"], 1)
+
+    def test_site_catalog_channels_mode_from_library(self):
+        """Режим channels: список каналов берётся из библиотеки, даты из RSS."""
+        repo.upsert_video(self.api.db.conn,
+                          {"platform": "youtube", "remote_id": "new2",
+                           "title": "Мой клип",
+                           "channel": {"platform": "youtube",
+                                       "remote_id": "UC" + "a" * 22,
+                                       "title": "Канал", "handle": None,
+                                       "url": None, "fallback": False}},
+                          full=False)
+        with mock.patch.object(catalog, "_http_get",
+                               lambda url, settings: RSS_XML):
+            res = self.load({"platform": "youtube", "mode": "channels"})
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual([item["video_id"] for item in res["items"]],
+                         ["new2", "old1"])
+        self.assertTrue(res["items"][0]["added"],
+                        "карточка канала, который уже сохранялся, помечена")
+        self.assertFalse(res["items"][1]["added"])
+        self.assertEqual(res["items"][0]["uploaded_at"], "2026-10-25")
+        self.assertFalse(res["has_more"])
 
     def test_platforms_report_catalog_support(self):
         """Переключатель «Каталог» показывают только поддерживаемые

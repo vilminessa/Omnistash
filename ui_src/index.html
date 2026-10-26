@@ -271,6 +271,15 @@
       </div>
       <input type="search" id="ph-search"
              placeholder="Поиск по названию и описанию…" autocomplete="off">
+      <select id="cat-mode" title="Режим каталога" hidden>
+        <option value="channels">Новое от каналов</option>
+        <option value="trending">Тренды</option>
+      </select>
+      <select id="cat-sort" title="Сортировка каталога" hidden>
+        <option value="date:desc">по дате (новые)</option>
+        <option value="views:desc">по просмотрам</option>
+        <option value="title:asc">по названию</option>
+      </select>
       <input type="search" id="cat-search" placeholder="Поиск по {площадка}..." autocomplete="off" hidden>
       <select id="ph-sort" title="Сортировка">
         <option value="date:desc">по дате (новые)</option>
@@ -288,6 +297,7 @@
     </div>
     <div class="toolbar" id="ph-tags" aria-label="Фильтр по тегам"></div>
     <div class="toolbar" id="cat-tags" aria-label="Фильтр каталога: исполнители и теги карточек" hidden></div>
+    <div class="toolbar" id="cat-channels" aria-label="Каналы каталога" hidden></div>
     <div id="ph-library-wrap">
       <div class="table-wrap">
         <table class="table">
@@ -309,10 +319,16 @@
       </div>
     </div>
     <div id="cat-wrap" hidden>
-      <div class="empty" id="cat-empty" hidden></div>
-      <div id="cat-grid" class="card-grid"></div>
-      <div style="padding:12px; text-align:center">
-        <button class="btn ghost" id="cat-more" hidden>Загрузить ещё</button>
+      <!-- Скролл внутри панели (как .table-wrap у библиотеки): body с
+           overflow:hidden, поэтому без этого контейнера карточки ниже
+           видимой области просто обрезались, и «Загрузить ещё» не
+           появлялся на экране. -->
+      <div id="cat-scroll" class="cat-scroll">
+        <div class="empty" id="cat-empty" hidden></div>
+        <div id="cat-grid" class="card-grid"></div>
+        <div style="padding:12px; text-align:center">
+          <button class="btn ghost" id="cat-more" hidden>Загрузить ещё</button>
+        </div>
       </div>
     </div>
   </section>

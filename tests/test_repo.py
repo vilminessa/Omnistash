@@ -495,5 +495,54 @@ class TestCollections(RepoCase):
         self.assertEqual(tree["collections"][0]["total"], 1)
 
 
+class TestChannelsRecent(RepoCase):
+    """Каналы человека для каталога «новое от каналов» (P3)."""
+
+    def _channel_videos(self, remote_id, title, synced=None, videos=1):
+        channel = {"platform": "youtube", "remote_id": remote_id,
+                   "title": title, "handle": None,
+                   "url": f"https://www.youtube.com/channel/{remote_id}",
+                   "fallback": False}
+        for index in range(videos):
+            repo.upsert_video(self.conn, {
+                "platform": "youtube", "remote_id": f"{remote_id}_{index}",
+                "title": f"V{index}", "channel": channel}, full=False)
+        if synced:
+            self.conn.execute(
+                "UPDATE videos SET synced_at=? WHERE channel_id IN "
+                "(SELECT id FROM channels WHERE remote_id=?)",
+                (synced, remote_id))
+
+    def test_order_by_last_sync(self):
+        self._channel_videos("UC" + "a" * 22, "Старый", "2026-10-01T00:00:00")
+        self._channel_videos("UC" + "b" * 22, "Новый", "2026-10-20T00:00:00")
+        rows = repo.channels_recent(self.conn, "youtube")
+        self.assertEqual([row["remote_id"] for row in rows],
+                         ["UC" + "b" * 22, "UC" + "a" * 22],
+                         "свежий синк канала - первым")
+        self.assertEqual(rows[0]["n"], 1)
+
+    def test_channel_without_videos_but_added_as_source(self):
+        """Канал добавлен ссылкой (источник-загрузки), видео ещё нет."""
+        repo.ensure_playlist(self.conn, {
+            "platform": "youtube", "remote_id": "UU" + "c" * 22,
+            "title": "Загрузки", "kind": "uploads", "url": "https://x",
+            "channel": {"platform": "youtube", "remote_id": "UC" + "d" * 22,
+                        "title": "Канал без строк", "handle": None,
+                        "url": None, "fallback": False}})
+        rows = repo.channels_recent(self.conn, "youtube")
+        self.assertEqual([row["remote_id"] for row in rows],
+                         ["UC" + "d" * 22])
+
+    def test_platform_filter_and_limit(self):
+        self._channel_videos("UC" + "e" * 22, "Y", "2026-10-05T00:00:00",
+                             videos=3)
+        self._channel_videos("UC" + "f" * 22, "Y2", "2026-10-06T00:00:00")
+        rows = repo.channels_recent(self.conn, "youtube", limit=1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["remote_id"], "UC" + "f" * 22)
+        self.assertEqual(repo.channels_recent(self.conn, "pornhub"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

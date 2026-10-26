@@ -3676,8 +3676,10 @@
                     offset: 0, rows: [], total: 0, tags: [] };
   var platTabsJson = "";
   var catalogState = { platform: "", view: "library", query: "", tag: "",
+                       channel: "", mode: "channels", sort: "date:desc",
                        page: 1, items: [], loading: false, ended: false,
-                       loaded: false, pollTimer: null };
+                       loaded: false, pollTimer: null, channels: null };
+  var CAT_MAX_PAGES = 8;    // страховка: не листать бесконечно глубоко
 
   function openPlatform(id, label, adult, hasCatalog) {
     platState.platform = id;
@@ -3693,9 +3695,16 @@
     catalogState.platform = id;
     catalogState.query = "";
     catalogState.tag = "";
+    catalogState.channel = "";
+    catalogState.mode = "channels";
+    catalogState.sort = "date:desc";
+    catalogState.channels = null;
     var cs = $("cat-search");
     if (cs) cs.value = "";
+    if ($("cat-mode")) $("cat-mode").value = "channels";
+    if ($("cat-sort")) $("cat-sort").value = "date:desc";
     if ($("cat-tags")) { $("cat-tags").hidden = true; $("cat-tags").innerHTML = ""; }
+    if ($("cat-channels")) { $("cat-channels").hidden = true; $("cat-channels").innerHTML = ""; }
     catalogState.page = 1;
     catalogState.items = [];
     catalogState.loaded = false;
@@ -3720,6 +3729,9 @@
     $("ph-sort").hidden = false;
     if ($("cat-search")) $("cat-search").hidden = true;
     if ($("cat-refresh")) $("cat-refresh").hidden = true;
+    if ($("cat-mode")) $("cat-mode").hidden = true;
+    if ($("cat-sort")) $("cat-sort").hidden = true;
+    if ($("cat-channels")) $("cat-channels").hidden = true;
     switchTab("platform");
   }
 
@@ -3881,6 +3893,11 @@
       catalogState.page = 1; catalogState.items = []; catalogState.ended = false;
     }
     if (catalogState.ended && !reset) return;
+    if (catalogState.page > CAT_MAX_PAGES) {
+      catalogState.ended = true;
+      $("cat-more").hidden = true;
+      return;
+    }
     catalogState.loading = true;
     var grid = $("cat-grid");
     var empty = $("cat-empty");
@@ -3890,13 +3907,13 @@
       empty.hidden = true;
     }
     more.hidden = true;
+    var mode = catalogState.tag ? "tag"
+      : catalogState.channel ? "channel"
+      : catalogState.query ? "search" : catalogState.mode;
     call("site_catalog", {
       platform: catalogState.platform,
-      // Тег со карточек (PH) - страница тега площадки; поиск - строка
-      // человека; иначе тренды.
-      mode: catalogState.tag ? "tag"
-                             : (catalogState.query ? "search" : "trending"),
-      query: catalogState.tag || catalogState.query,
+      mode: mode,
+      query: catalogState.tag || catalogState.channel || catalogState.query,
       page: catalogState.page,
       force: !!force
     }).then(function (res) {
@@ -4005,35 +4022,101 @@
     box.innerHTML = chips;
   }
 
+  function catSortApply() {
+    // Сортировка уже загруженных карточек (в месте, где они лежат).
+    var parts = String(catalogState.sort || "date:desc").split(":");
+    var col = parts[0];
+    var dir = parts[1] === "asc" ? 1 : -1;
+    catalogState.items.sort(function (a, b) {
+      if (col === "views") return dir * ((a.views || 0) - (b.views || 0));
+      if (col === "title") {
+        return dir * String(a.title || "").localeCompare(String(b.title || ""), "ru");
+      }
+      var ad = a.uploaded_at || "", bd = b.uploaded_at || "";
+      if (!ad || !bd) return ad ? -1 : (bd ? 1 : 0);  // без даты - в конец
+      return dir * String(ad).localeCompare(String(bd));
+    });
+  }
+
+  function catChannelsRender() {
+    // Чипсы каналов человека: «все каналы» = RSS-новое от всех сразу,
+    // отдельный канал = страница его загрузок (листается глубже).
+    var box = $("cat-channels");
+    var list = catalogState.channels || [];
+    if (!list.length) {
+      box.hidden = true;
+      box.innerHTML = "";
+      return;
+    }
+    var chips = '<button class="btn ghost ph-cat' +
+      (!catalogState.channel ? " active" : "") + '" data-channel="">' +
+      "все каналы</button>";
+    list.forEach(function (channel) {
+      var key = channel.url || channel.remote_id;
+      var active = catalogState.channel === key ? " active" : "";
+      chips += '<button class="btn ghost ph-cat' + active +
+        '" data-channel="' + esc(key) + '">' +
+        esc(channel.title || channel.remote_id) + " (" + channel.n + ")</button>";
+    });
+    box.hidden = false;
+    box.innerHTML = chips;
+  }
+
+  function catChannelsLoad() {
+    call("site_catalog_channels", { platform: catalogState.platform })
+      .then(function (res) {
+        catalogState.channels = (res && res.ok) ? (res.channels || []) : [];
+        if (!catalogState.channels.length && catalogState.mode === "channels") {
+          // Нечего собирать по каналам - показываем тренды площадки.
+          catalogState.mode = "trending";
+          var sel = $("cat-mode");
+          if (sel) sel.value = "trending";
+        }
+        catChannelsRender();
+      });
+  }
+
   function catApply(reset, res) {
-    if (reset) {
-      catalogState.items = res.items || [];
-    } else {
+    var incoming = res.items || [];
+    var fresh = incoming;
+    if (!reset) {
       // Дедуп по video_id: страница может повторять карточки предыдущей.
       var seen = {};
       catalogState.items.forEach(function (it) { seen[it.video_id] = 1; });
-      catalogState.items = catalogState.items.concat(
-        (res.items || []).filter(function (it) {
-          if (seen[it.video_id]) return false;
-          seen[it.video_id] = 1;
-          return true;
-        }));
+      fresh = incoming.filter(function (it) {
+        if (seen[it.video_id]) return false;
+        seen[it.video_id] = 1;
+        return true;
+      });
+      catalogState.items = catalogState.items.concat(fresh);
+    } else {
+      catalogState.items = incoming;
     }
-    catalogState.ended = !res.has_more;
+    // Конец листа: площадка ответила «нет следующей страницы» ИЛИ страница
+    // вернула только уже показанное (тогда листание бессмысленно).
+    catalogState.ended = !res.has_more || (!reset && !fresh.length);
     catalogState.loaded = true;
+    catSortApply();
     catTagsRender();
+    catRender();
+  }
+
+  function catRender() {
+    var grid = $("cat-grid");
+    var more = $("cat-more");
     if (!catalogState.items.length) {
-      $("cat-grid").innerHTML = "";
-      $("cat-more").hidden = true;
+      grid.innerHTML = "";
+      more.hidden = true;
       catNotice("empty", "Карточек на этой странице нет");
       return;
     }
     $("cat-empty").hidden = true;
-    $("cat-grid").innerHTML = catalogState.items.map(function (it, i) {
+    grid.innerHTML = catalogState.items.map(function (it, i) {
       var dur = it.duration_s ? humanDuration(it.duration_s) : "";
       var views = it.views != null ? bigCount(it.views) : "";
+      var date = it.uploaded_at ? String(it.uploaded_at).slice(0, 10) : "";
       var people = (it.people || []).slice(0, 2).join(", ");
-      var meta = [views ? views + " просмотров" : "",
+      var meta = [date ? date : "", views ? views + " просмотров" : "",
                   it.author ? it.author : "",
                   people ? "исполнители: " + people : ""]
         .filter(Boolean).join(" · ");
@@ -4054,7 +4137,7 @@
         '<div class="cat-actions">' + action + "</div>" +
       "</div>";
     }).join("");
-    $("cat-more").hidden = catalogState.ended;
+    more.hidden = catalogState.ended;
     if (!catalogState.ended) {
       setTimeout(function () {
         var io = new IntersectionObserver(function (entries) {
@@ -4065,8 +4148,8 @@
               io.disconnect();
             }
           });
-        }, { rootMargin: "200px" });
-        io.observe($("cat-more"));
+        }, { root: $("cat-scroll"), rootMargin: "200px" });
+        io.observe(more);
       }, 0);
     }
   }
@@ -4134,6 +4217,9 @@
           $("cat-search").hidden = (v !== "catalog");
           $("cat-refresh").hidden = (v !== "catalog");
           $("cat-tags").hidden = (v !== "catalog");
+          $("cat-mode").hidden = (v !== "catalog");
+          $("cat-sort").hidden = (v !== "catalog");
+          $("cat-channels").hidden = (v !== "catalog");
           if (v !== "catalog") {
             // Уход из «Каталога»: опрос статуса останавливаем (загрузка
             // воркера безвредна, но её результат не нужен на другой вкладке).
@@ -4142,7 +4228,10 @@
             catalogState.loading = false;
             $("cat-cancel").hidden = true;
           }
-          if (v === "catalog" && !catalogState.loaded) catLoad(true);
+          if (v === "catalog") {
+            if (catalogState.channels === null) catChannelsLoad();
+            if (!catalogState.loaded) catLoad(true);
+          }
         });
       });
     }
@@ -4154,6 +4243,7 @@
         ctimer = setTimeout(function () {
           catalogState.query = catSearch.value.trim();
           catalogState.tag = "";      // поиск человека сбивает фильтр по тегу
+          catalogState.channel = "";  // и выбор конкретного канала
           catLoad(true);
         }, 300);
       });
@@ -4171,11 +4261,35 @@
         // Исполнитель: поиск площадки по имени (то же поле поиска).
         catalogState.query = btn.dataset.person;
         catalogState.tag = "";
+        catalogState.channel = "";
         $("cat-search").value = btn.dataset.person;
       } else {
         catalogState.tag = btn.dataset.tag || "";
       }
       catLoad(true);
+    });
+    $("cat-channels").addEventListener("click", function (ev) {
+      var btn = ev.target.closest ? ev.target.closest(".ph-cat") : null;
+      if (!btn) return;
+      // «все каналы» - RSS-новое от всех; конкретный канал - его страница
+      // загрузок (листается глубже, но без дат).
+      catalogState.channel = btn.dataset.channel || "";
+      catalogState.tag = "";
+      catalogState.query = "";
+      $("cat-search").value = "";
+      catLoad(true);
+    });
+    $("cat-mode").addEventListener("change", function (ev) {
+      catalogState.mode = ev.target.value;
+      catalogState.channel = "";
+      catalogState.tag = "";
+      catLoad(true);
+    });
+    $("cat-sort").addEventListener("change", function (ev) {
+      catalogState.sort = ev.target.value;
+      // Сортировка уже загруженных карточек - без нового запроса к площадке.
+      catSortApply();
+      catRender();
     });
     $("cat-cancel").addEventListener("click", function () {
       call("site_catalog_cancel").then(function () {

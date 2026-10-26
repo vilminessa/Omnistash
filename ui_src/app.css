@@ -932,6 +932,8 @@ body[data-theme="light"] .row { border-bottom-color: rgba(0, 0, 0, .05); }
 .seg-btn:hover { color: var(--text); }
 
 /* Каталог: карточки */
+#cat-wrap { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.cat-scroll { flex: 1 1 auto; overflow: auto; min-height: 0; }
 .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; padding: 8px 0; }
 .cat-card { background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; }
 .cat-thumb { position: relative; width: 100%; padding-top: 56.25%; background: #000; cursor: pointer; }

@@ -20,7 +20,7 @@ import yt_dlp
 from . import google_auth
 from . import metadata
 from .metadata import PLATFORM, flat_entry, normalize_playlist
-from .util import to_text
+from .util import QuietLogger, clean_text, to_text
 
 CHUNK = 100        # записей на запрос (быстрый плоский синк)
 DEEP_CHUNK = 25    # записей на запрос в полном режиме: каждый чанк в десятки
@@ -63,6 +63,18 @@ def _opts(settings: dict | None) -> dict:
     return opts
 
 
+def _youtube(opts: dict):
+    """YoutubeDL с молчаливым логгером (util.QuietLogger).
+
+    quiet=True логгер не глушит: без params['logger'] «ERROR: [PornHub]
+    … 410» печатается в консоль и лезет ANSI-кодами в журнал. Причина
+    отказа и так идёт в FetchError -> в журнал, поэтому логгер молчит.
+    """
+    opts = dict(opts)
+    opts["logger"] = QuietLogger()
+    return yt_dlp.YoutubeDL(opts)
+
+
 def _extract(request_url: str, items: str, settings: dict | None = None,
              cookiefile=None) -> dict | None:
     """Один запрос к площадке: плоский список записей указанным диапазоном.
@@ -81,10 +93,10 @@ def _extract(request_url: str, items: str, settings: dict | None = None,
             # Режим «куки из браузера»: копий нет, читает сам yt-dlp.
             opts["cookiesfrombrowser"] = browser_opt
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with _youtube(opts) as ydl:
             return ydl.extract_info(request_url, download=False)
     except yt_dlp.utils.DownloadError as exc:
-        raise FetchError(f"Площадка не ответила: {exc}") from exc
+        raise FetchError(f"Площадка не ответила: {clean_text(exc)}") from exc
 
 
 def fetch_video(url: str, *, settings: dict | None = None,
@@ -109,10 +121,10 @@ def fetch_video(url: str, *, settings: dict | None = None,
     if browser_opt:
         opts["cookiesfrombrowser"] = browser_opt
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with _youtube(opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except yt_dlp.utils.DownloadError as exc:
-        text = str(exc)
+        text = clean_text(exc)
         hint = ""
         if ("Connection aborted" in text or "timed out" in text
                 or "410" in text or "403" in text):
@@ -123,7 +135,7 @@ def fetch_video(url: str, *, settings: dict | None = None,
             hint = (" (площадка недоступна из вашей сети - возможно, "
                     "региональная блокировка: поможет VPN/прокси, либо "
                     "запрос участникам mesh)")
-        raise FetchError(f"Площадка не ответила: {exc}{hint}") from exc
+        raise FetchError(f"Площадка не ответила: {text}{hint}") from exc
     if not isinstance(info, dict) or not info.get("id"):
         raise FetchError("площадка не вернула описание видео")
     return info

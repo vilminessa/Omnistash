@@ -61,8 +61,17 @@ class TestEnsure(unittest.TestCase):
 
 class TestCli(unittest.TestCase):
     def test_once_requires_args(self):
-        with self.assertRaises(SystemExit):
-            link_watch.main(["once"])        # без --id/--token/--peer
+        """Без --id/--token/--peer - argparse роняет процесс (exit 2).
+
+        stderr перехватываем: usage в консоли прогона - шум теста, а не
+        бой приложения (задача OmnistashLinkWatch в планировщике живая).
+        """
+        import contextlib
+        import io
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured), self.assertRaises(SystemExit):
+            link_watch.main(["once"])
+        self.assertIn("--id", captured.getvalue())
 
 
 if __name__ == "__main__":
