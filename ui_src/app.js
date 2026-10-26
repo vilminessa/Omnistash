@@ -211,6 +211,24 @@
       if (flow && flow.phase === "error" && flow.error_kind === "unavailable") {
         markCatalogUnavailable(flow.url);
       }
+      // Мгновенное добавление с карточки: ход виден на карточке, а не в
+      // диалоге. Если флоу сбросился (диалог отменил карточку) или занят
+      // другим источником, карточка возвращается к кнопке - «Добавляю…»
+      // не висит вечно.
+      if (catAdd.url && flow) {
+        if (flow.phase === "idle" || flow.url !== catAdd.url) {
+          catDrop(catAdd.url, "Добавление с карточки остановлено");
+        } else if (flow.phase === "done" || flow.phase === "error") {
+          catFlowDone(flow);
+        } else {
+          catAdd.phase = flow.phase;      // fetching / committing
+          catRender();
+        }
+      } else if (flow && !catAdd.url && catAdd.queue.length &&
+                 (flow.phase === "done" || flow.phase === "error")) {
+        // Диалог плейлиста/канала освободил флоу - очередь карточек продолжает.
+        setTimeout(catRunAdd, 0);
+      }
       renderAddFlow(flow);
     }
     if (changed("migrate", snap.migrate)) {
@@ -3323,7 +3341,9 @@
     lastAddFlow = flow || lastAddFlow;
     flow = flow || { phase: "idle" };
     var overlay = $("add-overlay");
-    overlay.hidden = !(addOpen || flow.phase !== "idle");
+    // Карточка каталога (auto) добавляется без диалога: её ход виден прямо
+    // на карточке, экран «Добавить источник» для неё не открывается.
+    overlay.hidden = !(addOpen || (flow.phase !== "idle" && !flow.auto));
 
     var title = $("add-title");
     var body = $("add-body");
@@ -3656,6 +3676,12 @@
 
   function openAdd() {
     addOpen = true;
+    // Результат карточки каталога (auto-флоу) не показывается в диалоге:
+    // там своя ссылка, а не добавленное видео - чистим флоу и открываем форму.
+    if (lastAddFlow && lastAddFlow.auto) {
+      call("add_close").then(function () { renderAddFlow({ phase: "idle" }); });
+      return;
+    }
     renderAddFlow(lastAddFlow);
   }
 
@@ -3877,12 +3903,120 @@
       });
   }
 
+  /* Мгновенное добавление карточки каталога (CAT-3): без диалога
+     «Добавить источник».Gui пишет одиночное видео сразу (add_start с
+     auto), ход и причина отказа приходят в add_flow по тике. Одна площадка
+     за раз: диалог плейлиста/канала и карточки делят один флоу, поэтому
+     очередь карточек ждёт, пока текущее добавление кончится. */
+  var catAdd = { queue: [], url: "", phase: "" };
+
   function catAddItem(it) {
     if (!it || !it.url) { toast("У карточки нет ссылки", true); return; }
-    // Тот же флоу добавления (add_start): план, счётчики, гейты 18+.
-    addForm.url = it.url;
-    openAdd();
-    runAdd();
+    if (it.failed) {
+      toast("Это видео недоступно на площадке (удалено, приватное или "
+            + "geo-ограничение): повтор не поможет", true);
+      return;
+    }
+    if (it.added) { toast("Уже в библиотеке"); return; }
+    if (catAdd.url !== it.url && catAdd.queue.indexOf(it.url) === -1) {
+      catAdd.queue.push(it.url);
+    }
+    catRunAdd();
+  }
+
+  function catAddBusy() {
+    var flow = lastAddFlow || {};
+    return !!catAdd.url || flow.phase === "fetching" || flow.phase === "committing";
+  }
+
+  function catRunAdd() {
+    if (!catAdd.queue.length || catAddBusy()) return;
+    var url = catAdd.queue.shift();
+    catAdd.url = url;
+    catAdd.phase = "fetching";
+    catRender();
+    catStart(url);
+  }
+
+  function catStart(url) {
+    call("add_start", { url: url, auto: true, storage_id: defaultStorageId() })
+      .then(function (res) {
+        if (res && res.adult_confirm) {
+          // PH5: первая возрастная карточка - явное подтверждение 18+,
+          // потом тот же url под подтверждением.
+          legalDialog(
+            "Возрастной контент",
+            "Эта площадка содержит материалы для взрослых. Подтвердите, " +
+            "что вам есть 18 лет, вы применяете эти материалы только для " +
+            "личного пользования и несёте ответственность за скачиваемое " +
+            "(docs/ACCEPTABLE_USE.md).",
+            "Мне есть 18 лет - подтверждаю"
+          ).then(function (ok) {
+            if (!ok) {
+              catDrop(url, "Не добавлено: подтверждение 18+ не получено");
+              return;
+            }
+            call("legal_accept", { adult: true, aup: true }).then(function (r2) {
+              if (r2 && r2.error) { catDrop(url, r2.error); return; }
+              catStart(url);
+            });
+          });
+          return;
+        }
+        if (res && res.error) {
+          if (/уже идёт/.test(res.error)) {
+            // Диалог плейлиста или другая карточка заняли флоу: ссылка
+            // возвращается в начало очереди и добавится, когда освободится.
+            catAdd.queue.unshift(url);
+            catAdd.url = "";
+            catAdd.phase = "";
+            catRender();
+            setTimeout(catRunAdd, 400);
+            return;
+          }
+          catDrop(url, res.error);
+          return;
+        }
+        // Запрос пошёл: fetching -> committing -> done/error приходит в
+        // add_flow (applySnapshot), подсказки по причине отказа там же.
+      })
+      .catch(function (err) { catDrop(url, "Не удалось добавить: " + err); });
+  }
+
+  function catDrop(url, message) {
+    // Отказ до запроса площадки (18+, кривая ссылка, занят): карточка
+    // возвращается к кнопке, очередь идёт дальше.
+    if (catAdd.url === url) { catAdd.url = ""; catAdd.phase = ""; }
+    catAdd.queue = catAdd.queue.filter(function (u) { u !== url });
+    toast(message, true);
+    catRender();
+    setTimeout(catRunAdd, 0);
+  }
+
+  function catFlowDone(flow) {
+    var url = flow.url || "";
+    var res = flow.result || {};
+    if (flow.phase === "done") {
+      catalogState.items.forEach(function (it) {
+        if (it.url === url) it.added = true;
+      });
+      if (res.already) {
+        toast("Уже в библиотеке: " + (res.title || url));
+      } else if (res.queued) {
+        toast("Добавлено, в очереди загрузки " + res.queued +
+              (res.storage_label ? " → «" + res.storage_label + "»" : ""));
+      } else {
+        toast("Добавлено: метаданные записаны, качаем по кнопке "
+              + "(режим «Ручная» в настройках)");
+      }
+    } else {
+      // Причина отказа уже в тексте: sources.failure_message объясняет
+      // обход/VPN, вход в аккаунт и запрос у участников сети по kind.
+      toast(flow.error || "Не получилось", true);
+    }
+    if (catAdd.url === url) { catAdd.url = ""; catAdd.phase = ""; }
+    catRender();
+    setTimeout(catRunAdd, 0);
   }
 
   function catNotice(kind, message) {
@@ -4162,13 +4296,18 @@
                   it.author ? it.author : "",
                   people ? "исполнители: " + people : ""]
         .filter(Boolean).join(" · ");
+      var pending = catAdd.url === it.url;
       var action = it.failed
         ? '<span class="muted">недоступно на площадке</span>'
         : it.added
           ? '<span class="muted">В библиотеке</span>'
-          : '<button class="btn small cat-add" data-i="' + i + '">+ Добавить</button>';
+          : pending
+            ? '<span class="muted">' +
+              (catAdd.phase === "committing" ? "Записываю…" : "Добавляю…") +
+              "</span>"
+            : '<button class="btn small cat-add" data-i="' + i + '">+ Добавить</button>';
       return '<div class="cat-card' + (it.added ? " added" : "") +
-        (it.failed ? " failed" : "") + '" data-i="' + i + '">' +
+        (it.failed ? " failed" : "") + (pending ? " adding" : "") + '" data-i="' + i + '">' +
         '<div class="cat-thumb" data-i="' + i + '"' +
         ' title="' + esc(it.title) + '">' +
         (it.thumb ? '<img src="' + esc(it.thumb) + '" loading="lazy" ' +
@@ -4352,15 +4491,15 @@
       var node = add || open;
       if (!node) return;
       var item = catalogState.items[Number(node.dataset.i)];
-      if (!item || !item.url) { toast("У карточки нет ссылки", true); return; }
+      if (!item) return;
       if (item.failed) {
         toast("Это видео недоступно на площадке (удалено, приватное или "
               + "geo-ограничение): повтор не поможет", true);
         return;
       }
-      addForm.url = item.url;
-      openAdd();                       // диалог со ссылкой уже вставлена
-      if (add) runAdd();               // кнопка «Добавить» - сразу план
+      if (add) { catAddItem(item); return; }   // + Добавить: видео пишется сразу
+      // Обложка/название - как на сайте: страница видео на площадке.
+      if (item.url) call("open_url", item.url);
     });
     // P3: фильтр по тегу в общей библиотеке (чипсы перерисовывает poll).
     $("lib-tags").addEventListener("click", function (ev) {
@@ -5952,29 +6091,47 @@
             { error: "Вставьте ссылку на плейлист, канал или видео" });
         }
         if (mockAddTimer) clearInterval(mockAddTimer);
-        mockAdd = { phase: "fetching", mode: req.mode || "partial",
+        var auto = !!req.auto;   // карточка каталога: без экрана плана
+        var total = auto ? 1 : 40;
+        mockAdd = { phase: "fetching", mode: auto ? "full" : (req.mode || "partial"),
                     storage_id: req.storage_id || null,
                     account_id: req.account_id || null,
-                    url: req.url,
-                    fetch: { got: 0, total: 40 }, plan: null, stages: [],
+                    url: req.url, auto: auto,
+                    fetch: { got: 0, total: total }, plan: null, stages: [],
                     result: null, error: null };
         var got = 0;
         mockAddTimer = setInterval(function () {
-          got += 8;
-          mockAdd.fetch.got = Math.min(got, 40);
-          if (got >= 40) {
-            clearInterval(mockAddTimer);
-            mockAddTimer = null;
-            mockAdd.phase = "confirm";
-            mockAdd.plan = { title: "(превью) Плейлист", channel: "Автор А",
-                             kind: "remote", item_count: 40, exists: false,
-                             is_mix: false,
-                             counts: { new_channels: 2, known_channels: 0,
-                                       new_videos: 12, known_videos: 3,
-                                       links_to_create: 12, links_existing: 0,
-                                       skipped: 1, dupes: 0 } };
+          got += 1;
+          mockAdd.fetch.got = Math.min(got, total);
+          if (got < total) return;
+          clearInterval(mockAddTimer);
+          mockAddTimer = null;
+          if (auto) {
+            // Одна запись: подтверждение не показывается, пишется сразу.
+            mockAdd.phase = "committing";
+            setTimeout(function () {
+              mockAdd.phase = "done";
+              mockAdd.result = {
+                stats: { new_videos: 1, known_videos: 0, links_to_create: 1,
+                         removed: 0 },
+                mode: mockAdd.mode, queued: 1, picker: [], picker_total: 0,
+                storage_id: mockAdd.storage_id,
+                storage_label: mockStorageLabel(mockAdd.storage_id),
+                account_id: mockAdd.account_id, account_label: "",
+                title: "(превью) видео из каталога", url: mockAdd.url
+              };
+            }, 250);
+            return;
           }
-        }, 200);
+          mockAdd.phase = "confirm";
+          mockAdd.plan = { title: "(превью) Плейлист", channel: "Автор А",
+                           kind: "remote", item_count: 40, exists: false,
+                           is_mix: false,
+                           counts: { new_channels: 2, known_channels: 0,
+                                     new_videos: 12, known_videos: 3,
+                                     links_to_create: 12, links_existing: 0,
+                                     skipped: 1, dupes: 0 } };
+        }, 120);
         return Promise.resolve({ ok: true });
       },
       add_confirm: function (req) {

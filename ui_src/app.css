@@ -944,6 +944,9 @@ body[data-theme="light"] .row { border-bottom-color: rgba(0, 0, 0, .05); }
 .cat-meta { font-size: 11px; color: var(--muted); }
 .cat-actions { display: flex; justify-content: flex-end; padding: 0 10px 8px; }
 .cat-card.added { opacity: 0.7; }
+/* Карточка, добавляемая прямо с каталога (auto): кнопка заменена ходом
+   записи, повторный клик не плодит запрос к площадке. */
+.cat-card.adding { opacity: 0.85; }
 /* Карточка, отказавшая как «недоступна на площадке»: гасится до
    перезагрузки каталога (повтор по той же ссылке ничего не даст). */
 .cat-card.failed { opacity: 0.45; }

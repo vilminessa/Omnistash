@@ -1516,11 +1516,20 @@ class Api:
                  "current": 0, "total": 0} for sid, title in self.STAGES]
 
     def add_start(self, request=None) -> dict:
-        """Фаза A: снять снапшот с площадки и посчитать план (БД не трогаем)."""
+        """Фаза A: снять снапшот с площадки и посчитать план (БД не трогаем).
+
+        auto=True - карточка каталога: одиночное видео добавляется без
+        диалога «Добавить источник» (план из одной записи ничего не решает),
+        поэтому фаза confirm не показывается и запись идёт сразу. Для
+        плейлиста/канала auto игнорируется: там план надо показать.
+        Одиночное видео в режиме «Частичная» трактуется как «Полная» -
+        пикер на один элемент это просто лишний экран.
+        """
         request = request or {}
         url = str(request.get("url") or "").strip()
         if not url:
             return {"error": "Вставьте ссылку на плейлист, канал или видео"}
+        auto = bool(request.get("auto"))
         config = self._current_settings()
         mode = request.get("mode") or config.get("default_sync_mode") or "partial"
         if mode not in SYNC_MODES:
@@ -1554,15 +1563,21 @@ class Api:
         if kind not in ("playlist", "channel", "video"):
             return {"error": "Поддерживаются ссылки на плейлист, канал "
                              "и одиночное видео", "kind": "unsupported"}
+        if auto and kind == "video" and mode == "partial":
+            # «Частичная» для одного видео = пикер из одного элемента:
+            # вместо него видео встаёт в очередь («Полная»), а «Ручная»
+            # остаётся «только метаданные».
+            mode = "full"
 
         with self._lock:
             if self._add.get("phase") in ("fetching", "committing"):
                 return {"error": "Добавление уже идёт"}
             self._add = {"phase": "fetching", "mode": mode,
                          "storage_id": storage_id, "account_id": account_id,
-                         "url": url,
+                         "url": url, "auto": auto,
                          "fetch": {"got": 0, "total": 0}, "plan": None,
-                         "stages": self._stages(), "result": None, "error": None}
+                         "stages": self._stages(), "result": None, "error": None,
+                         "error_kind": None}
             self._add_snapshot = None
             self._add_plan = None
             self._add_stop.clear()
@@ -1600,9 +1615,20 @@ class Api:
                                           for item in google_auth.load_registry()):
                     return {"error": "Аккаунт не найден - войдите заново"}
                 self._add["account_id"] = account_id
+        return self._start_commit()
+
+    def _start_commit(self) -> dict:
+        """Запустить стадию записи (фаза C).
+
+        Общий вход для подтверждения плана в диалоге и для карточки
+        каталога (auto): одиночное видео пишется тем же конвейером, просто
+        без экрана «Проверьте план».
+        """
+        with self._lock:
             self._add["phase"] = "committing"
             self._add["stages"] = self._stages()
             self._add["error"] = None
+            self._add["error_kind"] = None
             self._add_cancel.clear()
             self._busy = True
             self._status = "Создание записей…"
@@ -1701,6 +1727,17 @@ class Api:
         # уже поздно - он просил остановиться.
         if aborted or self._add_stop.is_set():
             aborted, error, snapshot, plan = True, None, None, None
+        auto = bool(self._add.get("auto"))
+        counts = plan["counts"] if plan else None
+        # auto + одиночное видео = карточка каталога: экран плана не
+        # показывается, запись идёт сразу (пикер из одной записи ничего не
+        # выбирает). Плейлист/канал под auto остаётся с подтверждением.
+        direct = (snapshot is not None and auto
+                  and str((snapshot.get("playlist") or {}).get("kind") or "")
+                  == "video")
+        already = (direct and plan["playlist"]["exists"]
+                   and counts["new_videos"] == 0)
+        commit_direct = direct and not already
         with self._lock:
             if aborted:
                 self._add.update(phase="idle", fetch=None, plan=None,
@@ -1713,10 +1750,31 @@ class Api:
                 self._add.update(phase="error", fetch=None, plan=None,
                                  error=error, error_kind=kind or "network")
                 self._status = "Ошибка"
+            elif already:
+                # Видео уже в библиотеке: писать нечего - карточка гасится,
+                # повторный запрос площадки на то же видео не плодится.
+                self._add.update(
+                    phase="done", fetch=None, plan=None, error=None,
+                    error_kind=None,
+                    result={"already": True, "url": snapshot["url"],
+                            "title": snapshot["playlist"].get("title"),
+                            "mode": self._add.get("mode"), "queued": 0,
+                            "stats": {"new_videos": 0,
+                                      "known_videos": counts["known_videos"],
+                                      "links_to_create": 0}})
+                self._busy = False
+                self._status = "Уже в библиотеке"
+            elif commit_direct:
+                self._add.update(phase="committing", fetch=None, plan=None,
+                                 error=None, error_kind=None,
+                                 stages=self._stages())
+                self._add_cancel.clear()
+                self._busy = True
+                self._status = "Создание записей…"
             else:
-                counts = plan["counts"]
                 self._add.update(
                     phase="confirm", fetch=None, error=None,
+                    error_kind=None,
                     plan={
                         "counts": counts,
                         "is_mix": plan["is_mix"],
@@ -1732,11 +1790,24 @@ class Api:
                 self._add_snapshot = snapshot
                 self._add_plan = plan
                 self._status = "Проверьте план добавления"
-            self._busy = False
+            if not commit_direct:
+                self._busy = False
+        if commit_direct:
+            self._add_snapshot = snapshot
+            self._add_plan = plan
+            self._log("План: новых {} · уже есть {} · пропущено {}".format(
+                counts["new_videos"], counts["known_videos"], counts["skipped"]))
+            thread = threading.Thread(target=self._add_commit_worker,
+                                      daemon=True)
+            self._add_thread = thread
+            thread.start()
+            return
         if error:
             self._log("Индексация: " + error)
         elif aborted:
             return
+        elif already:
+            self._log("Уже в библиотеке: " + str(snapshot["url"]))
         else:
             counts = plan["counts"]
             self._log("План: новых {} · уже есть {} · пропущено {}".format(
