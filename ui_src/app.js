@@ -3731,13 +3731,16 @@
                     tag: "", sort: "date:desc",
                     offset: 0, rows: [], total: 0, tags: [] };
   var platTabsJson = "";
+  var CAT_MAX_PAGES = 8;    // страховка прогона: не листать бесконечно глубоко
   var catalogState = { platform: "", view: "library", query: "", tag: "",
                        channel: "", mode: "channels", sort: "date:desc",
-                       page: 1, items: [], loading: false, ended: false,
-                       loaded: false, pollTimer: null, channels: null };
-  var CAT_MAX_PAGES = 8;    // страховка: не листать бесконечно глубоко
+                       items: [], loading: false, ended: false, partial: false,
+                       loaded: false, pollTimer: null, channels: null,
+                       pages: 0, nextPage: 1, maxPages: CAT_MAX_PAGES,
+                       progress: { done: 0, total: 0, cards: 0 }, stage: "",
+                       key: "" };
 
-  function openPlatform(id, label, adult, hasCatalog) {
+  function openPlatform(id, label, adult, hasCatalog, hasChannels) {
     platState.platform = id;
     platState.label = label || id;
     platState.adult = !!adult;
@@ -3752,23 +3755,36 @@
     catalogState.query = "";
     catalogState.tag = "";
     catalogState.channel = "";
-    catalogState.mode = "channels";
+    // «Новое от каналов» только там, где есть ленты RSS (YouTube); на
+    // остальных площадках режим начинается с трендов.
+    catalogState.mode = hasChannels ? "channels" : "trending";
     catalogState.sort = "date:desc";
     catalogState.channels = null;
     var cs = $("cat-search");
     if (cs) cs.value = "";
-    if ($("cat-mode")) $("cat-mode").value = "channels";
+    if ($("cat-mode")) {
+      $("cat-mode").value = catalogState.mode;
+      var chOption = $("cat-mode").querySelector('option[value="channels"]');
+      if (chOption) chOption.hidden = !hasChannels;
+    }
     if ($("cat-sort")) $("cat-sort").value = "date:desc";
     if ($("cat-tags")) { $("cat-tags").hidden = true; $("cat-tags").innerHTML = ""; }
     if ($("cat-channels")) { $("cat-channels").hidden = true; $("cat-channels").innerHTML = ""; }
-    catalogState.page = 1;
+    catalogState.pages = 0;
+    catalogState.nextPage = 1;
     catalogState.items = [];
     catalogState.loaded = false;
     catalogState.ended = false;
+    catalogState.partial = false;
+    catalogState.progress = { done: 0, total: 0, cards: 0 };
+    catalogState.stage = "";
+    catalogState.key = "";
     clearTimeout(catalogState.pollTimer);
     catalogState.pollTimer = null;
     catalogState.loading = false;
     if ($("cat-cancel")) $("cat-cancel").hidden = true;
+    catBar(null);
+    if ($("cat-caption")) $("cat-caption").textContent = "";
     var pfv = $("pf-view");
     if (pfv) {
       // Площадка без каталога (не поддерживается) - переключатель скрыт,
@@ -3805,7 +3821,8 @@
         return '<button class="tab" data-tab="pf:' + esc(p.id) +
           '" data-label="' + esc(p.label) + '" data-adult="' +
           (p.adult ? "1" : "") + '" data-catalog="' +
-          (p.catalog ? "1" : "") + '"' +
+          (p.catalog ? "1" : "") + '" data-channels="' +
+          (p.channels ? "1" : "") + '"' +
           (p.adult ? ' title="Возрастной контент"' : "") + ">" +
           esc(p.adult ? p.label + " 18+" : p.label) + "</button>";
       }).join("");
@@ -3814,7 +3831,8 @@
           tab.addEventListener("click", function () {
             openPlatform(tab.dataset.tab.slice(3), tab.dataset.label,
                          tab.dataset.adult === "1",
-                         tab.dataset.catalog === "1");
+                         tab.dataset.catalog === "1",
+                         tab.dataset.channels === "1");
           });
         });
     });
@@ -4046,100 +4064,215 @@
             input.focus();
             return;
           }
-          catLoad(true, true);
+          catLoad({ reset: true, force: true });
         });
       });
   }
 
-  function catLoad(reset, force) {
-    if (catalogState.loading) return;
-    if (reset) {
-      catalogState.page = 1; catalogState.items = []; catalogState.ended = false;
-    }
-    if (catalogState.ended && !reset) return;
-    if (catalogState.page > CAT_MAX_PAGES) {
-      catalogState.ended = true;
-      $("cat-more").hidden = true;
-      return;
-    }
-    catalogState.loading = true;
-    var grid = $("cat-grid");
-    var empty = $("cat-empty");
-    var more = $("cat-more");
-    if (reset) {
-      grid.innerHTML = '<div class="muted">Загрузка каталога…</div>';
-      empty.hidden = true;
-    }
-    more.hidden = true;
+  /* Прогон карточек (CAT-4): ключ запроса отличает свой список от чужого,
+     смена режима перехватывает идущую загрузку (restart), карточки приходят
+     частями, ход показан полосой. Без ключа результат старого прогона
+     подмешивался в новый список - «тренды» и «каналы» выглядели перемешанными. */
+  function catRequest() {
     var mode = catalogState.tag ? "tag"
       : catalogState.channel ? "channel"
       : catalogState.query ? "search" : catalogState.mode;
-    call("site_catalog", {
-      platform: catalogState.platform,
-      mode: mode,
-      query: catalogState.tag || catalogState.channel || catalogState.query,
-      page: catalogState.page,
-      force: !!force
-    }).then(function (res) {
-      // CAT-1: сетевой запрос идёт воркером - статус опрашиваем, пока
-      // загрузка идёт; свежий кэш приходит сразу (res.done).
-      if (!res) {
-        catalogState.loading = false;
-        grid.innerHTML = "";
-        catNotice("empty", "Каталог не загружен");
-        return;
-      }
-      if (res.need_adult) {
-        catalogState.loading = false;
-        grid.innerHTML = "";
-        catAdultFlow();
-        return;
-      }
-      if (res.done) {
-        catalogState.loading = false;
-        grid.innerHTML = "";
-        catApply(reset, res);
-        return;
-      }
-      if (res.running) {
-        $("cat-cancel").hidden = false;
-        catPoll(reset);
-        return;
-      }
-      if (res.error) {
-        catalogState.loading = false;
-        grid.innerHTML = "";
-        if (reset) {
-          catNotice(res.kind || "empty", res.error);
-        } else {
-          toast(res.error, true);
-          catalogState.ended = true;
-        }
-        catalogState.loaded = true;
-      }
-    });
+    return { mode: mode,
+             query: catalogState.tag || catalogState.channel || catalogState.query };
   }
 
-  function catPoll(reset) {
+  function catKey() {
+    var req = catRequest();
+    return catalogState.platform + "|" + req.mode + "|" + req.query;
+  }
+
+  function catBar(label) {
+    var bar = $("cat-progress");
+    if (!bar) return;
+    if (!label) { bar.hidden = true; return; }
+    var p = catalogState.progress || { done: 0, total: 0, cards: 0 };
+    var fill = $("cat-progress-fill");
+    var text = $("cat-progress-text");
+    bar.hidden = false;
+    // total > 0 - итог известен (каналы, кэш): проценты. total = 0 -
+    // площадка итог не назвала: анимированная полоса + счётчик карточек.
+    var known = p.total > 0;
+    fill.className = "scan-fill" + (known ? "" : " indet");
+    fill.style.width = known
+      ? Math.max(6, Math.min(100, Math.round(p.done * 100 / p.total))) + "%"
+      : "100%";
+    text.textContent = label
+      + (known ? " · " + p.done + " из " + p.total : "")
+      + (p.cards ? " · карточек " + p.cards : "");
+  }
+
+  function catCaption() {
+    var node = $("cat-caption");
+    if (!node) return;
+    var req = catRequest();
+    var names = { channels: "новое от каналов", trending: "тренды",
+                  search: "поиск", tag: "тег", channel: "загрузки канала" };
+    var bits = [names[req.mode] || req.mode];
+    if (req.mode === "channels") {
+      bits.push((catalogState.channels || []).length + " каналов");
+    }
+    bits.push(catalogState.items.length + " карточек");
+    if (catalogState.pages && req.mode !== "channels") {
+      // Каналы - один проход (ленты), «страницы» там не считают: они
+      // относятся к листу площадки (тренды/поиск/тег/загрузки канала).
+      bits.push("страниц " + catalogState.pages +
+                (catalogState.ended ? "" : " из " + catalogState.maxPages));
+    }
+    var col = String(catalogState.sort || "date:desc").split(":")[0];
+    var sortNames = { date: "по дате", views: "по просмотрам",
+                      title: "по названию" };
+    bits.push("сортировка " + (sortNames[col] || col) +
+              (catalogState.ended && !catalogState.partial
+                ? " по списку целиком" : " по загруженным"));
+    if (catalogState.partial) {
+      // Частичный список: каналы - часть лент не ответила (или прогон
+      // отменён), страницы площадки - лист оборван/остановлен.
+      bits.push(req.mode === "channels"
+        ? "не все каналы прочитаны" : "лист остановлен");
+    }
+    node.textContent = bits.join(" · ");
+  }
+
+  function catLoad(opts) {
+    opts = opts || {};
+    var req = catRequest();
+    var key = catKey();
+    catalogState.key = key;
+    if (!opts.resume) {
+      catalogState.items = [];
+      catalogState.pages = 0;
+      catalogState.nextPage = 1;
+      catalogState.ended = false;
+      catalogState.partial = false;
+      catalogState.loaded = false;
+    }
+    catalogState.loading = true;
+    // Ход по каналам известен заранее (сколько каналов в списке), поэтому
+    // полоса детерминированная сразу, не «анимация до первого ответа».
+    var known = req.mode === "channels" ? (catalogState.channels || []).length : 0;
+    catalogState.progress = { done: opts.resume ? catalogState.pages : 0,
+                              total: known, cards: catalogState.items.length };
+    $("cat-empty").hidden = true;
+    $("cat-more").hidden = true;
+    $("cat-cancel").hidden = false;
+    catBar(opts.forSort ? "Дозагружаю для сортировки…"
+                        : (opts.resume ? "Догружаю страницы…"
+                                       : "Загрузка каталога…"));
+    catCaption();        // подпись текущая: режим и сортировка этого прогона
+    catRender();
+    call("site_catalog", {
+      platform: catalogState.platform,
+      mode: req.mode,
+      query: req.query,
+      page: opts.resume ? catalogState.nextPage : 1,
+      force: !!opts.force,
+      restart: true          // смена режима/поиска не ждёт старого прогона
+    }).then(function (res) { catStarted(res, key); });
+  }
+
+  function catStarted(res, key) {
+    if (!res) { catFail("Каталог не загружен", "empty", key, []); return; }
+    if (res.need_adult) {
+      catalogState.loading = false;
+      $("cat-cancel").hidden = true;
+      catBar(null);
+      $("cat-grid").innerHTML = "";
+      catAdultFlow();
+      return;
+    }
+    if (res.done) {                 // полный кэш - воркер не нужен
+      catalogState.loading = false;
+      $("cat-cancel").hidden = true;
+      catApply(res, key);
+      return;
+    }
+    if (res.running) { catPoll(key); return; }
+    catFail(res.error || "Каталог не загружен", res.kind || "empty", key, []);
+  }
+
+  function catPoll(key) {
     clearTimeout(catalogState.pollTimer);
     catalogState.pollTimer = setTimeout(function () {
       call("site_catalog_status").then(function (res) {
-        if (!res) { catalogState.loading = false; return; }
-        if (res.running) { catPoll(reset); return; }
+        if (!res) {
+          catalogState.loading = false;
+          catBar(null);
+          return;
+        }
+        if (key !== catKey()) {     // режим сменился - этот опрос больше не наш
+          catalogState.pollTimer = null;
+          catalogState.loading = false;
+          $("cat-cancel").hidden = true;
+          catBar(null);
+          return;
+        }
+        var stateKey = res.platform + "|" + res.mode + "|" + res.query;
+        if (stateKey !== key) {     // перехват: ждём, пока стартует свой прогон
+          catPoll(key);
+          return;
+        }
+        catalogState.progress = res.progress || catalogState.progress;
+        catalogState.stage = res.stage || "";
+        catalogState.pages = res.pages || catalogState.pages;
+        if (res.running) {
+          if (res.items && res.items.length) {
+            // Карточки приходят частями: собранное видно, пока остальное
+            // читается (каналы/страницы). Gui уже dedupнул список.
+            catalogState.items = res.items;
+            catalogState.loaded = true;
+            catSortApply();
+            catTagsRender();
+            catRender();
+          }
+          catBar(catalogState.stage || "Загрузка…");
+          catCaption();
+          catPoll(key);
+          return;
+        }
         catalogState.loading = false;
         catalogState.pollTimer = null;
         $("cat-cancel").hidden = true;
-        $("cat-grid").innerHTML = "";
         if (res.error) {
-          catNotice(res.kind === "cancelled" ? "empty"
-                                             : (res.kind || "empty"),
-                    res.kind === "cancelled" ? "Загрузка отменена" : res.error);
-          catalogState.loaded = true;
+          catFail(res.kind === "cancelled" ? "Загрузка остановлена" : res.error,
+                  res.kind === "cancelled" ? "cancelled" : (res.kind || "empty"),
+                  key, res.items || []);
           return;
         }
-        catApply(reset, res);
+        catApply(res, key);
       });
-    }, 350);
+    }, 300);
+  }
+
+  function catFail(message, kind, key, items) {
+    if (key !== catKey()) return;
+    catalogState.loading = false;
+    catalogState.pollTimer = null;
+    $("cat-cancel").hidden = true;
+    catBar(null);
+    catalogState.ended = true;
+    if (items && items.length) {
+      // Отмена/обрыв: карточки, которые уже пришли, остаются в списке.
+      catalogState.items = items;
+      catalogState.partial = true;
+      catalogState.loaded = true;
+      catSortApply();
+      catTagsRender();
+      catRender();
+      toast(message + " · показаны " + items.length +
+            " карточек, которые уже пришли", true);
+      catCaption();
+      return;
+    }
+    catalogState.items = [];
+    catalogState.loaded = true;
+    $("cat-grid").innerHTML = "";
+    catNotice(kind, message);
+    catCaption();
   }
 
   function catTagsRender() {
@@ -4227,7 +4360,7 @@
   }
 
   function catChannelsLoad() {
-    call("site_catalog_channels", { platform: catalogState.platform })
+    return call("site_catalog_channels", { platform: catalogState.platform })
       .then(function (res) {
         catalogState.channels = (res && res.ok) ? (res.channels || []) : [];
         if (!catalogState.channels.length && catalogState.mode === "channels") {
@@ -4240,29 +4373,21 @@
       });
   }
 
-  function catApply(reset, res) {
-    var incoming = res.items || [];
-    var fresh = incoming;
-    if (!reset) {
-      // Дедуп по video_id: страница может повторять карточки предыдущей.
-      var seen = {};
-      catalogState.items.forEach(function (it) { seen[it.video_id] = 1; });
-      fresh = incoming.filter(function (it) {
-        if (seen[it.video_id]) return false;
-        seen[it.video_id] = 1;
-        return true;
-      });
-      catalogState.items = catalogState.items.concat(fresh);
-    } else {
-      catalogState.items = incoming;
-    }
-    // Конец листа: площадка ответила «нет следующей страницы» ИЛИ страница
-    // вернула только уже показанное (тогда листание бессмысленно).
-    catalogState.ended = !res.has_more || (!reset && !fresh.length);
+  function catApply(res, key) {
+    if (key !== catKey()) return;      // режим сменился - чужой итог не нужен
+    catalogState.items = res.items || [];
+    catalogState.pages = res.pages || catalogState.pages;
+    catalogState.nextPage = res.next_page || catalogState.pages + 1;
+    catalogState.maxPages = res.max_pages || CAT_MAX_PAGES;
+    catalogState.ended = !!res.end || !res.has_more;
+    catalogState.partial = !!res.partial;
     catalogState.loaded = true;
+    catalogState.progress = res.progress || catalogState.progress;
+    catBar(null);
     catSortApply();
     catTagsRender();
     catRender();
+    catCaption();
   }
 
   function markCatalogUnavailable(url) {
@@ -4283,17 +4408,24 @@
     if (!catalogState.items.length) {
       grid.innerHTML = "";
       more.hidden = true;
+      // Пока прогон идёт, ход говорит полоса - «карточек нет» показывать
+      // рано: список просто ещё не наполнен.
+      if (catalogState.loading) { $("cat-empty").hidden = true; return; }
       catNotice("empty", "Карточек на этой странице нет");
       return;
     }
     $("cat-empty").hidden = true;
     grid.innerHTML = catalogState.items.map(function (it, i) {
       var dur = it.duration_s ? humanDuration(it.duration_s) : "";
-      var views = it.views != null ? bigCount(it.views) : "";
+      // Честные метки: карточка страницы PH без дат и просмотров говорит
+      // об этом прямо - иначе сортировка «по просмотрам» выглядит как
+      // перемешивание (пустые значения уходят в конец молча).
+      var views = it.views != null ? bigCount(it.views) + " просмотров" : "";
       var date = it.uploaded_at ? String(it.uploaded_at).slice(0, 10) : "";
       var people = (it.people || []).slice(0, 2).join(", ");
-      var meta = [date ? date : "", views ? views + " просмотров" : "",
-                  it.author ? it.author : "",
+      var meta = [date || "дата не получена",
+                  views || "просмотры не получены",
+                  it.author || "",
                   people ? "исполнители: " + people : ""]
         .filter(Boolean).join(" · ");
       var pending = catAdd.url === it.url;
@@ -4320,21 +4452,17 @@
         '<div class="cat-actions">' + action + "</div>" +
       "</div>";
     }).join("");
-    more.hidden = catalogState.ended;
-    if (!catalogState.ended) {
-      setTimeout(function () {
-        var io = new IntersectionObserver(function (entries) {
-          entries.forEach(function (e) {
-            if (e.isIntersecting && !catalogState.loading && !catalogState.ended) {
-              catalogState.page += 1;
-              catLoad(false);
-              io.disconnect();
-            }
-          });
-        }, { root: $("cat-scroll"), rootMargin: "200px" });
-        io.observe(more);
-      }, 0);
-    }
+    // Прогон догружает страницы внутри воркера (fetch_all) и сортировка
+    // работает по всему списку, поэтому авто-листание по прокрутке больше
+    // не нужен: кнопка остаётся для оборванного листа и предела страниц.
+    var broken = catalogState.partial;
+    var capped = !catalogState.ended;
+    more.hidden = !(broken || capped);
+    var channelsMode = catRequest().mode === "channels";
+    more.textContent = broken
+      ? (channelsMode ? "Перечитать каналы" : "Догрузить остановленный лист")
+      : (channelsMode ? "Перечитать каналы заново"
+                      : "Загрузить оставшиеся страницы");
   }
 
   function catAdultFlow() {
@@ -4350,7 +4478,7 @@
         return;
       }
       call("legal_accept", { adult: true, aup: true })
-        .then(function () { catLoad(true, true); });
+        .then(function () { catLoad({ reset: true, force: true }); });
     });
   }
 
@@ -4412,8 +4540,15 @@
             $("cat-cancel").hidden = true;
           }
           if (v === "catalog") {
-            if (catalogState.channels === null) catChannelsLoad();
-            if (!catalogState.loaded) catLoad(true);
+            // Список каналов решается до запроса: если каналов нет, режим
+            // переключается на тренды, и запрос уйдёт именно на них.
+            // Площадки без RSS (PornHub, VK) список не спрашивают.
+            var openList = catalogState.channels === null &&
+              catalogState.mode === "channels"
+              ? catChannelsLoad() : Promise.resolve(null);
+            openList.then(function () {
+              if (!catalogState.loaded) catLoad({ reset: true });
+            });
           }
         });
       });
@@ -4427,12 +4562,22 @@
           catalogState.query = catSearch.value.trim();
           catalogState.tag = "";      // поиск человека сбивает фильтр по тегу
           catalogState.channel = "";  // и выбор конкретного канала
-          catLoad(true);
+          catLoad({ reset: true });
         }, 300);
       });
     }
-    $("cat-refresh").addEventListener("click", function () { catLoad(true, true); });
-    $("cat-more").addEventListener("click", function () { catLoad(false); });
+    $("cat-refresh").addEventListener("click", function () {
+      catLoad({ reset: true, force: true });
+    });
+    $("cat-more").addEventListener("click", function () {
+      // Лист оборван (отмена) - прогон заново без кэша; упёрся в предел
+      // страниц - догружается с следующей страницы, карточки сохраняются.
+      if (catalogState.partial || catalogState.ended) {
+        catLoad({ reset: true, force: true });
+      } else {
+        catLoad({ reset: false, resume: true });
+      }
+    });
     $("cat-tags").addEventListener("click", function (ev) {
       var btn = ev.target.closest ? ev.target.closest(".ph-tag") : null;
       if (!btn) return;
@@ -4449,7 +4594,7 @@
       } else {
         catalogState.tag = btn.dataset.tag || "";
       }
-      catLoad(true);
+      catLoad({ reset: true });
     });
     $("cat-channels").addEventListener("click", function (ev) {
       var btn = ev.target.closest ? ev.target.closest(".ph-cat") : null;
@@ -4460,29 +4605,33 @@
       catalogState.tag = "";
       catalogState.query = "";
       $("cat-search").value = "";
-      catLoad(true);
+      catLoad({ reset: true });
     });
     $("cat-mode").addEventListener("change", function (ev) {
       catalogState.mode = ev.target.value;
       catalogState.channel = "";
       catalogState.tag = "";
-      catLoad(true);
+      // Перехват идущей загрузки (restart в gui): тренды и каналы не
+      // попадают в один список, переключение не ждёт предыдущий прогон.
+      catLoad({ reset: true });
     });
     $("cat-sort").addEventListener("change", function (ev) {
       catalogState.sort = ev.target.value;
-      // Сортировка уже загруженных карточек - без нового запроса к площадке.
-      catSortApply();
-      catRender();
+      if (catalogState.ended && !catalogState.partial) {
+        // Список полный: сортировка по нему мгновенна, без запроса.
+        catSortApply();
+        catRender();
+        catCaption();
+        return;
+      }
+      // Список неполный (обрыв или предел страниц): дозагружаем до конца,
+      // чтобы «по просмотрам» сортировало весь список, а не первую страницу.
+      catLoad({ reset: true, forSort: true });
     });
     $("cat-cancel").addEventListener("click", function () {
-      call("site_catalog_cancel").then(function () {
-        clearTimeout(catalogState.pollTimer);
-        catalogState.pollTimer = null;
-        catalogState.loading = false;
-        $("cat-cancel").hidden = true;
-        $("cat-grid").innerHTML = "";
-        catNotice("empty", "Загрузка каталога отменена");
-      });
+      // Отмена сохраняет карточки, которые уже пришли: gui отдаёт partial,
+      // опрос статуса рисует собранное и объясняет, что лист остановлен.
+      call("site_catalog_cancel");
     });
     $("cat-grid").addEventListener("click", function (ev) {
       if (!ev.target.closest) return;
@@ -5173,6 +5322,51 @@
                     fetch: null, plan: null, stages: [], result: null,
                     error: null };
     var mockAddTimer = null;
+    // Симуляция каталога (CAT-4): прогон карточек приходит частями, ход
+    // показан полосой. Каналы - итог известен заранее (сколько каналов),
+    // страницы площадки - итог не назван, поэтому полоса анимированная.
+    var mockCat = { running: false, platform: "", mode: "", query: "",
+                    pages: 0, items: [], has_more: false, end: false,
+                    partial: false, next_page: 1, max_pages: 8,
+                    progress: { done: 0, total: 0, cards: 0 }, stage: "",
+                    error: null, kind: null, source: "", adultOk: false };
+    var mockCatTimer = null;
+    var mockCatChannels = [
+      { remote_id: "UCpreview1", title: "Канал А", n: 12,
+        url: "https://www.youtube.com/channel/UCpreview1" },
+      { remote_id: "UCpreview2", title: "Канал Б", n: 7,
+        url: "https://www.youtube.com/channel/UCpreview2" }
+    ];
+    function mockCatCards(platform, mode, query, step) {
+      var out = [];
+      for (var i = 0; i < 15; i++) {
+        var n = step * 15 + i;
+        var day = String(1 + (n % 27)).padStart(2, "0");
+        out.push({
+          platform: platform,
+          video_id: "pv" + n,
+          url: platform === "pornhub"
+            ? "https://www.pornhub.com/view_video.php?viewkey=pv" + n
+            : "https://www.youtube.com/watch?v=pv" + n,
+          title: "(превью) " + (query ? query + " · " : "") + "ролик " + n,
+          thumb: "",
+          duration_s: 45 + (n % 12) * 30,
+          // Страница PH (как в жизни) дат и просмотров не отдаёт - карточка
+          // честно показывает «не получены», сортировка уводит её в конец.
+          views: platform === "pornhub" ? null : 900 * n + 500,
+          uploaded_at: platform === "pornhub" || mode === "channel"
+            ? null : "2026-09-" + day,
+          author: mode === "channels"
+            ? (mockCatChannels[n % mockCatChannels.length].title)
+            : (platform === "pornhub" ? "" : "Автор А"),
+          people: platform === "pornhub"
+            ? ["Исполнительница " + (1 + (n % 4))] : [],
+          tags: platform === "pornhub" ? ["тег " + (1 + (n % 5))] : [],
+          added: false
+        });
+      }
+      return out;
+    }
     // Симуляция аккаунтов Google: реестр + вход «сам снимает куки».
     var mockAccount = { accounts: [], labels: {}, logging_in: false,
                         note: "", visible: null, browser_warning: "" };
@@ -5456,9 +5650,17 @@
       },
       legal_state: function () {
         // В превью согласия уже приняты - диалоги не мешают смотреть разметку.
+        // 18+ отдельно: взрослая вкладка спрашивает подтверждение первым
+        // запросом каталога (как в окне), ответ фиксируется здесь.
         return Promise.resolve({ ok: true,
           aup_accepted_at: "2026-01-01T00:00:00",
-          first_send_accepted: true });
+          first_send_accepted: true,
+          adult_ok: mockCat.adultOk ? "2026-01-01T00:00:00" : "" });
+      },
+      legal_accept: function (req) {
+        req = req || {};
+        if (req.adult) mockCat.adultOk = true;
+        return Promise.resolve({ ok: true, adult_ok: !!req.adult });
       },
       poll: function () {
         return Promise.resolve({
@@ -5612,6 +5814,120 @@
       },
       mesh_reject: function () {
         return Promise.resolve({ ok: true, removed: true });
+      },
+      /* Вкладки-площадки и каталог (CAT-4) в превью: прогон карточек идёт
+         частями с ходом по каналам/страницам, отмена сохраняет собранное. */
+      platforms_list: function () {
+        return Promise.resolve({ ok: true, platforms: [
+          { id: "youtube", label: "YouTube", adult: false, count: 6,
+            hidden: false, catalog: true, channels: true },
+          { id: "pornhub", label: "PornHub", adult: true, count: 2,
+            hidden: false, catalog: true, channels: false },
+          { id: "vk", label: "VK", adult: false, count: 3,
+            hidden: false, catalog: false, channels: false }
+        ] });
+      },
+      tags_popular: function () {
+        var tags = [];
+        for (var i = 1; i <= 6; i++) {
+          tags.push({ slug: "tag" + i, tag: "тег " + i, count: 7 - i });
+        }
+        return Promise.resolve({ ok: true, tags: tags });
+      },
+      site_catalog_channels: function (req) {
+        req = req || {};
+        // Ленты RSS есть только у YouTube: на других площадках «новое от
+        // каналов» нечего собирать, UI переключается на тренды.
+        if ((req.platform || "youtube") !== "youtube") {
+          return Promise.resolve({ ok: true, channels: [] });
+        }
+        return Promise.resolve({ ok: true, channels: mockCatChannels });
+      },
+      site_catalog: function (req) {
+        req = req || {};
+        var platform = req.platform || "youtube";
+        if (platform === "pornhub" && !mockCat.adultOk) {
+          return Promise.resolve({
+            error: "Нужно подтверждение 18+ (возрастной гейт)",
+            need_adult: true });
+        }
+        if (mockCatTimer) { clearInterval(mockCatTimer); mockCatTimer = null; }
+        var mode = req.mode || "trending";
+        // Как в gui: «новое от каналов» есть только у YouTube (ленты RSS),
+        // на остальных площадках режим сворачивается в тренды.
+        if (mode === "channels" && platform !== "youtube") mode = "trending";
+        var channelsMode = mode === "channels";
+        var steps = channelsMode ? mockCatChannels.length : 3;
+        mockCat.running = true;
+        mockCat.platform = platform;
+        mockCat.mode = mode;
+        mockCat.query = req.query || "";
+        mockCat.items = [];
+        mockCat.pages = channelsMode ? 0 : Number(req.page || 1) - 1;
+        mockCat.has_more = true;
+        mockCat.end = false;
+        mockCat.partial = false;
+        mockCat.next_page = 1;
+        mockCat.max_pages = 8;
+        mockCat.error = null;
+        mockCat.kind = null;
+        mockCat.source = "site";
+        mockCat.progress = { done: 0, total: channelsMode ? steps : 0, cards: 0 };
+        mockCat.stage = channelsMode ? "чтение лент каналов" : "страницы площадки";
+        var step = 0;
+        // Интервал шага: каналы читаются «медленно» (чтобы отмена и ход
+        // были видны в превью), страницы площадки - быстрее.
+        var tick = channelsMode ? 700 : 240;
+        mockCatTimer = setInterval(function () {
+          step += 1;
+          mockCat.items = mockCat.items.concat(
+            mockCatCards(platform, mode, mockCat.query, step));
+          mockCat.pages = channelsMode ? 1 : step;
+          mockCat.progress = { done: step,
+                               total: channelsMode ? steps : 0,
+                               cards: mockCat.items.length };
+          // Ход называет то, что прочитано сейчас (полоса сама добавляет
+          // «N из M» и счётчик карточек) - без повторения чисел в тексте.
+          mockCat.stage = channelsMode
+            ? "канал " + ((mockCatChannels[step - 1] || {}).title || step)
+            : "страница " + step;
+          if (step < steps) return;
+          clearInterval(mockCatTimer);
+          mockCatTimer = null;
+          mockCat.running = false;
+          mockCat.end = true;
+          mockCat.has_more = false;
+          mockCat.next_page = steps + 1;
+          mockCat.stage = "готово";
+          mockCat.progress = { done: steps, total: steps,
+                               cards: mockCat.items.length };
+        }, tick);
+        return Promise.resolve({ ok: true, running: true, platform: platform,
+                                 mode: mode, query: mockCat.query,
+                                 page: Number(req.page || 1) });
+      },
+      site_catalog_status: function () {
+        return Promise.resolve({ ok: true, running: mockCat.running,
+                                 platform: mockCat.platform,
+                                 mode: mockCat.mode, query: mockCat.query,
+                                 items: mockCat.items, has_more: mockCat.has_more,
+                                 end: mockCat.end, partial: mockCat.partial,
+                                 pages: mockCat.pages, next_page: mockCat.next_page,
+                                 max_pages: mockCat.max_pages,
+                                 progress: mockCat.progress, stage: mockCat.stage,
+                                 error: mockCat.error, kind: mockCat.kind,
+                                 source: mockCat.source });
+      },
+      site_catalog_cancel: function () {
+        if (mockCatTimer) { clearInterval(mockCatTimer); mockCatTimer = null; }
+        mockCat.running = false;
+        mockCat.partial = true;
+        mockCat.end = true;
+        mockCat.has_more = false;
+        mockCat.error = "Загрузка остановлена";
+        mockCat.kind = "cancelled";
+        mockCat.stage = "остановлено";
+        return Promise.resolve({ ok: true });
       },
       peer_profile: function () {
         return Promise.resolve({

@@ -319,6 +319,14 @@
       </div>
     </div>
     <div id="cat-wrap" hidden>
+    <!-- Прогресс прогона каталога (CAT-4): ход по каналам известен заранее
+         («канал 3 из 10»), страницы площадки итог не называют - тогда полоса
+         анимированная без процентов, но со счётчиком карточек. -->
+    <div class="cat-progress" id="cat-progress" hidden>
+      <div class="scan-track"><div class="scan-fill" id="cat-progress-fill"></div></div>
+      <span class="muted" id="cat-progress-text"></span>
+    </div>
+    <div class="cat-caption muted" id="cat-caption"></div>
       <!-- Скролл внутри панели (как .table-wrap у библиотеки): body с
            overflow:hidden, поэтому без этого контейнера карточки ниже
            видимой области просто обрезались, и «Загрузить ещё» не

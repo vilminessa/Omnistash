@@ -589,6 +589,29 @@ class TestChannelsMode(CatalogCase):
                               channels=CHANNELS, force=True)
         self.assertEqual(ctx.exception.kind, "blocked")
 
+    def test_channels_partial_when_a_feed_is_blocked(self):
+        """Лента второго канала блокируется: карточки прочитанного первого
+        остаются, список помечен частичным (не «площадка не ответила» целиком)."""
+        def half(url, settings):
+            if "channel_id=UCb" in url:
+                raise CatalogError("Площадка не ответила", kind="blocked")
+            return RSS_XML
+
+        channels = CHANNELS + [{"remote_id": "UC" + "b" * 22, "title": "Второй"}]
+        steps = []
+        with mock.patch.object(catalog, "_http_get", half):
+            res = catalog.fetch_all("youtube", mode="channels",
+                                    channels=channels, force=True,
+                                    on_progress=lambda d, t, c, s: steps.append((d, t, len(c), s)))
+        ids = [item["video_id"] for item in res["items"]]
+        self.assertTrue(ids, "карточки прочитанного канала показаны")
+        self.assertTrue(res["partial"], "не все каналы прочитаны - partial")
+        self.assertTrue(res["end"], "лента не листается глубже")
+        self.assertEqual(res["steps_total"], 2, "итог каналов известен заранее")
+        self.assertEqual(res["steps_done"], 2)
+        self.assertTrue(steps, "ход по каналам передаётся")
+        self.assertIn("оборван", steps[-1][3].lower())
+
     def test_channels_without_channels(self):
         """Ни одного канала - честный текст, а не пустой экран молча."""
         with self.assertRaises(CatalogError) as ctx:
@@ -629,8 +652,13 @@ class ApiCatalogCase(unittest.TestCase):
         self.api = Api()
         self.addCleanup(self.api.close)
 
-    def load(self, request, method="site_catalog", timeout=5.0) -> dict:
-        """Запрос каталога: воркер + опрос статуса (как в интерфейсе)."""
+    def load(self, request, method="site_catalog", timeout=15.0) -> dict:
+        """Запрос каталога: воркер + опрос статуса (как в интерфейсе).
+
+        Таймаут щедрый: в полном прогоне тесты идут параллельно с
+        синхронизацией/очередью других кейсов, и 5 с на воркер с
+        несколькими страницами было мало.
+        """
         res = getattr(self.api, method)(request)
         if res.get("done") or not res.get("running"):
             return res
@@ -690,6 +718,20 @@ class ApiCatalogCase(unittest.TestCase):
         self.assertEqual(len(urls), 1,
                          "после подтверждения - один запрос к площадке")
 
+    def test_channels_mode_folds_to_trending_on_pornhub(self):
+        """«Новое от каналов» только у YouTube: на PH режим сворачивается
+        в тренды (лент RSS там нет), и список каналов не возвращается."""
+        legal_mod.accept(adult=True, aup=True)
+        with mock.patch.object(catalog, "_http_get",
+                               lambda url, settings: PH_HTML):
+            res = self.load({"platform": "pornhub", "mode": "channels"})
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res.get("mode"), "trending",
+                         "каналов на PH нет - прогон идёт по трендам")
+        channels = self.api.site_catalog_channels({"platform": "pornhub"})
+        self.assertTrue(channels.get("ok"))
+        self.assertEqual(channels.get("channels"), [])
+
     def test_added_marks_library_row(self):
         repo.upsert_video(self.api.db.conn,
                           {"platform": "youtube", "remote_id": "vid1",
@@ -706,8 +748,9 @@ class ApiCatalogCase(unittest.TestCase):
         self.assertEqual(res["kind"], "blocked")
         self.assertTrue(res.get("error"))
 
-    def test_cancel_drops_result(self):
-        """Отмена: карточки не применяются, статус говорит «отменено»."""
+    def test_cancel_keeps_arrived_cards(self):
+        """Отмена прогона: карточки, которые уже пришли, остаются в списке,
+        статус говорит «остановлено» и partial (лист оборван, не «пусто»)."""
         class Slow:
             def __init__(self, opts, **kwargs):
                 self.opts = dict(opts)
@@ -735,8 +778,82 @@ class ApiCatalogCase(unittest.TestCase):
                     break
                 time.sleep(0.02)
         self.assertEqual(status.get("kind"), "cancelled", status)
-        self.assertEqual(status.get("items") or [], [],
-                         "отменённая загрузка не отдаёт карточки")
+        self.assertTrue(status.get("partial"),
+                        "остановленный лист - partial, а не ошибка площадки")
+        self.assertFalse(status.get("has_more"))
+        self.assertTrue(status.get("end"))
+        self.assertEqual(len(status.get("items") or []), 1,
+                         "каждая страница, которая успела прийти, остаётся")
+
+    def test_progress_reports_channels_and_pages(self):
+        """Ход прогона: каналы - итог известен (done из total каналов),
+        страницы площадки - total 0, UI рисует анимированную полосу."""
+        repo.upsert_video(self.api.db.conn,
+                          {"platform": "youtube", "remote_id": "vid1",
+                           "title": "Клип",
+                           "channel": {"platform": "youtube",
+                                       "remote_id": "UC" + "a" * 22,
+                                       "title": "Канал", "handle": None,
+                                       "url": None, "fallback": False}},
+                          full=False)
+        seen_progress = []
+
+        def record(done, total, cards, stage):
+            seen_progress.append((done, total, len(cards), stage))
+
+        with mock.patch.object(catalog, "_http_get",
+                               lambda url, settings: RSS_XML):
+            res = catalog.fetch_all("youtube", mode="channels",
+                                    channels=[{"remote_id": "UC" + "a" * 22,
+                                               "title": "Канал"}],
+                                    force=True, on_progress=record)
+        self.assertTrue(res["end"])
+        self.assertEqual(res["pages"], 1)
+        self.assertTrue(seen_progress, "ход по каналам передаётся")
+        done, total, cards, stage = seen_progress[-1]
+        self.assertEqual(total, 1, "итог каналов известен заранее")
+        self.assertEqual(done, 1)
+        self.assertTrue(cards >= 1)
+        self.assertIn("канал", stage.lower())
+
+        trending = []
+        with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
+                               scripted([{"entries": [entry("vidA")]}])):
+            res = catalog.fetch_all("youtube", mode="trending", force=True,
+                                    on_progress=lambda d, t, c, s: trending.append((d, t, len(c), s)))
+        self.assertTrue(res["ok"])
+        self.assertEqual(trending[-1][1], 0,
+                         "страницы площадки не называют итог: total 0")
+        self.assertTrue(trending[-1][2] >= 1)
+
+    def test_channels_partial_surfaces_in_status(self):
+        """Оборванный прогон каналов в окне: карточки прочитанных каналов
+        показаны, ход говорит «2 из 2», список помечен частичным."""
+        for rid, title in (("UC" + "a" * 22, "Канал"), ("UC" + "b" * 22, "Второй")):
+            repo.upsert_video(self.api.db.conn,
+                              {"platform": "youtube", "remote_id": rid + "v",
+                               "title": title + " клип",
+                               "channel": {"platform": "youtube",
+                                           "remote_id": rid,
+                                           "title": title, "handle": None,
+                                           "url": None, "fallback": False}},
+                              full=False)
+
+        def half(url, settings):
+            if "channel_id=UCb" in url:
+                raise CatalogError("Площадка не ответила", kind="blocked")
+            return RSS_XML
+
+        with mock.patch.object(catalog, "_http_get", half):
+            res = self.load({"platform": "youtube", "mode": "channels",
+                             "force": True})
+        self.assertTrue(res.get("ok"), res)
+        self.assertTrue(res.get("items"), "прочитанный канал остаётся в списке")
+        self.assertTrue(res.get("partial"), "не все каналы прочитаны")
+        self.assertTrue(res.get("end"))
+        self.assertEqual(res.get("progress", {}).get("total"), 2,
+                         "итог каналов известен: 2 из 2")
+        self.assertEqual(res.get("progress", {}).get("done"), 2)
 
     def test_more_endpoint_pages_forward(self):
         fake = scripted([{"entries": [entry()]}, {"entries": [entry("vid2")]}])
@@ -750,12 +867,17 @@ class ApiCatalogCase(unittest.TestCase):
                          f"{PAGE_SIZE + 1}-{2 * PAGE_SIZE}")
 
     def test_site_catalog_clear_endpoint(self):
+        """Прогон кэширует страницы (одну или несколько), сброс убирает их все."""
         with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
-                               scripted([{"entries": [entry()]}])):
+                               scripted([{"entries": [entry()]},
+                                         {"entries": []}])):
             self.load({"platform": "youtube"})
         res = self.api.site_catalog_clear({"platform": "youtube"})
         self.assertTrue(res["ok"])
-        self.assertEqual(res["removed"], 1)
+        self.assertGreaterEqual(res["removed"], 1,
+                                "прогон сохраняет в кэше хотя бы одну страницу")
+        self.assertIsNone(catalog.peek_all("youtube"),
+                          "после сброса кэш пуст - следующий прогон спросит площадку")
 
     def test_channels_endpoint_lists_library_channels(self):
         repo.upsert_video(self.api.db.conn,
@@ -796,13 +918,88 @@ class ApiCatalogCase(unittest.TestCase):
         self.assertFalse(res["has_more"])
 
     def test_platforms_report_catalog_support(self):
-        """Переключатель «Каталог» показывают только поддерживаемые
-        площадки (VK без списков страниц - без каталога)."""
+        """Переключатели «Каталог» и «каналы» показывают только то, что
+        поддерживается: VK без списков страниц, «новое от каналов» -
+        только там, где есть ленты RSS (YouTube)."""
         res = self.api.platforms_list()
         by = {item["id"]: item for item in res["platforms"]}
         self.assertTrue(by["youtube"]["catalog"])
+        self.assertTrue(by["youtube"]["channels"])
         self.assertTrue(by["pornhub"]["catalog"])
+        self.assertFalse(by["pornhub"]["channels"])
         self.assertFalse(by["vk"]["catalog"])
+        self.assertFalse(by["vk"]["channels"])
+
+    def test_restart_intercepts_running_run(self):
+        """Смена режима во время прогона: старый отменяется, новый стартует,
+        карточки отменённого прогона в новый список не подмешиваются."""
+        class Switch:
+            """Тренды «читаются» долго, поиск отвечает сразу - перехват
+            виден по результату: в списке только поисковые карточки."""
+
+            def __init__(self, opts, **kwargs):
+                self.opts = dict(opts)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def extract_info(self, url, download=False):
+                if "search_query=клип" in str(url):
+                    return {"entries": [entry("newvid")]}
+                time.sleep(0.4)               # «тренды» читаются долго
+                return {"entries": [entry("oldvid")]}
+
+        with mock.patch.object(catalog.yt_dlp, "YoutubeDL", Switch):
+            started = self.api.site_catalog({"platform": "youtube",
+                                             "mode": "trending", "force": True})
+            self.assertTrue(started.get("running"))
+            restart = self.api.site_catalog({"platform": "youtube",
+                                             "mode": "search", "query": "клип",
+                                             "force": True, "restart": True})
+            self.assertTrue(restart.get("running"), restart)
+            self.assertTrue(restart.get("restart"),
+                            "перехват складывает новый запрос в pending")
+            deadline = time.time() + 8.0
+            status = None
+            while time.time() < deadline:
+                status = self.api.site_catalog_status()
+                if (status.get("mode") == "search" and status.get("query") == "клип"
+                        and not status.get("running")):
+                    break
+                time.sleep(0.03)
+        self.assertEqual(status.get("mode"), "search", status)
+        self.assertEqual(status.get("query"), "клип")
+        ids = [item["video_id"] for item in status.get("items") or []]
+        self.assertIn("newvid", ids)
+        self.assertNotIn("oldvid", ids,
+                         "тренды не подмешиваются к поиску после перехвата")
+
+    def test_resume_keeps_shown_cards_and_adds_new(self):
+        """Догрузка оборванного листа: показанные карточки остаются, новые
+        добавляются без дублей."""
+        fake = scripted([{"entries": [entry("vidA")]},
+                         {"entries": [entry("vidB")]},
+                         {"entries": []}])
+        with mock.patch.object(catalog.yt_dlp, "YoutubeDL", fake):
+            first = self.load({"platform": "youtube", "force": True})
+        ids = [item["video_id"] for item in first["items"]]
+        self.assertIn("vidA", ids)
+        self.assertIn("vidB", ids)
+        next_page = first.get("next_page") or 2
+        with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
+                               scripted([{"entries": [entry("vidA"), entry("vidC")]}])):
+            resumed = self.load({"platform": "youtube", "page": next_page,
+                                 "force": True, "restart": True})
+        merged = [item["video_id"] for item in resumed["items"]]
+        self.assertIn("vidA", merged, "показанная карточка не пропадает")
+        self.assertIn("vidC", merged, "новая страница добавлена")
+        self.assertEqual(merged.count("vidA"), 1,
+                         "одно видео не плодится при догрузке")
+        self.assertGreater(resumed["pages"], 1,
+                           "счётчик страниц продолжает предыдущий прогон")
 
 
 if __name__ == "__main__":

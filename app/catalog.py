@@ -38,6 +38,7 @@ from .paths import profile_dir
 from .util import QuietLogger, clean_text, iso_date, to_int, to_text
 
 PAGE_SIZE = 30          # карточек на страницу каталога
+MAX_PAGES = 8           # страниц в одном прогоне каталога (лимит листа)
 CACHE_TTL = {"trending": 600, "home": 600, "search": 300, "channels": 600}
 
 
@@ -47,6 +48,21 @@ class CatalogError(Exception):
     def __init__(self, message: str, kind: str = "empty") -> None:
         super().__init__(message)
         self.kind = kind
+
+
+def _report(on_progress, done: int, total: int, items: list, stage: str) -> None:
+    """Ход загрузки для интерфейса (карточки приходят частями).
+
+    done/total - шаг прогона (канал из списка - total известен, страница
+    площадки - total 0, итог не назван); items - накопленные карточки на
+    этот момент. Ход не должен ронять загрузку: отказ приёмника игнорируем.
+    """
+    if not on_progress:
+        return
+    try:
+        on_progress(done, total, list(items), stage)
+    except Exception:  # noqa: BLE001 - прогресс второстепенен для списка
+        pass
 
 
 def cache_dir() -> str:
@@ -326,13 +342,15 @@ def _extract_candidates(urls: list[str], opts: dict, start: int, end: int,
 
 def _fetch_youtube(mode: str, query: str, page: int,
                    settings: dict | None, log=None,
-                   channels: list[dict] | None = None) -> tuple[list, bool]:
+                   channels: list[dict] | None = None,
+                   on_progress=None, stop=None) -> tuple[list, bool]:
     if mode == "channels":
         if not channels:
             raise CatalogError(
                 "Нет каналов: добавьте плейлист или канал ссылкой — каталог "
                 "«новое от каналов» соберётся по ним", kind="empty")
-        return _fetch_youtube_channels(channels, settings, log)
+        return _fetch_youtube_channels(channels, settings, log,
+                                       on_progress=on_progress, stop=stop)
     opts = _opts(settings)
     start = (page - 1) * PAGE_SIZE + 1
     end = page * PAGE_SIZE
@@ -447,12 +465,14 @@ def _parse_ph_cards(html: str) -> list[dict]:
 
 def _fetch_pornhub(mode: str, query: str, page: int,
                    settings: dict | None, log=None,
-                   channels: list[dict] | None = None) -> tuple[list, bool]:
+                   channels: list[dict] | None = None,
+                   on_progress=None, stop=None) -> tuple[list, bool]:
     """Карточки страницы PH. Страница площадки - параметром ?page=N.
 
     Площадка отдаёт ~44 карточки на страницу; has_more решаем по длине
     (не по нашему PAGE_SIZE), иначе «Загрузить ещё» зависало бы на
-    первой странице.
+    первой странице. Ход прогона считает fetch_all (итог страницы не назван),
+    здесь - одна страница.
     """
     if mode == "tag" and query:
         url = (f"https://www.pornhub.com/video/tag/{query}"
@@ -474,6 +494,21 @@ FETCHERS = {
     "youtube": _fetch_youtube,
     "pornhub": _fetch_pornhub,
 }
+
+
+def catalog_supported(platform: str) -> bool:
+    """Площадка отдаёт списки карточек страниц (тренды/поиск/тег)."""
+    return str(platform or "").lower() in FETCHERS
+
+
+def channels_supported(platform: str) -> bool:
+    """Площадка отдаёт «новое от каналов» (ленты RSS по UC-id).
+
+    Только YouTube: списки загрузок остальных площадок дат не несут и
+    каналов в привычном смысле там нет (PornHub - исполнители/теги),
+    поэтому режим «каналы» там превращается в тренды.
+    """
+    return str(platform or "").lower() == "youtube"
 
 
 # ---------------------------- RSS каналов ---------------------------- #
@@ -531,36 +566,68 @@ def _parse_rss(xml: str, channel_title: str | None) -> list[dict]:
 
 
 def _fetch_youtube_channels(channels: list[dict], settings: dict | None,
-                            log=None) -> tuple[list, bool]:
+                            log=None, on_progress=None,
+                            stop=None) -> tuple[list, bool]:
     """Последние загрузки каналов человека (RSS), сортировка по дате.
 
     Один GET на канал (дешеве, чем разворачивать страницы каналов),
     датировано - поэтому сортировка «новые» работает честно. Лента
     отдаёт ~15 последних загрузок: глубокая история канала - режим
     «канал» (страница загрузок), где дат нет.
+
+    Ход (on_progress) идёт по каналам: их количество известно заранее,
+    поэтому интерфейс показывает «канал 3 из 10» вместо анимированной
+    полосы. Карточки приходят частями - человек видит уже собранные
+    каналы, пока лента остальных ещё читается.
     """
     records: list[dict] = []
     failed = 0
+    read = 0                  # каналов, лента которых реально прочитана
+    total = min(len(channels), CHANNELS_MAX)
+    done = 0
     for channel in channels[:CHANNELS_MAX]:
+        if stop is not None and stop.is_set():
+            break                    # отмена: собранное остаётся, итог partial
+        title = to_text(channel.get("title")) or to_text(channel.get("remote_id"))
+        done += 1
         feed = _rss_feed_url(channel)
         if not feed:
+            _report(on_progress, done, total, records,
+                    f"канал {title}: нет ленты RSS")
             continue
         try:
             xml = _http_get(feed, settings)
         except CatalogError as exc:
             if getattr(exc, "kind", "") == "blocked":
+                if records:
+                    # Часть каналов уже прочитана: показываем собранное и
+                    # объясняем, что лента остальных не ответила (сеть),
+                    # а не роняем прогон без карточек.
+                    failed += 1
+                    _report(on_progress, done, total, records,
+                            f"канал {title}: площадка не ответила")
+                    break
                 raise
             failed += 1
+            _report(on_progress, done, total, records,
+                    f"канал {title}: лента не ответила")
             continue
-        records += _parse_rss(xml, to_text(channel.get("title")))
+        got = _parse_rss(xml, title)
+        records += got
+        read += 1                # лента этого канала прочитана
+        _report(on_progress, done, total, records,
+                f"канал {title}: {len(got)} загрузок")
+    # Итог: прочитаны не все ленты (stop, блок площадки, канал без RSS) -
+    # список частичный, UI объясняет недостающее, карточки остаются.
+    truncated = read < total
     if log:
-        log(f"Каталог каналов: {len(records)} записей с "
-            f"{min(len(channels), CHANNELS_MAX)} каналов"
-            + (f", {failed} недоступно" if failed else ""))
+        log(f"Каталог каналов: {len(records)} записей с {read} из {total} каналов"
+            + (f", {failed} недоступно" if failed else "")
+            + (", список оборван" if truncated else ""))
     # Новые сверху; без даты - в конец (не выдумываем порядок).
     records.sort(key=lambda item: str(item.get("upload_date") or ""),
                  reverse=True)
-    return records, False
+    return records, truncated
 
 
 def _args(platform: str, mode: str, query: str, page) -> tuple[str, str, str, int]:
@@ -574,6 +641,46 @@ def _args(platform: str, mode: str, query: str, page) -> tuple[str, str, str, in
     if mode == "search" and not query:
         mode = "trending"
     return platform, mode, query, page
+
+
+def peek_all(platform: str, mode: str = "trending", query: str = "",
+             channels: list[dict] | None = None, max_pages: int = MAX_PAGES,
+             start_page: int = 1) -> dict | None:
+    """Кэш всего прогона без сети: страницы листаются по кэшу.
+
+    None - первой страницы нет вообще. Результат с end=True - список
+    полный, воркер не нужен; с end=False (partial) - кэш оборван на
+    середине, остальные страницы догружает fetch_all (они тоже проходят
+    через кэш, поэтому догрузка дешёвая).
+    """
+    platform, mode, query, page = _args(platform, mode, query, start_page)
+    scope = _scope(channels)
+    seen: set[str] = set()
+    items: list = []
+    pages = 0
+    ended = False
+    cached: dict | None = None
+    while pages < max_pages:
+        cached = _cache_get(platform, mode, query, page, scope)
+        if not cached:
+            break
+        cached.pop("_ts", None)
+        pages += 1
+        _dedup_items(cached.get("items") or [], seen, items)
+        if cached.get("end") or not cached.get("has_more"):
+            ended = True
+            break
+        page += 1
+    if not items and not ended:
+        return None
+    steps_done = cached.get("steps_done") if cached else None
+    steps_total = cached.get("steps_total") if cached else None
+    return {"ok": True, "items": items, "has_more": not ended, "end": ended,
+            "partial": not ended, "pages": pages, "max_pages": max_pages,
+            "next_page": pages + 1,
+            "steps_done": steps_done or pages, "steps_total": steps_total or pages,
+            "source": "cache",
+            "platform": platform, "mode": mode, "query": query}
 
 
 def peek(platform: str, mode: str = "trending", query: str = "",
@@ -602,8 +709,11 @@ def _scope(channels: list[dict] | None) -> str:
 
 def fetch(platform: str, mode: str = "trending", query: str = "", page: int = 1,
           settings: dict | None = None, force: bool = False, log=None,
-          channels: list[dict] | None = None) -> dict:
-    """Страница карточек площадки: метаданные без скачивания."""
+          channels: list[dict] | None = None, on_progress=None,
+          stop=None) -> dict:
+    """Страница карточек площадки: метаданные без скачивания.
+    Одна страница; прогон всего листа - fetch_all.
+    """
     platform, mode, query, page = _args(platform, mode, query, page)
     scope = _scope(channels)
     if not force:
@@ -617,7 +727,8 @@ def fetch(platform: str, mode: str = "trending", query: str = "", page: int = 1,
         raise CatalogError("Каталог этой площадки не поддерживается",
                            kind="unsupported")
     raw, has_more = fetcher(mode, query, page, settings, log,
-                            channels=channels)
+                            channels=channels, on_progress=on_progress,
+                            stop=stop)
     # Дедуп по video_id: разные адреса одной площадки дают одни и те же
     # записи, а «Загрузить ещё» не должен плодить копии.
     items: list = []
@@ -647,4 +758,149 @@ def fetch(platform: str, mode: str = "trending", query: str = "", page: int = 1,
               "source": "site", "platform": platform, "mode": mode,
               "query": query, "page": page}
     _cache_set(platform, mode, query, page, result, scope)
+    return result
+
+
+def _dedup_raw(raw: list, platform: str, seen: set, items: list) -> int:
+    """Нормализация и дедуп накопленных ЗАПИСЕЙ площадки (RSS/HTML страницы).
+
+    Идемпотентно: список накопленных записей передаётся целиком на каждом
+    шаге хода, поэтому повторные вызовы добавляют только новые video_id.
+    Возвращает количество добавленных карточек.
+    """
+    added = 0
+    for entry in raw:
+        item = _normalize(entry, platform)
+        if not item or item["video_id"] in seen:
+            continue
+        seen.add(item["video_id"])
+        items.append(item)
+        added += 1
+    return added
+
+
+def _dedup_items(res_items: list, seen: set, items: list) -> int:
+    """Дедуп уже нормализованных карточек страницы (то, что отдаёт fetch())."""
+    added = 0
+    for item in res_items:
+        video_id = str(item.get("video_id") or "")
+        if not video_id or video_id in seen:
+            continue
+        seen.add(video_id)
+        items.append(item)
+        added += 1
+    return added
+
+
+def fetch_all(platform: str, mode: str = "trending", query: str = "",
+              settings: dict | None = None, force: bool = False, log=None,
+              channels: list[dict] | None = None, on_progress=None,
+              stop=None, max_pages: int = MAX_PAGES,
+              start_page: int = 1) -> dict:
+    """Весь список карточек одним прогоном: страницы листаются внутри,
+    карточки приходят частями (on_progress).
+
+    Смысл: сортировка и прокрутка работают по полному списку, а не по
+    первой странице, и человек видит карточки, пока остальной лист ещё
+    читается.
+
+    * режим «channels» - итог известен заранее (количество каналов), ход
+      идёт по каналам: done/total это «канал 3 из 10»;
+    * страницы площадки (тренды/поиск/тег/загрузки канала) - площадка итог
+      не называет: total=0, done = прочитанные страницы; конец решаем по
+      has_more/end или по полностью дублированной странице;
+    * stop - отмена: собранное остаётся, partial=True (UI объясняет, что
+      лист остановлен, а не «площадка не ответила»);
+    * кэш каждой страницы работает внутри fetch(): повторный прогон после
+      «Обновить» не ходит на площадку заново.
+    """
+    platform, mode, query, _page = _args(platform, mode, query, start_page)
+    fetcher = FETCHERS.get(platform)
+    if not fetcher:
+        raise CatalogError("Каталог этой площадки не поддерживается",
+                           kind="unsupported")
+    seen: set[str] = set()
+    items: list = []
+    sources: set[str] = set()
+    pages = 0
+    ended = False
+    truncated = False           # каналы прочитаны не все (stop или блок ленты)
+    steps: dict = {"done": 0, "total": 0}
+
+    if mode == "channels":
+        scope = _scope(channels)
+        if not force:
+            cached = _cache_get(platform, mode, query, 1, scope)
+            if cached:
+                cached.pop("_ts", None)
+                cached["source"] = "cache"
+                cached.setdefault("pages", 1)
+                cached.setdefault("max_pages", max_pages)
+                cached.setdefault("next_page", 1)
+                cached.setdefault("end", not cached.get("has_more"))
+                cached.setdefault("partial", False)
+                _report(on_progress, 1, 1, cached.get("items") or [],
+                        "каналы: кэш профиля")
+                return cached
+
+        def channel_report(done: int, total: int, raw: list, stage: str) -> None:
+            steps["done"], steps["total"] = done, total
+            _dedup_raw(raw, platform, seen, items)
+            _report(on_progress, done, total, items, stage)
+
+        raw, truncated = fetcher(mode, query, 1, settings, log, channels=channels,
+                                 on_progress=channel_report, stop=stop)
+        # Итог листа - по дате ленты (fetcher сортирует records), поэтому
+        # накопленный список пересобирается из отсортированных записей:
+        # ход по каналам приходит в порядке чтения, финальный порядок - date.
+        seen.clear()
+        items.clear()
+        _dedup_raw(raw, platform, seen, items)
+        pages = 1
+        # Каналы - один проход: сколько прочитали, столько и показали.
+        # Оборванный прогон (stop или лента не ответила) остаётся частичным:
+        # карточки прочитанных каналов видны, UI объясняет недостающее.
+        ended = True
+        sources.add("site")
+        _report(on_progress, steps["done"], steps["total"], items,
+                "каналы прочитаны" if not truncated else "каналы: список оборван")
+    else:
+        page = max(int(start_page or 1), 1)
+        while pages < max_pages:
+            if stop is not None and stop.is_set():
+                break
+            res = fetch(platform, mode=mode, query=query, page=page,
+                        settings=settings, force=force, log=log,
+                        channels=channels, stop=stop)
+            sources.add(str(res.get("source") or "site"))
+            added = _dedup_items(res.get("items") or [], seen, items)
+            pages += 1
+            ended = (not res.get("has_more") or res.get("end")
+                     or (page > int(start_page or 1) and not added))
+            _report(on_progress, pages, 0, items, f"страница {page}")
+            if ended:
+                break
+            page += 1
+
+    # Частичный список: остановлен человеком (stop) или оборван на середине
+    # (каналы: часть лент не ответила). Карточки, которые пришли, остаются.
+    partial = (stop is not None and stop.is_set()) or truncated
+    if not items and not partial:
+        if mode == "channels":
+            raise CatalogError(
+                "Каналы не отдали последних загрузок (лента недоступна "
+                "или у каналов нет RSS)", kind="empty")
+        raise CatalogError(
+            "Площадка ответила, но карточек нет "
+            "(попробуйте поиск или «Обновить»)", kind="empty")
+    result = {"ok": True, "items": items, "has_more": not ended,
+              "end": ended, "partial": partial, "pages": pages,
+              "max_pages": max_pages, "next_page": pages + 1,
+              "steps_done": steps["done"], "steps_total": steps["total"],
+              "source": "+".join(sorted(sources)) or "site",
+              "platform": platform, "mode": mode, "query": query}
+    if mode == "channels":
+        # Проход по каналам - одна «страница»: её и кэшируем (лист глубже
+        # не листается, а повторный прогон должен быть мгновенным).
+        _cache_set(platform, mode, query, 1, result, _scope(channels))
     return result

@@ -226,12 +226,19 @@ class Api:
                             "title": "", "error": None, "summary": None}
         self._mesh_stop = threading.Event()
         self._mesh_thread: threading.Thread | None = None
-        # Каталог площадки (CAT-1): страницу карточек грузит воркер - сетевой
-        # запрос не блокирует API окна, и его можно отменить кнопкой.
+        # Каталог площадки (CAT-1..CAT-4): прогон карточек грузит воркер -
+        # сетевой запрос не блокирует API окна, ход виден по progress,
+        # карточки приходят частями, прогон отменяем. restart складывает
+        # новый запрос в pending: перехват стартует, когда старый выйдет.
         self._cat: dict = {"running": False, "platform": "", "mode": "",
                            "query": "", "page": 1, "items": [],
-                           "has_more": False, "error": None, "kind": None,
+                           "has_more": False, "end": False, "partial": False,
+                           "pages": 0, "next_page": 1,
+                           "max_pages": catalog.MAX_PAGES,
+                           "progress": {"done": 0, "total": 0, "cards": 0},
+                           "stage": "", "error": None, "kind": None,
                            "source": "", "done_at": None}
+        self._cat_pending: dict | None = None
         self._cat_stop = threading.Event()
         self._cat_thread: threading.Thread | None = None
         self._announce_thread: threading.Thread | None = None
@@ -660,7 +667,9 @@ class Api:
         Авто-плюс-настройки: вкладка показывается для площадки со
         строками в индексе, скрытые пользователем - в settings
         tabs_hidden (список id через запятую). catalog - есть ли
-        браузер каталога для площадки (site_catalog).
+        браузер карточек площадки (site_catalog); channels - есть ли
+        там «новое от каналов» (ленты RSS, только YouTube). Флаг adult
+        включает гейт 18+.
         """
         counts = {str(row["platform"]): int(row["n"]) for row in
                   self.db.conn.execute(
@@ -676,7 +685,8 @@ class Api:
                         "adult": bool(item.get("adult")),
                         "count": counts.get(pid, 0),
                         "hidden": pid in hidden,
-                        "catalog": pid in catalog.FETCHERS})
+                        "catalog": catalog.catalog_supported(pid),
+                        "channels": catalog.channels_supported(pid)})
         return {"ok": True, "platforms": out}
 
     # ------------------------------------------------------------------ #
@@ -685,17 +695,38 @@ class Api:
     # ------------------------------------------------------------------ #
 
     def site_catalog(self, request=None) -> dict:
-        """Страница карточек площадки (тренды/поиск), без скачивания.
+        """Список карточек площадки (тренды/поиск/каналы), без скачивания.
 
-        Сетевой запрос идёт воркером: API окна не стоит, загрузка видна по
-        статусу и отменяема. Свежий кэш отдаётся сразу, без воркера.
+        Прогон всего листа идёт воркером: API окна не стоит, загрузка видна
+        по progress (channels - «канал 3 из 10», страницы - анимированная
+        полоса), карточки приходят частями, отмена сохраняет собранное.
+        Свежий полный кэш отдаётся сразу, без воркера.
+        restart=True перехватывает текущую загрузку: смена режима или поиска
+        не ждёт старого прогона и не подмешивает его карточки в новый список.
         """
         parsed = self._cat_args(request)
         if parsed.get("error"):
             return parsed
+        return self._start_cat_run(parsed)
+
+    def _cat_progress(self, res: dict, cards: int, mode: str,
+                      prev_done: int = 0) -> dict:
+        """Ход прогона для интерфейса: каналы - итог известен заранее
+        (сколько каналов читается), страницы площадки - итог не назван,
+        тогда полоса анимированная (total 0) со счётчиком карточек."""
+        if mode == "channels":
+            done = int(res.get("steps_done") or res.get("pages") or 1)
+            total = int(res.get("steps_total") or done)
+        else:
+            done = prev_done + int(res.get("pages") or 1)
+            total = 0
+        return {"done": done, "total": total, "cards": cards}
+
+    def _start_cat_run(self, parsed: dict) -> dict:
+        """Запустить прогон каталога (или перехватить идущий по restart)."""
         platform = parsed["platform"]
-        mode, query, page, force = parsed["mode"], parsed["query"], \
-            parsed["page"], parsed["force"]
+        mode, query, page = parsed["mode"], parsed["query"], parsed["page"]
+        force, restart = parsed["force"], parsed.get("restart")
         settings = self._current_settings()
         # «Новое от каналов» - список каналов человека (те, чьи видео
         # сохранялись или добавлены как источник-канал).
@@ -703,51 +734,152 @@ class Api:
         if mode == "channels":
             channels = repo.channels_recent(self.db.conn, platform,
                                             limit=catalog.CHANNELS_MAX)
+        cached = None
         if not force:
-            cached = catalog.peek(platform, mode, query, page, channels)
-            if cached:
+            cached = catalog.peek_all(platform, mode, query, channels)
+            if cached and cached.get("end"):
                 cached["items"] = self._mark_in_library(cached.get("items")
                                                         or [], platform)
                 with self._lock:
-                    self._cat.update(running=False, platform=platform,
-                                     mode=mode, query=query, page=page,
-                                     items=cached["items"],
-                                     has_more=cached.get("has_more"),
-                                     error=None, kind=None,
-                                     source="cache", done_at=now_iso())
+                    self._cat.update(
+                        running=False, platform=platform, mode=mode,
+                        query=query, page=1, items=cached["items"],
+                        has_more=False, end=True, partial=False,
+                        pages=cached.get("pages") or 1,
+                        next_page=cached.get("next_page") or 1,
+                        max_pages=cached.get("max_pages") or catalog.MAX_PAGES,
+                        progress=self._cat_progress(cached, len(cached["items"]),
+                                                   mode),
+                        stage="кэш профиля", error=None, kind=None,
+                        source="cache", done_at=now_iso())
                 return {"ok": True, "done": True, **cached}
+            # cached без end: часть карточек уже в кэше, остальное догружает
+            # воркер тем же прогоном (кэш страниц внутри - дешёвый).
         with self._lock:
             if self._cat["running"]:
-                return {"error": "Каталог уже грузится", "running": True}
+                if not restart:
+                    return {"error": "Каталог уже грузится", "running": True}
+                # Перехват: старый прогон отменяется, новый стартует, как
+                # только старый выйдет (pending - без блокирующих join в API
+                # окна; UI по ключу platform/mode/query отличит свой прогон).
+                self._cat_pending = parsed
+                self._cat_stop.set()
+                self._log(f"Каталог: перехват - {platform} {mode}"
+                          + (f" «{query}»" if query else "")
+                          + ", текущая загрузка отменяется")
+                return {"ok": True, "running": True, "restart": True,
+                        "platform": platform, "mode": mode, "query": query,
+                        "page": page}
+            # Возобновление оборванного листа (page > 1): карточки предыдущего
+            # прогона того же запроса остаются в списке, догрузка только
+            # добавляет новые video_id (дубли страницы не плодят карточку).
+            same_key = (page > 1 and self._cat.get("platform") == platform
+                        and self._cat.get("mode") == mode
+                        and self._cat.get("query") == query)
+            prev: list = list(self._cat.get("items") or []) if same_key else []
+            prev_pages = int(self._cat.get("pages") or 0) if same_key else 0
             self._cat = {"running": True, "platform": platform, "mode": mode,
-                         "query": query, "page": page, "items": [],
-                         "has_more": False, "error": None, "kind": None,
+                         "query": query, "page": page, "items": prev,
+                         "has_more": False, "end": False, "partial": False,
+                         "pages": prev_pages + (cached.get("pages") if cached else 0),
+                         "next_page": page,
+                         "max_pages": catalog.MAX_PAGES,
+                         "progress": {"done": prev_pages +
+                                          (cached.get("pages") if cached else 0),
+                                      "total": 0, "cards": len(prev)},
+                         "stage": "", "error": None, "kind": None,
                          "source": "", "done_at": None}
+            if cached:
+                self._cat["items"] = self._mark_in_library(
+                    list(cached.get("items") or []), platform)
         self._cat_stop.clear()
+        prev_ids = {str(item.get("video_id") or "") for item in prev}
+
+        def mine() -> bool:
+            """Ход/итог относится к этому прогону: чужой (после перехвата)
+            не пишет в текущий список."""
+            return (self._cat.get("platform") == platform
+                    and self._cat.get("mode") == mode
+                    and self._cat.get("query") == query)
+
+        def merge(cards: list) -> list:
+            """Собранные карточки прогона поверх уже показанных (resumed)."""
+            out = list(prev)
+            seen = set(prev_ids)
+            for item in cards:
+                video_id = str(item.get("video_id") or "")
+                if not video_id or video_id in seen:
+                    continue
+                seen.add(video_id)
+                out.append(item)
+            return out
+
+        def report(done: int, total: int, cards: list, stage: str) -> None:
+            with self._lock:
+                if not mine():
+                    return
+                items = self._mark_in_library(merge(cards), platform)
+                self._cat["items"] = items
+                # done считает шаги прогона целиком (с уже показанными
+                # страницами), иначе полоса после догрузки прыгала бы с нуля.
+                self._cat["progress"] = {"done": done + prev_pages,
+                                         "total": total, "cards": len(items)}
+                self._cat["stage"] = stage
 
         def work() -> None:
             try:
-                res = catalog.fetch(platform, mode=mode, query=query,
-                                    page=page, settings=settings, force=force,
-                                    log=self._log, channels=channels)
-                items = self._mark_in_library(res.get("items") or [], platform)
+                res = catalog.fetch_all(platform, mode=mode, query=query,
+                                        settings=settings, force=force,
+                                        log=self._log, channels=channels,
+                                        on_progress=report,
+                                        stop=self._cat_stop,
+                                        max_pages=catalog.MAX_PAGES,
+                                        start_page=page)
+                items = self._mark_in_library(merge(res.get("items") or []),
+                                              platform)
                 payload = {"items": items, "has_more": res.get("has_more"),
+                           "end": res.get("end"), "partial": res.get("partial"),
+                           "pages": prev_pages + (res.get("pages") or 0),
+                           "next_page": res.get("next_page"),
+                           "max_pages": res.get("max_pages"),
                            "source": res.get("source"), "error": None,
-                           "kind": None}
+                           "kind": None, "stage": "готово",
+                           "progress": self._cat_progress(res, len(items), mode,
+                                                          prev_pages)}
             except catalog.CatalogError as exc:
                 kind = getattr(exc, "kind", "empty")
-                payload = {"items": [], "has_more": False, "source": "",
-                           "error": str(exc), "kind": kind}
+                payload = {"items": [], "has_more": False, "end": True,
+                           "partial": False, "pages": 0, "next_page": page,
+                           "max_pages": catalog.MAX_PAGES, "source": "",
+                           "error": str(exc), "kind": kind, "stage": "",
+                           "progress": {"done": 0, "total": 0, "cards": 0}}
             except Exception as exc:  # noqa: BLE001 - воркер не валит окно
-                payload = {"items": [], "has_more": False, "source": "",
-                           "error": str(exc), "kind": "empty"}
+                payload = {"items": [], "has_more": False, "end": True,
+                           "partial": False, "pages": 0, "next_page": page,
+                           "max_pages": catalog.MAX_PAGES, "source": "",
+                           "error": str(exc), "kind": "empty", "stage": "",
+                           "progress": {"done": 0, "total": 0, "cards": 0}}
             with self._lock:
                 cancelled = self._cat_stop.is_set()
-                self._cat.update(running=False, done_at=now_iso(),
-                                 **({"error": "Загрузка отменена",
-                                    "kind": "cancelled"} if cancelled else payload))
                 if cancelled:
+                    payload = {"items": payload.get("items") or [],
+                               "has_more": False, "end": True, "partial": True,
+                               "pages": payload.get("pages") or 0,
+                               "next_page": payload.get("next_page") or page,
+                               "max_pages": catalog.MAX_PAGES,
+                               "source": payload.get("source") or "",
+                               "error": "Загрузка остановлена", "kind": "cancelled",
+                               "stage": "остановлено",
+                               "progress": payload.get("progress") or {
+                                   "done": 0, "total": 0, "cards": 0}}
                     self._log("Каталог: загрузка отменена")
+                if mine():
+                    self._cat.update(running=False, done_at=now_iso(), **payload)
+                pending = self._cat_pending
+                self._cat_pending = None
+            if pending:
+                # Перехват ждал выхода этого прогона - стартуем новый список.
+                self._start_cat_run(pending)
 
         thread = threading.Thread(target=work, name="omnistash-catalog",
                                   daemon=True)
@@ -755,25 +887,33 @@ class Api:
             self._cat_thread = thread
         thread.start()
         self._log(f"Каталог: {platform} {mode}"
-                  + (f" «{query}»" if query else "") + f" стр. {page}")
+                  + (f" «{query}»" if query else "")
+                  + (f" с стр. {page}" if page > 1 else ""))
         return {"ok": True, "running": True, "platform": platform,
                 "mode": mode, "query": query, "page": page}
 
     def site_catalog_status(self, request=None) -> dict:
-        """Ход загрузки каталога: карточки, has_more, ошибка по kind."""
+        """Ход прогона: карточки, progress (done/total/cards), stage,
+        ключ прогона (platform/mode/query) и ошибка по kind."""
         with self._lock:
             state = dict(self._cat)
             state["items"] = list(state.get("items") or [])
+            state["progress"] = dict(state.get("progress") or
+                                     {"done": 0, "total": 0, "cards": 0})
         state.setdefault("ok", True)
         return state
 
     def site_catalog_cancel(self, request=None) -> dict:
-        """Отменить загрузку каталога (результат не применяется)."""
+        """Отменить загрузку каталога (собранные карточки остаются)."""
         self._cat_stop.set()
         return {"ok": True}
 
     def _cat_args(self, request) -> dict:
-        """Разбор запроса каталога + возрастной гейт (один путь для всех)."""
+        """Разбор запроса каталога + возрастной гейт (один путь для всех).
+
+        page - страница, с которой начинается прогон (возобновление после
+        отмены), restart - перехват идущей загрузки.
+        """
         request = request or {}
         try:
             platform = str(request.get("platform") or "").lower()
@@ -781,6 +921,7 @@ class Api:
             query = str(request.get("query") or "")
             page = max(int(request.get("page") or 1), 1)
             force = bool(request.get("force"))
+            restart = bool(request.get("restart"))
         except Exception as exc:  # noqa: BLE001 - кривой запрос = понятный отказ
             return {"error": f"Некорректный запрос: {exc}"}
         if not platform:
@@ -791,8 +932,12 @@ class Api:
         if plat.get("adult") and not legal_mod.state().get("adult_ok"):
             return {"error": "Нужно подтверждение 18+ (возрастной гейт)",
                     "need_adult": True}
+        # «Новое от каналов» - RSS есть только у YouTube: на остальных
+        # площадках режим честно сворачивается в тренды (каналов там нет).
+        if mode == "channels" and not catalog.channels_supported(platform):
+            mode = "trending"
         return {"platform": platform, "mode": mode, "query": query,
-                "page": page, "force": force}
+                "page": page, "force": force, "restart": restart}
 
     def site_catalog_more(self, request=None) -> dict:
         """Следующая страница каталога (infinite scroll)."""
@@ -821,7 +966,10 @@ class Api:
         request = request or {}
         platform = str(request.get("platform") or "").lower() or None
         with self._lock:
-            self._cat.update(items=[], has_more=False, page=1)
+            self._cat.update(items=[], has_more=False, page=1, pages=0,
+                             next_page=1, end=False, partial=False,
+                             progress={"done": 0, "total": 0, "cards": 0},
+                             stage="")
         return {"ok": True, "removed": catalog.clear_cache(platform)}
 
     def _mark_in_library(self, items: list, platform: str) -> list:
