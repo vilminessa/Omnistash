@@ -380,9 +380,8 @@ FETCHERS = {
 }
 
 
-def fetch(platform: str, mode: str = "trending", query: str = "", page: int = 1,
-          settings: dict | None = None, force: bool = False, log=None) -> dict:
-    """Страница карточек площадки: метаданные без скачивания."""
+def _args(platform: str, mode: str, query: str, page) -> tuple[str, str, str, int]:
+    """Нормализация запроса каталога (один порядок для fetch и peek)."""
     platform = str(platform or "").lower()
     mode = str(mode or "trending").lower()
     if mode == "home":
@@ -391,6 +390,29 @@ def fetch(platform: str, mode: str = "trending", query: str = "", page: int = 1,
     page = max(to_int(page, 1) or 1, 1)
     if mode == "search" and not query:
         mode = "trending"
+    return platform, mode, query, page
+
+
+def peek(platform: str, mode: str = "trending", query: str = "",
+         page: int = 1) -> dict | None:
+    """Кэш карточек без обращения к сети.
+
+    Повторное открытие вкладки отдаётся мгновенно (и без воркера): кэш
+    свежий - сетевой запрос не нужен вообще.
+    """
+    platform, mode, query, page = _args(platform, mode, query, page)
+    cached = _cache_get(platform, mode, query, page)
+    if not cached:
+        return None
+    cached.pop("_ts", None)
+    cached["source"] = "cache"
+    return cached
+
+
+def fetch(platform: str, mode: str = "trending", query: str = "", page: int = 1,
+          settings: dict | None = None, force: bool = False, log=None) -> dict:
+    """Страница карточек площадки: метаданные без скачивания."""
+    platform, mode, query, page = _args(platform, mode, query, page)
     if not force:
         cached = _cache_get(platform, mode, query, page)
         if cached:

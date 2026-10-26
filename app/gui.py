@@ -226,6 +226,14 @@ class Api:
                             "title": "", "error": None, "summary": None}
         self._mesh_stop = threading.Event()
         self._mesh_thread: threading.Thread | None = None
+        # Каталог площадки (CAT-1): страницу карточек грузит воркер - сетевой
+        # запрос не блокирует API окна, и его можно отменить кнопкой.
+        self._cat: dict = {"running": False, "platform": "", "mode": "",
+                           "query": "", "page": 1, "items": [],
+                           "has_more": False, "error": None, "kind": None,
+                           "source": "", "done_at": None}
+        self._cat_stop = threading.Event()
+        self._cat_thread: threading.Thread | None = None
         self._announce_thread: threading.Thread | None = None
         self._nick_thread: threading.Thread | None = None
         self._nick_dirty = False    # «ник меняли, пока объявляли»
@@ -677,7 +685,89 @@ class Api:
     # ------------------------------------------------------------------ #
 
     def site_catalog(self, request=None) -> dict:
-        """Страница карточек площадки (тренды/поиск), без скачивания."""
+        """Страница карточек площадки (тренды/поиск), без скачивания.
+
+        Сетевой запрос идёт воркером: API окна не стоит, загрузка видна по
+        статусу и отменяема. Свежий кэш отдаётся сразу, без воркера.
+        """
+        parsed = self._cat_args(request)
+        if parsed.get("error"):
+            return parsed
+        platform = parsed["platform"]
+        mode, query, page, force = parsed["mode"], parsed["query"], \
+            parsed["page"], parsed["force"]
+        settings = self._current_settings()
+        if not force:
+            cached = catalog.peek(platform, mode, query, page)
+            if cached:
+                cached["items"] = self._mark_in_library(cached.get("items")
+                                                        or [], platform)
+                with self._lock:
+                    self._cat.update(running=False, platform=platform,
+                                     mode=mode, query=query, page=page,
+                                     items=cached["items"],
+                                     has_more=cached.get("has_more"),
+                                     error=None, kind=None,
+                                     source="cache", done_at=now_iso())
+                return {"ok": True, "done": True, **cached}
+        with self._lock:
+            if self._cat["running"]:
+                return {"error": "Каталог уже грузится", "running": True}
+            self._cat = {"running": True, "platform": platform, "mode": mode,
+                         "query": query, "page": page, "items": [],
+                         "has_more": False, "error": None, "kind": None,
+                         "source": "", "done_at": None}
+        self._cat_stop.clear()
+
+        def work() -> None:
+            try:
+                res = catalog.fetch(platform, mode=mode, query=query,
+                                    page=page, settings=settings, force=force,
+                                    log=self._log)
+                items = self._mark_in_library(res.get("items") or [], platform)
+                payload = {"items": items, "has_more": res.get("has_more"),
+                           "source": res.get("source"), "error": None,
+                           "kind": None}
+            except catalog.CatalogError as exc:
+                kind = getattr(exc, "kind", "empty")
+                payload = {"items": [], "has_more": False, "source": "",
+                           "error": str(exc), "kind": kind}
+            except Exception as exc:  # noqa: BLE001 - воркер не валит окно
+                payload = {"items": [], "has_more": False, "source": "",
+                           "error": str(exc), "kind": "empty"}
+            with self._lock:
+                cancelled = self._cat_stop.is_set()
+                self._cat.update(running=False, done_at=now_iso(),
+                                 **({"error": "Загрузка отменена",
+                                    "kind": "cancelled"} if cancelled else payload))
+                if cancelled:
+                    self._log("Каталог: загрузка отменена")
+
+        thread = threading.Thread(target=work, name="omnistash-catalog",
+                                  daemon=True)
+        with self._lock:
+            self._cat_thread = thread
+        thread.start()
+        self._log(f"Каталог: {platform} {mode}"
+                  + (f" «{query}»" if query else "") + f" стр. {page}")
+        return {"ok": True, "running": True, "platform": platform,
+                "mode": mode, "query": query, "page": page}
+
+    def site_catalog_status(self, request=None) -> dict:
+        """Ход загрузки каталога: карточки, has_more, ошибка по kind."""
+        with self._lock:
+            state = dict(self._cat)
+            state["items"] = list(state.get("items") or [])
+        state.setdefault("ok", True)
+        return state
+
+    def site_catalog_cancel(self, request=None) -> dict:
+        """Отменить загрузку каталога (результат не применяется)."""
+        self._cat_stop.set()
+        return {"ok": True}
+
+    def _cat_args(self, request) -> dict:
+        """Разбор запроса каталога + возрастной гейт (один путь для всех)."""
         request = request or {}
         try:
             platform = str(request.get("platform") or "").lower()
@@ -690,27 +780,13 @@ class Api:
         if not platform:
             return {"error": "Нужна площадка"}
         # Возраст: взрослая площадка только после явного подтверждения 18+
-        # (то же правило, что у add_start).
+        # (то же правило, что у add_start) - без подтверждения и запроса нет.
         plat = platforms_mod.by_id(platform) or {}
         if plat.get("adult") and not legal_mod.state().get("adult_ok"):
             return {"error": "Нужно подтверждение 18+ (возрастной гейт)",
                     "need_adult": True}
-        settings = self._current_settings()
-        try:
-            res = catalog.fetch(platform, mode=mode, query=query, page=page,
-                                settings=settings, force=force,
-                                log=self._log)
-        except catalog.CatalogError as exc:
-            payload = {"error": str(exc), "kind": getattr(exc, "kind", "empty")}
-            if payload["kind"] == "blocked":
-                payload["can_retry"] = True
-                if settings.get("mesh_enabled"):
-                    payload["can_mesh"] = True
-            return payload
-        except Exception as exc:  # noqa: BLE001 - воркер окна не валит
-            return {"error": str(exc), "kind": "empty"}
-        res["items"] = self._mark_in_library(res.get("items") or [], platform)
-        return res
+        return {"platform": platform, "mode": mode, "query": query,
+                "page": page, "force": force}
 
     def site_catalog_more(self, request=None) -> dict:
         """Следующая страница каталога (infinite scroll)."""
@@ -722,6 +798,8 @@ class Api:
         """Сброс кэша карточек (одной площадки или всех)."""
         request = request or {}
         platform = str(request.get("platform") or "").lower() or None
+        with self._lock:
+            self._cat.update(items=[], has_more=False, page=1)
         return {"ok": True, "removed": catalog.clear_cache(platform)}
 
     def _mark_in_library(self, items: list, platform: str) -> list:

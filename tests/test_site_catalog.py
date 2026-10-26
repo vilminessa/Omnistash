@@ -400,14 +400,29 @@ class ApiCatalogCase(unittest.TestCase):
         self.api = Api()
         self.addCleanup(self.api.close)
 
+    def load(self, request, method="site_catalog", timeout=5.0) -> dict:
+        """Запрос каталога: воркер + опрос статуса (как в интерфейсе)."""
+        res = getattr(self.api, method)(request)
+        if res.get("done") or not res.get("running"):
+            return res
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            status = self.api.site_catalog_status()
+            if not status.get("running"):
+                return status
+            time.sleep(0.02)
+        raise AssertionError("загрузка каталога не завершилась")
+
     def test_both_catalog_endpoints_alive(self):
         """Регрессия затмевания: site_catalog и mesh catalog_list разные."""
         self.assertTrue(hasattr(self.api, "site_catalog"))
         self.assertTrue(hasattr(self.api, "site_catalog_more"))
         self.assertTrue(hasattr(self.api, "site_catalog_clear"))
+        self.assertTrue(hasattr(self.api, "site_catalog_status"))
+        self.assertTrue(hasattr(self.api, "site_catalog_cancel"))
         with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
                                scripted([{"entries": [entry()]}])):
-            site = self.api.site_catalog({"platform": "youtube"})
+            site = self.load({"platform": "youtube"})
         self.assertTrue(site.get("ok"), site)
         self.assertIn("items", site)
         mesh = self.api.catalog_list({"query": "клип"})
@@ -415,6 +430,19 @@ class ApiCatalogCase(unittest.TestCase):
         self.assertIn("rows", mesh)
         self.assertIn("origins", mesh)
         self.assertNotIn("items", mesh)
+
+    def test_cache_returns_immediately(self):
+        """Свежий кэш отдаётся без воркера: ответ сразу и source=cache."""
+        with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
+                               scripted([{"entries": [entry()]}])):
+            first = self.load({"platform": "youtube"})
+        self.assertEqual(first["source"], "site")
+        with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
+                               scripted([{"entries": [entry()]}])) as fake:
+            second = self.api.site_catalog({"platform": "youtube"})
+        self.assertTrue(second.get("done"), "кэш - без воркера и без сети")
+        self.assertEqual(second["source"], "cache")
+        self.assertEqual(fake.calls, [])
 
     def test_adult_gate_blocks_pornhub(self):
         urls = []
@@ -428,7 +456,7 @@ class ApiCatalogCase(unittest.TestCase):
             self.assertTrue(denied.get("need_adult"))
             self.assertEqual(urls, [], "без 18+ запрос к площадке не идёт")
             legal_mod.accept(adult=True, aup=True)
-            allowed = self.api.site_catalog({"platform": "pornhub"})
+            allowed = self.load({"platform": "pornhub"})
         self.assertTrue(allowed.get("ok"), allowed)
         self.assertEqual(len(urls), 1,
                          "после подтверждения - один запрос к площадке")
@@ -439,28 +467,63 @@ class ApiCatalogCase(unittest.TestCase):
                            "title": "Мой клип"}, full=False)
         with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
                                scripted([{"entries": [entry()]}])):
-            res = self.api.site_catalog({"platform": "youtube"})
+            res = self.load({"platform": "youtube"})
         self.assertTrue(res["items"][0]["added"])
 
-    def test_blocked_reports_retry(self):
+    def test_blocked_reports_kind(self):
         err = catalog.yt_dlp.utils.DownloadError("Connection reset by peer.")
         with mock.patch.object(catalog.yt_dlp, "YoutubeDL", scripted([err])):
-            res = self.api.site_catalog({"platform": "youtube"})
+            res = self.load({"platform": "youtube"})
         self.assertEqual(res["kind"], "blocked")
-        self.assertTrue(res.get("can_retry"))
+        self.assertTrue(res.get("error"))
+
+    def test_cancel_drops_result(self):
+        """Отмена: карточки не применяются, статус говорит «отменено»."""
+        class Slow:
+            def __init__(self, opts):
+                self.opts = dict(opts)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def extract_info(self, url, download=False):
+                time.sleep(0.3)               # запрос «идёт» долго
+                return {"entries": [entry()]}
+
+        with mock.patch.object(catalog.yt_dlp, "YoutubeDL", Slow):
+            started = self.api.site_catalog({"platform": "youtube",
+                                             "force": True})
+            self.assertTrue(started.get("running"))
+            self.api.site_catalog_cancel()
+            deadline = time.time() + 5.0
+            status = None
+            while time.time() < deadline:
+                status = self.api.site_catalog_status()
+                if not status.get("running"):
+                    break
+                time.sleep(0.02)
+        self.assertEqual(status.get("kind"), "cancelled", status)
+        self.assertEqual(status.get("items") or [], [],
+                         "отменённая загрузка не отдаёт карточки")
 
     def test_more_endpoint_pages_forward(self):
         fake = scripted([{"entries": [entry()]}, {"entries": [entry("vid2")]}])
         with mock.patch.object(catalog.yt_dlp, "YoutubeDL", fake):
-            self.api.site_catalog({"platform": "youtube", "page": 1})
-            self.api.site_catalog_more({"platform": "youtube", "page": 2})
+            first = self.load({"platform": "youtube", "page": 1})
+            self.assertTrue(first.get("ok"), first)
+            second = self.load({"platform": "youtube", "page": 2},
+                               method="site_catalog_more")
+            self.assertTrue(second.get("ok"), second)
         self.assertEqual(fake.calls[1][1]["playlist_items"],
                          f"{PAGE_SIZE + 1}-{2 * PAGE_SIZE}")
 
     def test_site_catalog_clear_endpoint(self):
         with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
                                scripted([{"entries": [entry()]}])):
-            self.api.site_catalog({"platform": "youtube"})
+            self.load({"platform": "youtube"})
         res = self.api.site_catalog_clear({"platform": "youtube"})
         self.assertTrue(res["ok"])
         self.assertEqual(res["removed"], 1)

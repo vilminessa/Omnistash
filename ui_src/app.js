@@ -3676,7 +3676,8 @@
                     offset: 0, rows: [], total: 0, tags: [] };
   var platTabsJson = "";
   var catalogState = { platform: "", view: "library", query: "", page: 1,
-                       items: [], loading: false, ended: false, loaded: false };
+                       items: [], loading: false, ended: false, loaded: false,
+                       pollTimer: null };
 
   function openPlatform(id, label, adult, hasCatalog) {
     platState.platform = id;
@@ -3697,6 +3698,10 @@
     catalogState.items = [];
     catalogState.loaded = false;
     catalogState.ended = false;
+    clearTimeout(catalogState.pollTimer);
+    catalogState.pollTimer = null;
+    catalogState.loading = false;
+    if ($("cat-cancel")) $("cat-cancel").hidden = true;
     var pfv = $("pf-view");
     if (pfv) {
       // Площадка без каталога (не поддерживается) - переключатель скрыт,
@@ -3890,91 +3895,143 @@
       page: catalogState.page,
       force: !!force
     }).then(function (res) {
-      if (reset) grid.innerHTML = "";
-      catalogState.loading = false;
-      if (!res || res.error) {
+      // CAT-1: сетевой запрос идёт воркером - статус опрашиваем, пока
+      // загрузка идёт; свежий кэш приходит сразу (res.done).
+      if (!res) {
+        catalogState.loading = false;
+        grid.innerHTML = "";
+        catNotice("empty", "Каталог не загружен");
+        return;
+      }
+      if (res.need_adult) {
+        catalogState.loading = false;
+        grid.innerHTML = "";
+        catAdultFlow();
+        return;
+      }
+      if (res.done) {
+        catalogState.loading = false;
+        grid.innerHTML = "";
+        catApply(reset, res);
+        return;
+      }
+      if (res.running) {
+        $("cat-cancel").hidden = false;
+        catPoll(reset);
+        return;
+      }
+      if (res.error) {
+        catalogState.loading = false;
+        grid.innerHTML = "";
         if (reset) {
-          if (res && res.need_adult) {
-            legalDialog(
-              "Возрастной контент",
-              "Каталог этой площадки содержит материалы для взрослых. " +
-              "Подтвердите, что вам есть 18 лет и использование — личное " +
-              "(docs/ACCEPTABLE_USE.md).",
-              "Мне есть 18 лет - подтверждаю"
-            ).then(function (ok) {
-              if (!ok) {
-                $("ph-library-wrap").hidden = false;
-                $("cat-wrap").hidden = true;
-                toast("Каталог не показан: подтверждение 18+ не получено", true);
-                return;
-              }
-              call("legal_accept", { adult: true, aup: true })
-                .then(function () { catLoad(true); });
-            });
-            return;
-          }
-          catNotice(res.kind || "empty", res.error || "Каталог не загружен");
+          catNotice(res.kind || "empty", res.error);
         } else {
-          toast(res.error || "Ошибка каталога", true);
+          toast(res.error, true);
           catalogState.ended = true;
         }
         catalogState.loaded = true;
-        return;
       }
+    });
+  }
+
+  function catPoll(reset) {
+    clearTimeout(catalogState.pollTimer);
+    catalogState.pollTimer = setTimeout(function () {
+      call("site_catalog_status").then(function (res) {
+        if (!res) { catalogState.loading = false; return; }
+        if (res.running) { catPoll(reset); return; }
+        catalogState.loading = false;
+        catalogState.pollTimer = null;
+        $("cat-cancel").hidden = true;
+        $("cat-grid").innerHTML = "";
+        if (res.error) {
+          catNotice(res.kind === "cancelled" ? "empty"
+                                             : (res.kind || "empty"),
+                    res.kind === "cancelled" ? "Загрузка отменена" : res.error);
+          catalogState.loaded = true;
+          return;
+        }
+        catApply(reset, res);
+      });
+    }, 350);
+  }
+
+  function catApply(reset, res) {
+    if (reset) {
+      catalogState.items = res.items || [];
+    } else {
       // Дедуп по video_id: страница может повторять карточки предыдущей.
       var seen = {};
       catalogState.items.forEach(function (it) { seen[it.video_id] = 1; });
-      var fresh = (res.items || []).filter(function (it) {
-        if (seen[it.video_id]) return false;
-        seen[it.video_id] = 1;
-        return true;
-      });
-      catalogState.items = catalogState.items.concat(fresh);
-      catalogState.ended = !res.has_more;
-      catalogState.loaded = true;
-      if (!catalogState.items.length) {
-        catNotice("empty", "Карточек на этой странице нет");
+      catalogState.items = catalogState.items.concat(
+        (res.items || []).filter(function (it) {
+          if (seen[it.video_id]) return false;
+          seen[it.video_id] = 1;
+          return true;
+        }));
+    }
+    catalogState.ended = !res.has_more;
+    catalogState.loaded = true;
+    if (!catalogState.items.length) {
+      $("cat-grid").innerHTML = "";
+      $("cat-more").hidden = true;
+      catNotice("empty", "Карточек на этой странице нет");
+      return;
+    }
+    $("cat-empty").hidden = true;
+    $("cat-grid").innerHTML = catalogState.items.map(function (it, i) {
+      var dur = it.duration_s ? humanDuration(it.duration_s) : "";
+      var views = it.views != null ? bigCount(it.views) : "";
+      var meta = [views ? views + " просмотров" : "",
+                  it.author ? it.author : ""].filter(Boolean).join(" · ");
+      var action = it.added
+        ? '<span class="muted">В библиотеке</span>'
+        : '<button class="btn small cat-add" data-i="' + i + '">+ Добавить</button>';
+      return '<div class="cat-card' + (it.added ? " added" : "") +
+        '" data-i="' + i + '">' +
+        '<div class="cat-thumb" data-i="' + i + '"' +
+        ' title="' + esc(it.title) + '">' +
+        (it.thumb ? '<img src="' + esc(it.thumb) + '" loading="lazy" ' +
+          'onerror="this.remove()">' : "") +
+        (dur ? '<div class="cat-dur">' + esc(dur) + "</div>" : "") +
+        "</div>" +
+        '<div class="cat-body"><div class="cat-title" data-i="' + i + '">' +
+          esc(it.title) + "</div>" +
+          '<div class="cat-meta">' + esc(meta) + "</div></div>" +
+        '<div class="cat-actions">' + action + "</div>" +
+      "</div>";
+    }).join("");
+    $("cat-more").hidden = catalogState.ended;
+    if (!catalogState.ended) {
+      setTimeout(function () {
+        var io = new IntersectionObserver(function (entries) {
+          entries.forEach(function (e) {
+            if (e.isIntersecting && !catalogState.loading && !catalogState.ended) {
+              catalogState.page += 1;
+              catLoad(false);
+              io.disconnect();
+            }
+          });
+        }, { rootMargin: "200px" });
+        io.observe($("cat-more"));
+      }, 0);
+    }
+  }
+
+  function catAdultFlow() {
+    legalDialog(
+      "Возрастной контент",
+      "Каталог этой площадки содержит материалы для взрослых. Подтвердите, " +
+      "что вам есть 18 лет и использование — личное " +
+      "(docs/ACCEPTABLE_USE.md).",
+      "Мне есть 18 лет - подтверждаю"
+    ).then(function (ok) {
+      if (!ok) {
+        toast("Каталог не показан: подтверждение 18+ не получено", true);
         return;
       }
-      empty.hidden = true;
-      grid.innerHTML = catalogState.items.map(function (it, i) {
-        var dur = it.duration_s ? humanDuration(it.duration_s) : "";
-        var views = it.views != null ? bigCount(it.views) : "";
-        var meta = [views ? views + " просмотров" : "",
-                    it.author ? it.author : ""].filter(Boolean).join(" · ");
-        var action = it.added
-          ? '<span class="muted">В библиотеке</span>'
-          : '<button class="btn small cat-add" data-i="' + i + '">+ Добавить</button>';
-        return '<div class="cat-card' + (it.added ? " added" : "") +
-          '" data-i="' + i + '">' +
-          '<div class="cat-thumb" data-i="' + i + '"' +
-          ' title="' + esc(it.title) + '">' +
-          (it.thumb ? '<img src="' + esc(it.thumb) + '" loading="lazy" ' +
-            'onerror="this.remove()">' : "") +
-          (dur ? '<div class="cat-dur">' + esc(dur) + "</div>" : "") +
-          "</div>" +
-          '<div class="cat-body"><div class="cat-title" data-i="' + i + '">' +
-            esc(it.title) + "</div>" +
-            '<div class="cat-meta">' + esc(meta) + "</div></div>" +
-          '<div class="cat-actions">' + action + "</div>" +
-        "</div>";
-      }).join("");
-      more.hidden = catalogState.ended;
-      if (!catalogState.ended) {
-        // бесконечный скролл + кнопка
-        setTimeout(function () {
-          var io = new IntersectionObserver(function (entries) {
-            entries.forEach(function (e) {
-              if (e.isIntersecting && !catalogState.loading && !catalogState.ended) {
-                catalogState.page += 1;
-                catLoad(false);
-                io.disconnect();
-              }
-            });
-          }, { rootMargin: "200px" });
-          io.observe(more);
-        }, 0);
-      }
+      call("legal_accept", { adult: true, aup: true })
+        .then(function () { catLoad(true, true); });
     });
   }
 
@@ -4023,6 +4080,14 @@
           $("ph-sort").hidden = (v !== "library");
           $("cat-search").hidden = (v !== "catalog");
           $("cat-refresh").hidden = (v !== "catalog");
+          if (v !== "catalog") {
+            // Уход из «Каталога»: опрос статуса останавливаем (загрузка
+            // воркера безвредна, но её результат не нужен на другой вкладке).
+            clearTimeout(catalogState.pollTimer);
+            catalogState.pollTimer = null;
+            catalogState.loading = false;
+            $("cat-cancel").hidden = true;
+          }
           if (v === "catalog" && !catalogState.loaded) catLoad(true);
         });
       });
@@ -4040,6 +4105,16 @@
     }
     $("cat-refresh").addEventListener("click", function () { catLoad(true, true); });
     $("cat-more").addEventListener("click", function () { catLoad(false); });
+    $("cat-cancel").addEventListener("click", function () {
+      call("site_catalog_cancel").then(function () {
+        clearTimeout(catalogState.pollTimer);
+        catalogState.pollTimer = null;
+        catalogState.loading = false;
+        $("cat-cancel").hidden = true;
+        $("cat-grid").innerHTML = "";
+        catNotice("empty", "Загрузка каталога отменена");
+      });
+    });
     $("cat-grid").addEventListener("click", function (ev) {
       if (!ev.target.closest) return;
       var add = ev.target.closest(".cat-add");
