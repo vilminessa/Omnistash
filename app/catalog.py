@@ -4,17 +4,22 @@
 видео идёт обычным флоу (gui.add_start), здесь лишь карточки со ссылками.
 
 Правила модуля:
-  * источник - yt-dlp в плоском режиме (extract_flat): один запрос на
-    страницу карточек, без download; ручной парсинг HTML не делаем;
+  * YouTube - yt-dlp в плоском режиме (extract_flat): один запрос на
+    страницу карточек, без download;
+  * PornHub - карточки читаем с самой страницы площадки (HTML): yt-dlp
+    разбирает только видео PH, списки страниц ему не знакомы; разбор
+    ограничивается границами video-wrapper и не выдумывает записей;
+  * VK - каталога нет (списки площадок не разбираются): вкладка остаётся
+    «Библиотекой», переключатель не показывается;
   * кэш в профиле (catalog_cache/) с TTL: тренды 10 мин, поиск 5 мин;
     «Обновить» (force) игнорирует кэш;
-  * пагинация диапазоном записей (playlist_items): страница N - это
-    записи [(N-1)*PAGE+1 .. N*PAGE], has_more решается по длине;
+  * пагинация: youtube - диапазоном записей (playlist_items), PH -
+    страницей ?page=N; has_more решается по длине;
   * ссылки канонизированы (PH-зеркала сводим к www.pornhub.com), карточки
     дедуплицируются по video_id;
-  * отказ площадки классифицирован по kind: blocked (недоступна из сети), empty
-    (площадка ответила, но список пуст), unsupported (не умеем) - UI по
-    kind решает, что предлагать (VPN/повтор/mesh).
+  * отказ площадки классифицирован по kind: blocked (недоступна из сети),
+    empty (площадка ответила, но список пуст), unsupported (не умеем) -
+    UI по kind решает, что предлагать (VPN/повтор/mesh).
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from urllib.parse import urlparse, urlunparse
 
@@ -159,7 +165,51 @@ def _blocked(exc: BaseException) -> bool:
     text = str(exc).lower()
     return ("timed out" in text or "connection" in text or "reset" in text
             or " refused" in text or "403" in text or "410" in text
-            or "network" in text)
+            or "429" in text or "network" in text)
+
+
+def _supported(url: str) -> bool:
+    """Есть ли у yt-dlp экстрактор для этого адреса страницы.
+
+    ignoreerrors=True в плоском режиме молча съедает «Unsupported URL»,
+    поэтому страницу без листинга отличаем здесь: иначе каталог площадки,
+    для которой yt-dlp не умеет списки, выглядел бы как «пусто».
+    """
+    try:
+        from yt_dlp.extractor import gen_extractors
+    except Exception:  # noqa: BLE001
+        return True
+    for extractor in gen_extractors():
+        try:
+            if extractor.suitable(url) and extractor.IE_NAME != "generic":
+                return True
+        except Exception:  # noqa: BLE001 - кривой экстрактор не решает
+            continue
+    return False
+
+
+def _probe(url: str, settings: dict | None) -> str:
+    """Лёгкая проверка доступности страницы: ok | blocked | error.
+
+    Площадка отвечает 403/410 при блокировке из сети пользователя; в
+    плоском режиме с ignoreerrors это выглядит как «пустой список»,
+    поэтому статус решаем отдельным коротким запросом.
+    """
+    import urllib.request
+    timeout = max(int((settings or {}).get("socket_timeout") or 0), 10)
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0 (compatible; Omnistash)"})
+    try:
+        with urllib.request.urlopen(request, timeout=min(timeout, 15)) as got:
+            status = got.status
+    except Exception as exc:  # noqa: BLE001 - код ответа тоже отказ
+        text = str(exc)
+        if _blocked(exc) or "403" in text or "410" in text or "429" in text:
+            return "blocked"
+        return "error"
+    if status in (403, 410, 429, 503):
+        return "blocked"
+    return "ok"
 
 
 def _opts(settings: dict | None, start: int, end: int) -> dict:
@@ -196,13 +246,22 @@ def _entries(info) -> list:
     return []
 
 
-def _extract_candidates(urls: list[str], opts: dict, log=None) -> list:
+def _extract_candidates(urls: list[str], opts: dict,
+                        settings: dict | None, log=None) -> list:
     """Первый успешный ответ: пробой нескольких адресов одной площадки.
 
     feed/trending в плоском режиме отдаёт пусто чаще, чем страница
     результатов - поэтому тренды пробуем и через результаты по «trending».
+    Пустой список различаем честно: unsupported (yt-dlp не умеет такие
+    страницы вообще) и blocked (площадка отвечает 403/410 на блокировку
+    из сети пользователя) против «пусто на этой странице».
     """
-    for url in urls:
+    known = [url for url in urls if _supported(url)]
+    if not known:
+        raise CatalogError(
+            "Каталог этой площадки yt-dlp не разбирает (списки страниц не "
+            "поддерживаются) - добавляйте контент ссылкой", kind="unsupported")
+    for url in known:
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -220,6 +279,11 @@ def _extract_candidates(urls: list[str], opts: dict, log=None) -> list:
         entries = _entries(info)
         if entries:
             return entries
+    if _probe(known[0], settings) == "blocked":
+        raise CatalogError(
+            "Площадка недоступна из вашей сети (403/410 на страницу) - "
+            "поможет VPN/прокси; если контент есть у участников mesh, его "
+            "можно запросить из карточки или по ссылке", kind="blocked")
     return []
 
 
@@ -232,34 +296,87 @@ def _fetch_youtube(mode: str, query: str, start: int, end: int,
         urls = ["https://www.youtube.com/feed/trending",
                 "https://www.youtube.com/results?search_query=trending",
                 "https://www.youtube.com/feed/topics-music"]
-    return _extract_candidates(urls, opts, log)
+    return _extract_candidates(urls, opts, settings, log)
+
+
+def _http_get(url: str, settings: dict | None) -> str:
+    """HTML страницы площадки (только чтение, без download).
+
+    yt-dlp не умеет списки страниц PornHub (он разбирает сами видео),
+    поэтому карточки читаем с страницы напрямую: тот же адрес, что видит
+    человек в браузере. Сетевой отказ и 403/410 трактуем как блокировку.
+    """
+    import urllib.request
+    timeout = max(int((settings or {}).get("socket_timeout") or 0), 10)
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                      "Accept": "text/html,application/xhtml+xml"})
+    try:
+        with urllib.request.urlopen(request, timeout=min(timeout, 20)) as got:
+            return got.read().decode("utf-8", "ignore")
+    except Exception as exc:  # noqa: BLE001 - честный отказ в kind
+        text = str(exc)
+        raise CatalogError(
+            "Площадка не ответила (недоступна из вашей сети - поможет "
+            "VPN/прокси или запрос участникам mesh)",
+            kind="blocked" if (_blocked(exc) or "403" in text or "410" in text
+                               or "429" in text) else "empty") from exc
+
+
+_PH_ANCHOR_RE = re.compile(
+    r'<a\s[^>]*href="/view_video\.php\?viewkey=([A-Za-z0-9]+)"[^>]*'
+    r'title="([^"]{2,200})"', re.S)
+_PH_IMG_RE = re.compile(r'<img[^>]*?(?:src|data-src)="([^"]+)"', re.S)
+
+
+def _parse_ph_cards(html: str) -> list[dict]:
+    """Карточки со страницы PornHub.
+
+    Актуальная разметка площадки (2026): обёртка phimage + ссылка
+    «href=view_video.php?viewkey=… title=Название» + <img> превью внутри.
+    Длительность и просмотры в HTML страницы не лежат ( их подгружает JS)
+    - карточка честно показывается без них. Дубли одной ссылки (обложка и
+    заголовок - два anchor'а) схлопываются по viewkey.
+    """
+    import html as html_mod
+    out: list[dict] = []
+    seen: set[str] = set()
+    for match in _PH_ANCHOR_RE.finditer(html):
+        remote_id = match.group(1)
+        if remote_id in seen:
+            continue
+        seen.add(remote_id)
+        thumb = _PH_IMG_RE.search(html, match.end(), match.end() + 900)
+        out.append({
+            "id": remote_id,
+            "title": to_text(html_mod.unescape(match.group(2))) or remote_id,
+            "url": "https://www.pornhub.com/view_video.php?viewkey=" + remote_id,
+            "duration": None,
+            "thumbnail": to_text(thumb.group(1)) if thumb else None,
+            "view_count": None,
+        })
+    return out
 
 
 def _fetch_pornhub(mode: str, query: str, start: int, end: int,
                    settings: dict | None, log=None) -> list:
-    opts = _opts(settings, start, end)
+    page = (start - 1) // PAGE_SIZE + 1
     if mode == "search" and query:
-        urls = [f"https://www.pornhub.com/video/search?search={query}"]
+        url = (f"https://www.pornhub.com/video/search?search={query}"
+               + (f"&page={page}" if page > 1 else ""))
     else:
-        urls = ["https://www.pornhub.com/video",
-                "https://www.pornhub.com/videos/most_viewed"]
-    return _extract_candidates(urls, opts, log)
-
-
-def _fetch_vk(mode: str, query: str, start: int, end: int,
-              settings: dict | None, log=None) -> list:
-    if mode != "search" or not query:
-        raise CatalogError("Каталог VK: пока доступен только поиск по запросу",
-                           kind="unsupported")
-    opts = _opts(settings, start, end)
-    return _extract_candidates([f"https://vk.com/search?q[{query}]=q"],
-                               opts, log)
+        url = ("https://www.pornhub.com/video"
+               + (f"?page={page}" if page > 1 else ""))
+    html = _http_get(url, settings)
+    cards = _parse_ph_cards(html)
+    if log:
+        log(f"Каталог PornHub: {len(cards)} карточек со страницы {url}")
+    return cards
 
 
 FETCHERS = {
     "youtube": _fetch_youtube,
     "pornhub": _fetch_pornhub,
-    "vk": _fetch_vk,
 }
 
 

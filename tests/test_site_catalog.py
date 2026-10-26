@@ -26,6 +26,23 @@ def entry(remote_id="vid1", **overrides):
     return item
 
 
+PH_HTML = """
+<div class="phimage">
+  <a href="/view_video.php?viewkey=abc123" title="Первый клип"
+     class="linkVideoThumb img">
+    <img src="https://pix.phncdn.com/th.jpg" alt="Первый клип">
+  </a>
+  <span class="title"><a href="/view_video.php?viewkey=abc123">Первый клип</a></span>
+</div>
+<div class="phimage">
+  <a href="/view_video.php?viewkey=def456" title="Второй &quot;клип&quot;">
+    <img src="https://pix.phncdn.com/th2.jpg">
+  </a>
+</div>
+<div class="footer">не карточка</div>
+"""
+
+
 def scripted(responses):
     """Подмена yt_dlp.YoutubeDL: ответы по порядку вызовов.
 
@@ -54,6 +71,13 @@ def scripted(responses):
             return item
 
     return Ydl
+
+
+def raising(exc):
+    """Функция-заглушка, которая всегда бросает переданный отказ."""
+    def _fail(url, settings):
+        raise exc
+    return _fail
 
 
 class CatalogCase(unittest.TestCase):
@@ -92,15 +116,45 @@ class TestCards(CatalogCase):
 
     def test_ph_mirror_canonicalized(self):
         """Зеркало rt.pornhub.org -> www.pornhub.com (тот же viewkey)."""
-        raw = entry(remote_id="698a3d3b0e335",
-                    url="https://rt.pornhub.org/view_video.php"
-                        "?viewkey=698a3d3b0e335")
-        with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
-                               scripted([{"entries": [raw]}])):
-            res = catalog.fetch(platform="pornhub")
-        self.assertEqual(res["items"][0]["url"],
-                         "https://www.pornhub.com/view_video.php"
-                         "?viewkey=698a3d3b0e335")
+        url = catalog._canonical(
+            "https://rt.pornhub.org/view_video.php?viewkey=698a3d3b0e335",
+            "pornhub", "698a3d3b0e335")
+        self.assertEqual(url, "https://www.pornhub.com/view_video.php"
+                              "?viewkey=698a3d3b0e335")
+
+    def test_ph_cards_from_page(self):
+        """Карточки PH читаются со страницы площадки (yt-dlp списки PH не умеет)."""
+        with mock.patch.object(catalog, "_http_get",
+                               lambda url, settings: PH_HTML):
+            res = catalog.fetch(platform="pornhub", mode="trending")
+        ids = [item["video_id"] for item in res["items"]]
+        self.assertEqual(ids, ["abc123", "def456"],
+                         "дубли ссылки (обложка и заголовок) схлопнуты")
+        first = res["items"][0]
+        self.assertEqual(first["title"], "Первый клип")
+        self.assertEqual(first["thumb"], "https://pix.phncdn.com/th.jpg")
+        self.assertEqual(first["url"],
+                         "https://www.pornhub.com/view_video.php?viewkey=abc123")
+        # длительность и просмотры в HTML страницы не лежат (их подгружает JS)
+        self.assertIsNone(first["duration_s"])
+        self.assertIsNone(first["views"])
+        self.assertEqual(res["items"][1]["title"], 'Второй "клип"',
+                         "html-escape в title разворачивается")
+
+    def test_ph_search_page_param(self):
+        urls = []
+
+        def record(url, settings):
+            urls.append(url)
+            return PH_HTML
+
+        with mock.patch.object(catalog, "_http_get", record):
+            catalog.fetch(platform="pornhub", mode="search", query="кошки",
+                          force=True)
+            catalog.fetch(platform="pornhub", mode="search", query="кошки",
+                          page=2, force=True)
+        self.assertIn("search=кошки", urls[0])
+        self.assertIn("page=2", urls[1], "вторая страница - параметр страницы")
 
     def test_dedup_by_video_id(self):
         """Одна и та же запись из нескольких адресов - одна карточка."""
@@ -214,10 +268,12 @@ class TestCache(CatalogCase):
                          "разные запросы - разные кэш-ключи")
 
     def test_clear_cache_by_platform(self):
-        fake = scripted([{"entries": [entry()]}, {"entries": [entry("vid2")]}])
-        with mock.patch.object(catalog.yt_dlp, "YoutubeDL", fake):
-            catalog.fetch(platform="youtube")
-            catalog.fetch(platform="pornhub")
+        with mock.patch.object(catalog, "_http_get",
+                               lambda url, settings: PH_HTML):
+            with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
+                                   scripted([{"entries": [entry()]}])):
+                catalog.fetch(platform="youtube")
+                catalog.fetch(platform="pornhub")
         files = list((self.dir / "catalog_cache").glob("*.json"))
         self.assertEqual(len(files), 2)
         self.assertEqual(catalog.clear_cache("youtube"), 1)
@@ -230,38 +286,94 @@ class TestCache(CatalogCase):
 
 class TestFailures(CatalogCase):
     def test_blocked_kind(self):
-        err = catalog.yt_dlp.utils.DownloadError("Connection aborted.")
-        with mock.patch.object(catalog.yt_dlp, "YoutubeDL", scripted([err])):
+        """Сетевой отказ страницы PH - kind=blocked доходит до вызывающего."""
+        with mock.patch.object(catalog, "_http_get",
+                               raising(CatalogError("Площадка не ответила",
+                                                    kind="blocked"))):
             with self.assertRaises(CatalogError) as ctx:
                 catalog.fetch(platform="pornhub")
         self.assertEqual(ctx.exception.kind, "blocked")
-        self.assertIn("недоступна", str(ctx.exception))
+
+    def test_http_get_classifies_block(self):
+        """403/410 на страницу - blocked; сетевой отказ тоже blocked.
+
+        ignoreerrors/плоский режим не различают блокировку, поэтому её
+        решает именно этот путь (PH списки читаем напрямую).
+        """
+        import urllib.request
+
+        def fail_403(*args, **kwargs):
+            # HTTPError мусорит при GC; текст ответа решает не меньше
+            raise OSError("HTTP Error 403: Forbidden")
+
+        with mock.patch("urllib.request.urlopen", fail_403):
+            with self.assertRaises(CatalogError) as ctx:
+                catalog._http_get("https://www.pornhub.com/video", {})
+        self.assertEqual(ctx.exception.kind, "blocked")
+
+        def fail_reset(*args, **kwargs):
+            raise OSError("Connection reset by peer")
+
+        with mock.patch("urllib.request.urlopen", fail_reset):
+            with self.assertRaises(CatalogError) as ctx:
+                catalog._http_get("https://www.pornhub.com/video", {})
+        self.assertEqual(ctx.exception.kind, "blocked")
 
     def test_empty_kind(self):
-        with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
-                               scripted([{"entries": []}, {"entries": []},
-                                         {"entries": []}])):
-            with self.assertRaises(CatalogError) as ctx:
-                catalog.fetch(platform="youtube")
+        with mock.patch.object(catalog, "_probe",
+                               lambda url, settings: "ok"):
+            with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
+                                   scripted([{"entries": []}, {"entries": []},
+                                             {"entries": []}])):
+                with self.assertRaises(CatalogError) as ctx:
+                    catalog.fetch(platform="youtube")
         self.assertEqual(ctx.exception.kind, "empty")
+
+    def test_probe_blocked_kind(self):
+        """Площадка отвечает 403/410 на страницу: kinds=blocked, не «пусто».
+
+        ignoreerrors съедает HTTP-отказ внутри экстрактора, поэтому
+        различаем блокировку отдельной пробой.
+        """
+        with mock.patch.object(catalog, "_probe",
+                               lambda url, settings: "blocked"):
+            with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
+                                   scripted([{"entries": []},
+                                             {"entries": []},
+                                             {"entries": []}])):
+                with self.assertRaises(CatalogError) as ctx:
+                    catalog.fetch(platform="youtube")
+        self.assertEqual(ctx.exception.kind, "blocked")
+        self.assertIn("VPN", str(ctx.exception))
 
     def test_unsupported_platform(self):
         with self.assertRaises(CatalogError) as ctx:
             catalog.fetch(platform="vimeo")
         self.assertEqual(ctx.exception.kind, "unsupported")
 
-    def test_vk_only_search(self):
+    def test_vk_has_no_catalog(self):
+        """VK: списки площадок yt-dlp не разбирает - каталога нет (P5)."""
+        self.assertNotIn("vk", catalog.FETCHERS)
         with self.assertRaises(CatalogError) as ctx:
             catalog.fetch(platform="vk")
         self.assertEqual(ctx.exception.kind, "unsupported")
 
+    def test_unsupported_page_url(self):
+        """Страница, которую yt-dlp не разбирает, - unsupported, не «пусто»."""
+        with mock.patch.object(catalog, "_supported", lambda url: False):
+            with self.assertRaises(CatalogError) as ctx:
+                catalog.fetch(platform="youtube")
+        self.assertEqual(ctx.exception.kind, "unsupported")
+
     def test_failure_is_not_cached(self):
         """Пустая страница не записывается в кэш: повтор пробует снова."""
-        with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
-                               scripted([{"entries": []}, {"entries": []},
-                                         {"entries": []}])):
-            with self.assertRaises(CatalogError):
-                catalog.fetch(platform="youtube")
+        with mock.patch.object(catalog, "_probe",
+                               lambda url, settings: "ok"):
+            with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
+                                   scripted([{"entries": []}, {"entries": []},
+                                             {"entries": []}])):
+                with self.assertRaises(CatalogError):
+                    catalog.fetch(platform="youtube")
         with mock.patch.object(catalog.yt_dlp, "YoutubeDL",
                                scripted([{"entries": [entry()]}])) as fake:
             res = catalog.fetch(platform="youtube")
@@ -305,16 +417,20 @@ class ApiCatalogCase(unittest.TestCase):
         self.assertNotIn("items", mesh)
 
     def test_adult_gate_blocks_pornhub(self):
-        fake = scripted([{"entries": [entry()]}] * 2)
-        with mock.patch.object(catalog.yt_dlp, "YoutubeDL", fake):
+        urls = []
+
+        def record(url, settings):
+            urls.append(url)
+            return PH_HTML
+
+        with mock.patch.object(catalog, "_http_get", record):
             denied = self.api.site_catalog({"platform": "pornhub"})
             self.assertTrue(denied.get("need_adult"))
-            self.assertEqual(fake.calls, [],
-                             "без 18+ запрос к площадке не идёт")
+            self.assertEqual(urls, [], "без 18+ запрос к площадке не идёт")
             legal_mod.accept(adult=True, aup=True)
             allowed = self.api.site_catalog({"platform": "pornhub"})
         self.assertTrue(allowed.get("ok"), allowed)
-        self.assertEqual(len(fake.calls), 1,
+        self.assertEqual(len(urls), 1,
                          "после подтверждения - один запрос к площадке")
 
     def test_added_marks_library_row(self):
@@ -348,6 +464,15 @@ class ApiCatalogCase(unittest.TestCase):
         res = self.api.site_catalog_clear({"platform": "youtube"})
         self.assertTrue(res["ok"])
         self.assertEqual(res["removed"], 1)
+
+    def test_platforms_report_catalog_support(self):
+        """Переключатель «Каталог» показывают только поддерживаемые
+        площадки (VK без списков страниц - без каталога)."""
+        res = self.api.platforms_list()
+        by = {item["id"]: item for item in res["platforms"]}
+        self.assertTrue(by["youtube"]["catalog"])
+        self.assertTrue(by["pornhub"]["catalog"])
+        self.assertFalse(by["vk"]["catalog"])
 
 
 if __name__ == "__main__":
