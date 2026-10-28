@@ -31,7 +31,7 @@
 | Трек | worktree | Этап | Владеет файлами |
 |---|---|---|---|
 | `ui-mass-ops` | `wt-mass-ops` | M17 массовые операции + мультивыбор в библиотеке | `app/gui.py` (аддитивные `bulk_*`), `app/repo.py` (массовые хелперы), `ui_src/app.js`, `ui_src/index.html`, `ui_src/app.css`, `tests/test_bulk_ops.py` |
-| `audio-index` | `wt-audio` | E0 платформенный адаптер + индексация аудио | `app/indexer.py`, `app/repo.py` (отдельный блок в конце), `app/db.py`/`app/migrate.py` (v7), `app/metadata.py`, `app/sources.py`, `app/gui.py` (аддитивно), `app/settings_schema.py`, `ui_src/*`, `tests/test_audio_index.py` |
+| `audio-index` | `wt-audio` | E0 платформенный адаптер + индексация аудио | `app/indexer.py`, `app/repo.py` (отдельный блок в конце), `app/db.py`/`app/migrate.py` (v12 — там уже было v11), `app/metadata.py`, `app/sources.py`, `app/gui.py` (аддитивно), `app/settings_schema.py`, `ui_src/*`, `tests/test_audio_index.py` |
 | `bypass-po` | `wt-bypass` | M13 устойчивость к отказам площадки (Bypass из Synfronia + PO-токены) | `app/bypass.py` (новый), `app/downloader.py`, `app/sources.py`, `app/queue.py`, `app/settings_schema.py`, `tests/test_bypass.py`, `tests/test_po_tokens.py` |
 
 Мои дела в этой волне (не пересекаются с трками): сводки по мере прихода,
@@ -45,7 +45,7 @@
   `node --check ui_src/app.js`.
 - Живые проверки: выкачка аудио-дорожки без действия человека, очередь
   мультивыбора на реальной группе, цепочка дорог при 403/410 (YouTube),
-  миграция v7 на живой базе в отдельной папке профиля.
+  миграция v12 на живой базе в отдельной папке профиля.
 - README: строки M17 (массовые операции) и E0, M13 — статусы.
 - Push в Forgejo, стадия канала (rev +1).
 
