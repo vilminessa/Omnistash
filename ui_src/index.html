@@ -125,7 +125,25 @@
                 title="Теги, рейтинг, «просмотрено» для выбранных">Пометить…</button>
         <button class="btn ghost" id="sel-move"
                 title="Перенести выбранные файлы в другое хранилище">Перенести…</button>
-        <button class="btn primary" id="sel-download">Скачать</button>
+        <button class="btn ghost" id="sel-bulk"
+                title="Теги, рейтинг, папка и удаление строк для выбранных">Операции…</button>
+        <button class="btn primary" id="sel-download"
+                title="Одним действием в очередь; строки, где файл уже на месте, пропустим - они видны в сводке">Скачать</button>
+      </div>
+
+      <!-- M17: операции над папкой-коллекцией целиком, без мультивыбора -->
+      <div class="notice col-bar" id="col-bar" hidden>
+        <span id="col-title">Папка</span>
+        <span class="muted">Хранилище:</span>
+        <select id="col-storage" data-storage-select
+                title="Куда качать все строки папки"></select>
+        <span class="spacer"></span>
+        <button class="btn primary" id="col-download"
+                title="Все строки папки в очередь одним действием; скачанные пропустим - сводка покажет причины">Скачать всё</button>
+        <button class="btn ghost" id="col-ops"
+                title="Теги, рейтинг, папка и удаление строк для всех строк папки">Операции…</button>
+        <button class="btn ghost" id="col-purge"
+                title="Убрать все связи этой папки (строки видео остаются)">Убрать из папки</button>
       </div>
 
       <div class="grid-head" id="grid-head">
@@ -388,6 +406,17 @@
       <button class="icon-btn" id="mark-close" aria-label="Закрыть">✕</button>
     </div>
     <div class="card-body" id="mark-body"></div>
+  </div>
+</div>
+
+<!-- M17: массовые операции над выбранной группой или папкой целиком -->
+<div class="overlay" id="bulk-overlay" hidden>
+  <div class="card" role="dialog" aria-modal="true">
+    <div class="card-head">
+      <div class="card-title" id="bulk-title">Операции над группой</div>
+      <button class="icon-btn" id="bulk-close" aria-label="Закрыть">✕</button>
+    </div>
+    <div class="card-body" id="bulk-body"></div>
   </div>
 </div>
 

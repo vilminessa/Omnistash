@@ -596,6 +596,233 @@ class Api:
         return {"ok": True, "added": added, "removed": removed}
 
     # ------------------------------------------------------------------ #
+    #  Массовые операции (M17): выбранная группа ИЛИ папка целиком
+    # ------------------------------------------------------------------ #
+
+    BULK_LIMIT = 500  # страховка: одна операция не должна переписать библиотеку
+
+    def _bulk_selection(self, request) -> tuple[list[int], str | None]:
+        """(id-шники группы, ошибка). Группа - мультивыбор ИЛИ папка.
+
+        collection_id вместо ids даёт те же эндпоинты без выделения строк
+        («Скачать всё» в папке). Дубли и нули убираем: Set из окна уже чист,
+        но повторный вызов или кривый запрос не должен удваивать работу.
+        """
+        request = request or {}
+        raw = request.get("ids")
+        if raw is None and request.get("collection_id"):
+            raw = repo.collection_ids(self.db.conn,
+                                      int(request.get("collection_id") or 0))
+        try:
+            ids = [int(v) for v in raw or []]
+        except (TypeError, ValueError):
+            return [], "Некорректный список id"
+        ids = list(dict.fromkeys(v for v in ids if v > 0))
+        if not ids:
+            return [], "Ничего не выбрано"
+        if len(ids) > self.BULK_LIMIT:
+            return [], (f"Группа слишком большая: {len(ids)} строк, "
+                        f"лимит {self.BULK_LIMIT} - разбейте на части")
+        return ids, None
+
+    def _refused(self, why: str, ids: list[int] | None = None) -> dict:
+        """Отказ до записи: причина в журнале и в ответе окна.
+
+        Никаких изменений не было - журнал должен это видеть, иначе «массовая
+        операция» выглядела бы выполненной, когда человек её не подтвердил.
+        """
+        self._log(f"Массовая операция отклонена: {why}"
+                  + (f" ({len(ids)} строк)" if ids else ""))
+        return {"error": why}
+
+    def _bulk_adult(self, ids: list[int]) -> dict | None:
+        """Гейт 18+ для группы со строками взрослой площадки (P1/PH5).
+
+        Тот же приём, что в add_start: отказ с adult_confirm - окно спросит
+        «мне есть 18» и повторит вызов; после подтверждения legal.state()
+        уже содержит дату, поэтому повтор проходит без диалога.
+        """
+        if legal_mod.state().get("adult_ok"):
+            return None
+        if not repo.count_adult(self.db.conn, ids):
+            return None
+        self._log(f"Массовая операция: в группе {len(ids)} строк есть "
+                  "строки взрослой площадки - нужно подтверждение 18+")
+        return {"adult_confirm": True,
+                "error": "Группа содержит строки взрослой площадки: "
+                         "подтвердите, что вам есть 18 лет и вы несёте "
+                         "ответственность за скачиваемое"}
+
+    def _bulk_guard(self, action: str, work):
+        """Общий отказ массовых операций: ошибка БД не должна ронять окно.
+
+        Сводка важнее traceback: окно показывает причину и может повторить
+        более мелкой группой.
+        """
+        try:
+            return work()
+        except Exception as exc:  # noqa: BLE001 - честная строка вместо падения
+            self._log(f"{action}: {exc}")
+            return {"error": f"Не удалось выполнить: {exc}"}
+
+    def bulk_download(self, request=None) -> dict:
+        """«Скачать» для группы/папки ОДНИМ действием: все id разом в очередь.
+
+        Не параллельные запросы площадке: очередь однопоточная (app.queue),
+        вызов только ставит строки в queued и запускает цикл. Строки, где
+        файл уже на месте, в очередь не идут - они видны в сводке как
+        пропуск с причиной.
+        """
+        ids, error = self._bulk_selection(request)
+        if error:
+            return self._refused(error)
+        gate = self._bulk_adult(ids)
+        if gate:
+            return gate
+        storage_id = str(request.get("storage_id") or "").strip() or None
+        storage = None
+        if storage_id:
+            storage, error = self._storage_or_error(storage_id)
+            if error:
+                return self._refused(error, ids)
+        summary = self._bulk_guard(
+            "Массовая выкачка",
+            lambda: repo.bulk_enqueue(self.db.conn, ids,
+                                      storage_id=storage_id))
+        if summary.get("error"):
+            return summary
+        self._touch()
+        reasons = ", ".join(f"{why}: {n}"
+                            for why, n in sorted(summary["reasons"].items()))
+        self._log(f"Массовая выкачка: {summary['queued']} из {len(ids)} "
+                  f"в очередь"
+                  + (f" -> {storage['label']}" if storage else "")
+                  + (f"; пропущено ({reasons})" if summary["skipped"] else ""))
+        if summary["queued"]:
+            # Человек явно попросил качать - стартуем сразу (как enqueue).
+            self.dl.start()
+        return {"ok": True, "total": len(ids), **summary,
+                "storage_id": storage_id}
+
+    def bulk_tags(self, request=None) -> dict:
+        """Добавить/убрать локальные теги у группы (несколько тегов сразу).
+
+        user_tags - метки человека и опора поиска; теги площадки не трогаем
+        (принадлежат источнику, их перезаписывает синк). merge вместо
+        замены: в группе разные строки, замена стёрла бы чужие метки.
+        """
+        ids, error = self._bulk_selection(request)
+        if error:
+            return self._refused(error)
+        gate = self._bulk_adult(ids)
+        if gate:
+            return gate
+        add = request.get("add") or []
+        remove = request.get("remove") or []
+        if not repo.tag_names(add) and not repo.tag_names(remove):
+            return self._refused("Нужны теги: «добавить» или «убрать»", ids)
+        summary = self._bulk_guard(
+            "Массовые теги",
+            lambda: repo.bulk_tags(self.db.conn, ids, add=add, remove=remove))
+        if summary.get("error"):
+            return summary
+        self._touch()
+        self._log(f"Массовые теги: обновлено {summary['updated']} строк "
+                  f"из {len(ids)}"
+                  + (f", пропущено: {summary['gone']}" if summary["gone"] else ""))
+        return {"ok": True, "total": len(ids), **summary}
+
+    def bulk_rating(self, request=None) -> dict:
+        """Рейтинг 1..5 для группы (0 - сбросить).
+
+        Валидация до записи: окно присылает то, что человек выбрал звёздами,
+        и 999 или «abc» должны быть отвергнуты явно, а не схлопнуты в 0.
+        """
+        ids, error = self._bulk_selection(request)
+        if error:
+            return self._refused(error)
+        gate = self._bulk_adult(ids)
+        if gate:
+            return gate
+        try:
+            rating = int(request.get("rating"))
+        except (TypeError, ValueError):
+            return self._refused("Рейтинг - целое число от 1 до 5 (0: сбросить)",
+                                 ids)
+        if not 0 <= rating <= 5:
+            return self._refused(f"Рейтинг вне диапазона 0..5: {rating}", ids)
+        summary = self._bulk_guard(
+            "Массовый рейтинг",
+            lambda: repo.bulk_rating(self.db.conn, ids, rating))
+        if summary.get("error"):
+            return summary
+        self._touch()
+        self._log(f"Массовый рейтинг {rating}: обновлено "
+                  f"{summary['updated']} строк из {len(ids)}")
+        return {"ok": True, "total": len(ids), "rating": rating, **summary}
+
+    def bulk_collection(self, request=None) -> dict:
+        """Группу в папку / из папки; папка целиком - тот же вход без ids.
+
+        action: add | remove. remove всей папки (collection_id без ids) -
+        это «очистить папку»: связи уходят, строки видео остаются.
+        """
+        ids, error = self._bulk_selection(request)
+        if error:
+            return self._refused(error)
+        gate = self._bulk_adult(ids)
+        if gate:
+            return gate
+        action = str(request.get("action") or "").strip().lower()
+        if action not in ("add", "remove"):
+            return self._refused("Нужно действие: add или remove", ids)
+        cid = int(request.get("collection_id") or 0)
+        if not cid:
+            return self._refused("Не указана коллекция", ids)
+        if not self.db.conn.execute(
+                "SELECT id FROM collections WHERE id=?", (cid,)).fetchone():
+            return self._refused("Коллекция не найдена", ids)
+        summary = self._bulk_guard(
+            "Массовая коллекция",
+            lambda: repo.bulk_collection(self.db.conn, ids, cid, action))
+        if summary.get("error"):
+            return summary
+        self._touch()
+        name = self.db.conn.execute(
+            "SELECT name FROM collections WHERE id=?", (cid,)).fetchone()["name"]
+        moved = summary["added"] if action == "add" else summary["removed"]
+        self._log(f"Коллекция «{name}» ({action}): {moved} из {len(ids)}"
+                  + (f", пропущено: {summary['gone']}" if summary["gone"] else ""))
+        return {"ok": True, "total": len(ids), "action": action,
+                "collection_id": cid, "collection_name": name, **summary}
+
+    def bulk_remove_rows(self, request=None) -> dict:
+        """Убрать строки из индекса; ФАЙЛЫ на диске НЕ удаляются.
+
+        confirm=True ставит только диалог в окне - без него отказ, чтобы
+        случайный вызов не вычистил библиотеку. Связи уходят каскадом по FK
+        (записи об индексе), скан найдёт копии на диске заново.
+        """
+        ids, error = self._bulk_selection(request)
+        if error:
+            return self._refused(error)
+        if not (request or {}).get("confirm"):
+            return self._refused("Нужно явное подтверждение удаления", ids)
+        gate = self._bulk_adult(ids)
+        if gate:
+            return gate
+        summary = self._bulk_guard(
+            "Массовое удаление строк",
+            lambda: repo.bulk_delete_rows(self.db.conn, ids))
+        if summary.get("error"):
+            return summary
+        self._touch()
+        self._log(f"Убраны строки из индекса: {summary['removed']} из "
+                  f"{len(ids)} (файлы на диске не тронуты)"
+                  + (f", пропущено: {summary['gone']}" if summary["gone"] else ""))
+        return {"ok": True, "total": len(ids), "files_kept": True, **summary}
+
+    # ------------------------------------------------------------------ #
     #  Fallback: подкачка из СЕТИ участников (площадка недоступна).
     # ------------------------------------------------------------------ #
 
