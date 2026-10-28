@@ -649,6 +649,16 @@ class ApiCatalogCase(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.addCleanup(self._tmp.cleanup)
+        # Офлайн: живой запрос к странице площадки не идёт. _probe (urllib)
+        # срабатывает на «пустой хвост страницы» (когда фикс отвечает
+        # entries: [] - конец листа), и живое обрывание соединения делало
+        # эти кейсы флякающими в полном прогоне. В CatalogCase и _http_get
+        # по площадкам подменены так же; отказ kind=blocked здесь берётся
+        # из fake DownloadError, а не из probe.
+        patcher = mock.patch.object(catalog, "_probe",
+                                   lambda url, settings: "ok")
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.api = Api()
         self.addCleanup(self.api.close)
 

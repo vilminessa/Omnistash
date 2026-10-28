@@ -35,6 +35,9 @@ class DownloadWorker:
         self._ffmpeg_warned = False
         # ...и что имитация браузера включена без установленной curl_cffi.
         self._cffi_warned = False
+        # Повтор с другой дорогой выкачки (M13): задаётся кнопкой «Повторить
+        # упавшие» с attempt_chain=True, живёт один прогон очереди.
+        self._chain_retry = False
 
     # ------------------------------------------------------------------ #
 
@@ -87,12 +90,19 @@ class DownloadWorker:
             self._state["running"] = False
         return {"ok": True, "stopping": False}
 
-    def retry_failed(self) -> dict:
-        """Упавшие снова в очередь (остальные статусы не трогаем)."""
+    def retry_failed(self, attempt_chain: bool = False) -> dict:
+        """Упавшие снова в очередь (остальные статусы не трогаем).
+
+        attempt_chain=True - «попробовать другую дорогу» (M13): для этого
+        прогона забываем выигравшую дорогу площадки, поэтому цепочка дорог
+        выкачки проходит полный список, а не повторяет прежний способ.
+        """
+        self._chain_retry = bool(attempt_chain)
         count = repo.retry_failed(self.db.conn)
         if count:
-            self._log(f"Повтор: {count} упавших вернулись в очередь")
-        return {"ok": True, "retried": count}
+            self._log(f"Повтор: {count} упавших вернулись в очередь"
+                      + (" (другие дороги выкачки)" if self._chain_retry else ""))
+        return {"ok": True, "retried": count, "attempt_chain": self._chain_retry}
 
     def wait(self, timeout: float | None = None) -> bool:
         """Дождаться конца цикла (для тестов и головного запуска)."""
@@ -121,6 +131,7 @@ class DownloadWorker:
             with self._lock:
                 self._state["running"] = False
                 self._state["current"] = None
+            self._chain_retry = False       # «другие дороги» - на один прогон
             self._log("Очередь остановлена")
 
     def _resolve_target(self, conn, row: dict, settings: dict):
@@ -195,7 +206,10 @@ class DownloadWorker:
                                      # Куки аккаунта источника: цепочка
                                      # playlist_items -> playlists.account_id.
                                      account_id=repo.video_account_id(
-                                         conn, row["id"]))
+                                         conn, row["id"]),
+                                     # Ход дорог выкачки виден в журнале (M13).
+                                     log=self._log,
+                                     attempt_chain=self._chain_retry)
 
         if result.get("cancelled"):
             # Стоп - не ошибка: файл остаётся к докачке (.part), статус
@@ -206,7 +220,11 @@ class DownloadWorker:
 
         if result.get("error"):
             classified = downloader.unavailable_error(result["error"])
-            needs_login = "требует вход" in str(result["error"])
+            # Причина отказа площадки от цепочки дорог (M13): kind точнее, чем
+            # поиск подстроки - «подтвердите, что вы не бот» и «площадка
+            # недоступна из сети» выглядят похожими строками.
+            kind = str(result.get("kind") or "")
+            needs_login = kind == "bot" or "требует вход" in str(result["error"])
             # Mesh: участники могут дать файл, которого площадка больше не
             # отдаёт (удалено) или не даёт без входа - пробуем, пока включён.
             if (classified or needs_login) and settings.get("mesh_enabled"):
@@ -230,9 +248,10 @@ class DownloadWorker:
             repo.set_last_error(conn, row["id"], result["error"])
             with self._lock:
                 self._state["failed"] += 1
-                if needs_login:
-                    # Площандка просит сессию браузера - подсказываем про
-                    # аккаунт (гаснет, как только куки появятся).
+                if needs_login or kind == "bot":
+                    # Площадка просит сессию/подтверждение человека -
+                    # подсказываем про аккаунт и токен (гаснет, как только
+                    # куки или подтверждение появятся).
                     self._state["bot_hint"] = True
             self._log(f"Ошибка: {row['title'] or row['key']} - {result['error']}")
             return

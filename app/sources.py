@@ -17,6 +17,7 @@ import time
 
 import yt_dlp
 
+from . import bypass
 from . import google_auth
 from . import metadata
 from .metadata import PLATFORM, flat_entry, normalize_playlist
@@ -41,7 +42,8 @@ class FetchError(Exception):
       blocked     - площадка недоступна из сети пользователя (Connection
         reset/timeout/403/410/429): лечится обходом/VPN или mesh;
       bot         - площадка требует подтверждение человека («не бот»,
-        вход в аккаунт): лечится привязкой аккаунта или куки браузера;
+        вход в аккаунт): лечится привязкой аккаунта, куки браузера/файла или
+        подтверждением из профиля (app/bypass.py, M13);
       network     - прочий сетевой отказ;
       empty       - площадка ответила, но описания нет.
     """
@@ -92,9 +94,15 @@ def failure_message(kind: str, detail: str) -> str:
                 "возможно, региональная блокировка: поможет обход/VPN, либо "
                 "запрос участникам mesh)")
     if kind == "bot":
-        return ("Площадка требует подтверждение, что вы человек: привяжите "
-                "аккаунт Google в настройках или включите куки из браузера, "
-                "затем повторите")
+        # Подтверждение человека - не блокировка сети: лечится куки/аккаунтом
+        # или токеном подтверждения из профиля (M13), а не обходом DPI.
+        return ("Площадка требует подтверждение, что вы человек («не бот»): "
+                "привяжите аккаунт Google в настройках, включите куки из "
+                "браузера/файла или сохраните подтверждение в профиле "
+                "(настройка «Подтверждение „не бот“ из профиля»). Если это не "
+                "помогло - откройте страницу на площадке вручную и подтвердите "
+                "возраст/согласие там, либо запросите файл у участников сети "
+                "Omnistash")
     return f"Площадка не ответила: {detail}"
 
 
@@ -116,7 +124,10 @@ def _opts(settings: dict | None) -> dict:
         "ignoreerrors": True,      # приватная запись не должна валить весь список
         "socket_timeout": 25,
         "retries": max(int(settings.get("retries") or 0), 1),
-        # Обход/прокси и cookies подключатся вместе с Bypass из Synfronia (M4).
+        # Куки аккаунта/браузера подключаются вызывающим (F2/browser_cookie_option),
+        # отказ площадки проходится цепочкой дорог выкачки (app/bypass.py, M13).
+        # Обход DPI сюда не входит: сеть пользователя не меняется (M4 - отдельный
+        # механизм, который Omnistash не включает и не выключает).
     }
     if str(settings.get("sync_depth") or "full") == "fast":
         opts["extract_flat"] = "in_playlist"
@@ -135,34 +146,91 @@ def _youtube(opts: dict):
     return yt_dlp.YoutubeDL(opts)
 
 
+def _platform_of(url: str) -> str:
+    """Площадка ссылки (по реестру доменов) - для дорог и кэша."""
+    return str(metadata.classify_url(url).get("platform") or PLATFORM)
+
+
+def _download_error(exc) -> bool:
+    """Дороги пробуют только отказ площадки; прочий исключение - не повтор."""
+    return isinstance(exc, yt_dlp.utils.DownloadError)
+
+
+def _impersonate_probe():
+    """Проба цели имитации: реализация лежит в downloader.
+
+    Импорт ВНУТРИ функции: downloader импортирует sources, поэтому модульный
+    импорт сюда замкнул бы цикл импортов.
+    """
+    from . import downloader
+    return downloader.impersonate_target
+
+
+def _context(url: str, opts: dict, settings: dict, *, cookiefile=None,
+             attempt_chain: bool = False) -> dict:
+    """Контекст дорог для запроса к площадке (списки/метаданные - без файлов)."""
+    return bypass.make_context(
+        settings, opts, url, platform=_platform_of(url), purpose="meta",
+        has_cookies=bool(cookiefile or opts.get("cookiefile")),
+        browsers=bypass.browser_order(settings),
+        cookies_file=str(settings.get("cookies_file") or ""),
+        target_of=_impersonate_probe(),
+        attempt_chain=attempt_chain)
+
+
 def _extract(request_url: str, items: str, settings: dict | None = None,
-             cookiefile=None) -> dict | None:
+             cookiefile=None, *, log=None, stop=None,
+             attempt_chain: bool = False) -> dict | None:
     """Один запрос к площадке: плоский список записей указанным диапазоном.
 
     Отдельная функция (а не замыкание), чтобы тесты могли подменить сеть
     и проверить сборку чанков без интернета. cookiefile - куки аккаунта
     источника на время запроса (если привязаны).
+
+    При отказе площадки (403/410/«не бот») прогоняется цепочка дорог
+    выкачки (app/bypass.py, M13): куки браузера/файла, имитация отпечатка,
+    зеркало домена площадки, подтверждение «не бот». Обход DPI не используется.
     """
+    settings = settings or {}
     opts = _opts(settings)
     opts["playlist_items"] = items
     if cookiefile:
         opts["cookiefile"] = str(cookiefile)
     else:
-        browser_opt = google_auth.browser_cookie_option(settings or {})
+        browser_opt = google_auth.browser_cookie_option(settings)
         if browser_opt:
             # Режим «куки из браузера»: копий нет, читает сам yt-dlp.
             opts["cookiesfrombrowser"] = browser_opt
+
+    ctx = _context(request_url, opts, settings, cookiefile=cookiefile,
+                   attempt_chain=attempt_chain)
+
+    def attempt(o: dict, u: str) -> dict | None:
+        with _youtube(o) as ydl:
+            return ydl.extract_info(u, download=False)
+
     try:
-        with _youtube(opts) as ydl:
-            return ydl.extract_info(request_url, download=False)
-    except yt_dlp.utils.DownloadError as exc:
+        outcome = bypass.run_chain(
+            attempt, ctx, classify=classify_failure,
+            humanize=lambda exc, kind: failure_message(kind or "network",
+                                                       clean_text(exc)),
+            log=log, stop=stop, retryable=_download_error)
+    except yt_dlp.utils.DownloadError as exc:      # не-сетевые исключения
         detail = clean_text(exc)
         kind = classify_failure(detail)
         raise FetchError(failure_message(kind, detail), kind=kind) from exc
+    finally:
+        bypass.cleanup(ctx)
+
+    if outcome["cancelled"]:
+        raise Aborted()
+    if not outcome["ok"]:
+        raise FetchError(outcome["error"], kind=outcome["kind"] or "network")
+    return outcome["info"]
 
 
 def fetch_video(url: str, *, settings: dict | None = None, stop=None,
-                cookiefile=None) -> dict:
+                cookiefile=None, log=None, attempt_chain: bool = False) -> dict:
     """Полные метаданные ОДНОГО видео (без файлов).
 
     Этим же конвейером пользуется кнопка «Обновить метаданные»: полный
@@ -173,6 +241,10 @@ def fetch_video(url: str, *, settings: dict | None = None, stop=None,
     cookiefile - куки привязанного аккаунта источника (F2): раньше для
     одиночного видео они не применялись, поэтому возрастное/приватное
     видео не добавлялось даже с входом в аккаунт.
+
+    При отказе площадки прогоняется цепочка дорог выкачки (app/bypass.py,
+    M13): куки, имитация отпечатка, зеркало домена, подтверждение «не бот».
+    kind отказа сохраняется в FetchError - интерфейс ветвит подсказки честно.
     """
     settings = settings or {}
     opts = {
@@ -190,17 +262,32 @@ def fetch_video(url: str, *, settings: dict | None = None, stop=None,
         if browser_opt:
             # Режим «куки из браузера»: копий нет, читает сам yt-dlp.
             opts["cookiesfrombrowser"] = browser_opt
+
+    ctx = _context(url, opts, settings, cookiefile=cookiefile,
+                   attempt_chain=attempt_chain)
+
+    def attempt(o: dict, u: str) -> dict | None:
+        with _youtube(o) as ydl:
+            return ydl.extract_info(u, download=False)
+
     try:
-        with _youtube(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-    except yt_dlp.utils.DownloadError as exc:
-        text = clean_text(exc)
-        kind = classify_failure(text)
-        raise FetchError(failure_message(kind, text), kind=kind) from exc
+        outcome = bypass.run_chain(
+            attempt, ctx, classify=classify_failure,
+            humanize=lambda exc, kind: failure_message(kind or "network",
+                                                       clean_text(exc)),
+            log=log, stop=stop, retryable=_download_error)
     except Exception as exc:  # noqa: BLE001 - кривой ответ = честный отказ
         text = clean_text(exc)
         kind = classify_failure(text)
         raise FetchError(failure_message(kind, text), kind=kind) from exc
+    finally:
+        bypass.cleanup(ctx)
+
+    if outcome["cancelled"]:
+        raise Aborted()
+    if not outcome["ok"]:
+        raise FetchError(outcome["error"], kind=outcome["kind"] or "network")
+    info = outcome["info"]
     if not isinstance(info, dict) or not info.get("id"):
         raise FetchError("площадка не вернула описание видео", kind="empty")
     return info
@@ -235,7 +322,8 @@ def _account_cookiefile(account_id):
 
 def fetch_snapshot(url: str, *, settings: dict | None = None,
                    on_progress=None, stop=None,
-                   account_id: str | None = None) -> dict:
+                   account_id: str | None = None, log=None,
+                   attempt_chain: bool = False) -> dict:
     """Снять снапшот источника: метаданные + все записи. Ничего не пишет.
 
     on_progress(got, total) - сколько записей уже получено (total может быть
@@ -243,7 +331,10 @@ def fetch_snapshot(url: str, *, settings: dict | None = None,
     stop - threading.Event: проверяется между чанками, при срабатывании
         бросает Aborted (частично собранный снапшот выбрасывается);
     account_id - аккаунт Google источника: «подтвердите, что не бот»
-        проходится от имени привязанной учётки.
+        проходится от имени привязанной учётки;
+    log - журнал приложения: ход каждой дороги выкачки виден в нём (M13);
+    attempt_chain - прогнать цепочку дорог заново, без кэша выигравшей
+        дороги площадки (M13).
     """
     info = classify(url)
     kind = info.get("kind")
@@ -255,16 +346,19 @@ def fetch_snapshot(url: str, *, settings: dict | None = None,
     if kind == "video":
         return _snapshot_video(url, platform=platform, settings=settings,
                                on_progress=on_progress, stop=stop,
-                               account_id=account_id)
+                               account_id=account_id, log=log,
+                               attempt_chain=attempt_chain)
 
     with _account_cookiefile(account_id) as cookiefile:
         return _snapshot(url, kind, platform=platform, settings=settings,
                          on_progress=on_progress, stop=stop,
-                         cookiefile=cookiefile)
+                         cookiefile=cookiefile, log=log,
+                         attempt_chain=attempt_chain)
 
 
 def _snapshot_video(url: str, *, platform: str, settings: dict | None,
-                    on_progress, stop, account_id: str | None) -> dict:
+                    on_progress, stop, account_id: str | None,
+                    log=None, attempt_chain: bool = False) -> dict:
     """Одиночное видео: снапшот ИЗ ОДНОЙ записи (тот же формат).
 
     Формат не меняется (playlist + entries) - весь дальнейший конвейер
@@ -278,7 +372,8 @@ def _snapshot_video(url: str, *, platform: str, settings: dict | None,
     # видео добавляется только под входом, иначе площадка отказывает.
     with _account_cookiefile(account_id) as cookiefile:
         info = fetch_video(url, settings=settings, stop=stop,
-                           cookiefile=cookiefile)
+                           cookiefile=cookiefile, log=log,
+                           attempt_chain=attempt_chain)
     video_id = to_text(info.get("id") or "")
     if not video_id:
         raise FetchError("площадка не вернула описание видео", kind="empty")
@@ -292,7 +387,8 @@ def _snapshot_video(url: str, *, platform: str, settings: dict | None,
 
 def _snapshot(url: str, kind: str, *, platform: str,
               settings: dict | None,
-              on_progress, stop, cookiefile) -> dict:
+              on_progress, stop, cookiefile, log=None,
+              attempt_chain: bool = False) -> dict:
     delay = max(int((settings or {}).get("delay_ms") or 0), 0) / 1000.0
     # Размер чанка зависит от глубины: полный режим берёт по 25 записей
     # (каждая - отдельный тяжёлый запрос), быстрый - по 100.
@@ -300,7 +396,8 @@ def _snapshot(url: str, kind: str, *, platform: str,
                   == "fast" else DEEP_CHUNK)
 
     # Первый чанк приносит и метаданные плейлиста, и первые записи.
-    head = _extract(url, f"1-{chunk_size}", settings, cookiefile)
+    head = _extract(url, f"1-{chunk_size}", settings, cookiefile,
+                    log=log, stop=stop, attempt_chain=attempt_chain)
     if not isinstance(head, dict) or head.get("_type") not in ("playlist", None):
         raise FetchError("Ссылка не оказалась плейлистом или каналом")
 

@@ -35,7 +35,7 @@ except ImportError:  # старые версии прятали PP в ffmpeg.py
     from yt_dlp.postprocessor.ffmpeg import \
         FFmpegEmbedThumbnailPP as EmbedThumbnailPP
 
-from . import aggregate, google_auth
+from . import aggregate, bypass, google_auth, metadata, sources
 from .indexer import SIDECAR_SUFFIX, build_sidecar, file_hash
 from .paths import base_dir
 
@@ -467,7 +467,8 @@ def _account_cookies(account_id):
 
 def download(video: dict, settings: dict, *, stop: threading.Event,
              on_progress=None, dest: str | None = None,
-             overwrite: bool = False, account_id: str | None = None) -> dict:
+             overwrite: bool = False, account_id: str | None = None,
+             log=None, attempt_chain: bool = False) -> dict:
     """Скачать одно видео и подготовить всё для записи в индекс.
 
     video - строка videos (нужны key/title/webpage_url/remote_id);
@@ -478,14 +479,19 @@ def download(video: dict, settings: dict, *, stop: threading.Event,
     который проверка целостности признала битым (иначе yt-dlp счёл бы его
     уже скачанным и пропустил);
     account_id - аккаунт Google источника: его куки уходят в качалку на
-    время загрузки (см. _account_cookies).
+    время загрузки (см. _account_cookies);
+    log - журнал приложения: ход каждой дороги выкачки виден в нём (M13);
+    attempt_chain=True - «попробовать другую дорогу»: забываем выигравшую
+    дорогу площадки и прогоняем цепочку заново (кнопка «Повторить упавшие»).
     возвращает {"cancelled": bool, "files": [(путь, kind)], "info": {...},
-    "error": str|None}. Ничего в БД не пишет - это делает очередь.
+    "error": str|None, "kind": str|None, "routes": [...], "tally": {...}}.
+    Ничего в БД не пишет - это делает очередь.
     """
     with _account_cookies(account_id) as cookiefile:
         return _download(video, settings, stop=stop, on_progress=on_progress,
                          dest=dest, overwrite=overwrite,
-                         cookiefile=cookiefile)
+                         cookiefile=cookiefile, log=log,
+                         attempt_chain=attempt_chain)
 
 
 _CFFI_OK: bool | None = None
@@ -537,26 +543,20 @@ def impersonate_target(settings: dict):
 
 
 def _cookie_browsers(settings: dict) -> list[str]:
-    """Браузеры для куки-фоллбэка при 410/403 (битые ABE - мимо).
+    """Браузеры для куки-дороги при 410/403 (битые ABE - мимо).
 
-    Если пользователь уже выбрал браузер в настройках - только его (его
-    куки реально есть на диске); иначе пробуем по порядку. Пусто = нечем
+    Порядок держит app/bypass.browser_order (одна правда для выкачки файла и
+    для снятия метаданных): если человек уже выбрал браузер - только его (его
+    куки реально есть на диске), иначе пробем по порядку. Пусто = нечем
     пробовать (вернётся исходная ошибка с подсказкой).
     """
-    chosen = str(settings.get("browser_cookies") or "none").strip().lower()
-    choices = getattr(google_auth, "BROWSER_CHOICES", ()) or ()
-    broken = getattr(google_auth, "BROKEN_BROWSERS", frozenset()) or frozenset()
-    if chosen in choices and chosen != "none":
-        order = [chosen]
-    else:
-        order = [name for name in ("firefox", "chrome", "brave")
-                 if name in choices]
-    return [name for name in order if name not in broken]
+    return bypass.browser_order(settings or {})
 
 
 def _download(video: dict, settings: dict, *, stop: threading.Event,
               on_progress=None, dest: str | None = None,
-              overwrite: bool = False, cookiefile: "Path | None" = None) -> dict:
+              overwrite: bool = False, cookiefile: "Path | None" = None,
+              log=None, attempt_chain: bool = False) -> dict:
     dest_dir = Path(dest or settings.get("dest_dir") or ".").expanduser()
     dest_dir.mkdir(parents=True, exist_ok=True)
     url = video.get("webpage_url") or (
@@ -581,73 +581,78 @@ def _download(video: dict, settings: dict, *, stop: threading.Event,
     encoder = str(settings.get("transcode") or "none")
     ffmpeg = find_ffmpeg()
     embed = embed_mode(settings) and bool(ffmpeg)
-    # Фоллбэки по фактическим симптомам живой пары:
-    #  * имя файла не прошло Windows (query-мусор в title/id площадок,
-    #    длинный путь) -> повтор с ascii-именами (restrictfilenames);
-    #  * площадка ответила 410/403, а браузерные куки выключены - браузер
-    #    такие страницы открывает -> повтор со ВСЕМИ рабочими браузерами
-    #    по очереди (порядок: firefox, chrome, brave; битые ABE - мимо).
-    browser_fallbacks = [
-        {"cookiesfrombrowser": (name,)}
-        for name in _cookie_browsers(settings)
-    ]
-    attempt = 0
-    while True:
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                if encoder in TRANSCODERS and ffmpeg:
-                    # Перекодировка включается настройкой «Загрузка/Перекодировка».
-                    # Без ffmpeg пропускаем её (очередь предупреждает) - качать
-                    # без ffmpeg умеем, а вот тормозить очередь из-за настройки
-                    # нельзя.
-                    ydl.add_post_processor(TranscodePP(ydl, encoder=encoder))
-                if embed:
-                    # Метаданные и обложка вшиваются стадией after_move - ПОСЛЕ
-                    # перекодировки: встроенный в исходник HEVC-перекодчик взял
-                    # бы только видеопоток и обложку потерял. Порядок важен:
-                    # метаданные первыми (их remux не должен тронуть обложку),
-                    # встраивание обложки - последним.
-                    ydl.add_post_processor(FFmpegMetadataPP(ydl), when="after_move")
-                    # already_have_thumbnail=False: после успеха PP сам удаляет
-                    # файл обложки - в папке остаётся один mp4.
-                    ydl.add_post_processor(EmbedThumbnailPP(ydl), when="after_move")
-                info = ydl.extract_info(url, download=True)
-            break
-        except DownloadCancelled:
-            return {"cancelled": True, "files": [], "info": {},
-                    "error": None}
-        except yt_dlp.utils.DownloadError as exc:
-            text = str(exc)
-            # Куки уже подключены (аккаунт или cookies_file) - подменять
-            # их браузерными нечего и не нужно.
-            has_cookies = bool(cookiefile or opts.get("cookiefile"))
-            if attempt == 0:
-                if "Invalid argument" in text or "Errno 22" in text:
-                    opts["restrictfilenames"] = True
-                    attempt += 1
-                    continue
-                if (re.search(r"HTTP Error (410|403)", text)
-                        and not has_cookies
-                        and not opts.get("cookiesfrombrowser")
-                        and browser_fallbacks):
-                    opts.update(browser_fallbacks.pop(0))
-                    attempt += 1
-                    continue
-            if browser_fallbacks and re.search(r"HTTP Error (410|403)",
-                                               text) and not has_cookies:
-                # Следующий браузер из списка - только если он отличается
-                # от уже подключённых кук (повтор с теми же бессмыслен).
-                nxt = browser_fallbacks[0].get("cookiesfrombrowser")
-                if opts.get("cookiesfrombrowser") != nxt:
-                    opts.update(browser_fallbacks.pop(0))
-                    attempt += 1
-                    continue
-            return {"cancelled": False, "files": [], "info": {},
-                    "error": _human_error(exc)}
 
+    def attempt(o: dict, u: str) -> dict | None:
+        """Одна дорога выкачки: yt-dlp с постпроцессорами по настройкам."""
+        with yt_dlp.YoutubeDL(o) as ydl:
+            if encoder in TRANSCODERS and ffmpeg:
+                # Перекодировка включается настройкой «Загрузка/Перекодировка».
+                # Без ffmpeg пропускаем её (очередь предупреждает) - качать
+                # без ffmpeg умеем, а вот тормозить очередь из-за настройки
+                # нельзя.
+                ydl.add_post_processor(TranscodePP(ydl, encoder=encoder))
+            if embed:
+                # Метаданные и обложка вшиваются стадией after_move - ПОСЛЕ
+                # перекодировки: встроенный в исходник HEVC-перекодчик взял
+                # бы только видеопоток и обложку потерял. Порядок важен:
+                # метаданные первыми (их remux не должен тронуть обложку),
+                # встраивание обложки - последним.
+                ydl.add_post_processor(FFmpegMetadataPP(ydl), when="after_move")
+                # already_have_thumbnail=False: после успеха PP сам удаляет
+                # файл обложки - в папке остаётся один mp4.
+                ydl.add_post_processor(EmbedThumbnailPP(ydl), when="after_move")
+            return ydl.extract_info(u, download=True)
+
+    # Площадка: из строки videos (реестр P1), иначе по домену ссылки - кэш
+    # выигравшей дороги и бот-дороги привязаны к площадке, а не к ссылке.
+    platform = str(video.get("platform")
+                   or metadata.classify_url(url)["platform"])
+    limit = HEIGHT_LIMIT.get(str(settings.get("quality") or "high"), 1080)
+    # Лестница качества для дороги «качество ниже» (перенос порядка кодеров
+    # GPU -> CPU из Synfronia downloader.py:253-258).
+    ladder = [level for level in (1080, 720, 480, 240)
+              if limit is None or level < limit]
+    ctx = bypass.make_context(
+        settings, opts, url, platform=platform, purpose="file",
+        # Куки уже подключены (аккаунт или cookies_file) - подменять их
+        # браузерными нечего и не нужно.
+        has_cookies=bool(cookiefile or opts.get("cookiefile")),
+        browsers=bypass.browser_order(settings),
+        cookies_file=str(settings.get("cookies_file") or ""),
+        target_of=impersonate_target, height_limit=limit, ladder=ladder,
+        no_ffmpeg=not ffmpeg, attempt_chain=attempt_chain)
+    if attempt_chain:
+        # Явное «попробовать другую дорогу»: выигравшая (или провалившая)
+        # дорога не должна повторить прежний отказ тем же способом.
+        bypass.forget_winning(platform)
+    try:
+        # Цепочка дорог выкачки (app/bypass.py, M13): имя ascii, куки
+        # браузера/файла, имитация отпечатка, зеркало домена площадки,
+        # подтверждение «не бот», HLS-вариант формата, качество ниже. Первая
+        # вышедшая дорога побеждает, иначе - последняя честная причина
+        # (kind сохраняется). Обход DPI не используется: сеть пользователя
+        # не меняется.
+        outcome = bypass.run_chain(
+            attempt, ctx, classify=sources.classify_failure,
+            humanize=lambda exc, kind: _human_error(exc, kind=kind),
+            log=log, stop=stop,
+            retryable=lambda exc: isinstance(exc, yt_dlp.utils.DownloadError))
+    except DownloadCancelled:
+        return {"cancelled": True, "files": [], "info": {}, "error": None}
+    finally:
+        bypass.cleanup(ctx)                 # временные куки подтверждения - мимо диска
+
+    if outcome["cancelled"]:
+        return {"cancelled": True, "files": [], "info": {}, "error": None}
+    if not outcome["ok"]:
+        return {"cancelled": False, "files": [], "info": {},
+                "error": outcome["error"], "kind": outcome["kind"],
+                "routes": outcome["routes"], "tally": outcome["tally"]}
+
+    info = outcome["info"]
     if not isinstance(info, dict):
         return {"cancelled": False, "files": [], "info": {},
-                "error": "площадка не вернула описание видео"}
+                "error": "площадка не вернула описание видео", "kind": "empty"}
 
     files = _paths_after_download(info)
     if on_progress:
@@ -695,14 +700,26 @@ def _download(video: dict, settings: dict, *, stop: threading.Event,
             "hash": digest}
 
 
-def _human_error(exc: Exception) -> str:
-    """Причина сбоя человеческим языком (короткая, без стека)."""
+def _human_error(exc: Exception, kind: str | None = None) -> str:
+    """Причина сбоя человеческим языком (короткая, без стека).
+
+    kind - причина от классификации отказа (sources.classify_failure): она
+    указывает подсказку точнее, чем поиск подстроки в ответе площадки (бот-
+    требование и блокировка сети выглядят похожими строками).
+    """
     text = str(exc)
     low = text.lower()
     if "ffmpeg" in low:
         return "нужен ffmpeg для склейки потоков - установите его или снизьте качество"
     if "video unavailable" in low or "private video" in low:
         return "видео недоступно (удалено или приватное)"
+    if kind == "bot" or "not a bot" in low or "bot check" in low:
+        # Требование подтверждения человека - не блокировка нашей сети.
+        return ("площадка требует подтверждение, что вы человек: сохраните "
+                "подтверждение в профиле («Загрузка» -> «Подтверждение „не бот“ "
+                "из профиля»), привяжите аккаунт или включите куки; если это не "
+                "помогло - откройте страницу на площадке и подтвердите возраст "
+                "там, либо запросите файл у участников сети Omnistash")
     if "sign in" in low or "confirm your age" in low:
         return "площадка требует вход в аккаунт"
     if "requested format is not available" in low:
@@ -722,8 +739,10 @@ def _human_error(exc: Exception) -> str:
 
 
 # «Видео удалено/приватно» - не временный сбой: строку помечаем архивной
-# (unavailable), а не «упавшей». Сюда сознательно НЕ входят «требует
-# вход» и «подтвердите, что вы не бот» - они проходятся аккаунтом.
+# (unavailable), а не «упавшей». Сюда сознательно НЕ входят «требует вход» и
+# «подтвердите, что вы не бот» - они проходится аккаунтом, куки браузера/файла
+# и подтверждением из профиля (цепочка дорог, app/bypass.py M13), а не
+# повтором «в лоб».
 _UNAVAILABLE_MARKERS = (
     "video unavailable", "private video", "has been removed",
     "no longer available", "been terminated", "copyright",

@@ -4107,9 +4107,16 @@ class Api:
             self._heavy_at = 0.0
         return result
 
-    def queue_retry(self) -> dict:
-        """Упавшие снова в очередь (и сразу запускаем, если стояли)."""
-        result = self.dl.retry_failed()
+    def queue_retry(self, request=None) -> dict:
+        """Упавшие снова в очередь (и сразу запускаем, если стояли).
+
+        request.attempt_chain=True - «попробовать другую дорогу» (M13):
+        для этого прогона забываем выигравшую дорогу площадки, поэтому
+        цепочка дорог выкачки проходит список заново, а не повторяет прежний
+        способ (ничего не меняет в сети пользователя - обход DPI не трогается).
+        """
+        attempt_chain = bool((request or {}).get("attempt_chain"))
+        result = self.dl.retry_failed(attempt_chain=attempt_chain)
         with self._lock:
             self._heavy_at = 0.0
         if result.get("retried"):

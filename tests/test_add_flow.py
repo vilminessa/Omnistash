@@ -73,7 +73,7 @@ class AddFlowCase(GuiCase):
 
     def patch_fetch(self, snapshot, delay=0.0):
         def fake(url, settings=None, on_progress=None, stop=None,
-                 account_id=None):
+                 account_id=None, log=None, attempt_chain=False):
             total = snapshot["total"]
             if on_progress:
                 on_progress(0, total)
@@ -338,7 +338,8 @@ class TestChunking(unittest.TestCase):
         total = 250
         calls, progress = [], []
 
-        def fake_extract(url, items, settings=None, cookiefile=None):
+        def fake_extract(url, items, settings=None, cookiefile=None,
+                         log=None, stop=None, attempt_chain=False):
             calls.append(items)
             start, end = (int(x) for x in items.split("-"))
             last = min(end, total)
@@ -368,7 +369,8 @@ class TestChunking(unittest.TestCase):
         total = 250
         calls = []
 
-        def fake_extract(url, items, settings=None, cookiefile=None):
+        def fake_extract(url, items, settings=None, cookiefile=None,
+                         log=None, stop=None, attempt_chain=False):
             calls.append(items)
             start, end = (int(x) for x in items.split("-"))
             last = min(end, total)
@@ -387,7 +389,8 @@ class TestChunking(unittest.TestCase):
         stop = threading.Event()
         stop.set()   # «Отмена» дошла, пока шёл первый запрос
 
-        def fake_extract(url, items, settings=None, cookiefile=None):
+        def fake_extract(url, items, settings=None, cookiefile=None,
+                         log=None, stop=None, attempt_chain=False):
             return self._head([{"id": "vid000000001", "title": "A"}], 3)
 
         with mock.patch("app.sources._extract", side_effect=fake_extract):
@@ -398,7 +401,8 @@ class TestChunking(unittest.TestCase):
         """Маленький список не должен порождать лишних запросов."""
         calls = []
 
-        def fake_extract(url, items, settings=None, cookiefile=None):
+        def fake_extract(url, items, settings=None, cookiefile=None,
+                         log=None, stop=None, attempt_chain=False):
             calls.append(items)
             return self._head([{"id": f"vid{i:09d}", "title": f"V{i}"}
                                for i in range(1, 4)], 3)
@@ -423,7 +427,8 @@ class TestVideoSnapshot(unittest.TestCase):
 
         seen = {}
 
-        def fake(url, *, settings=None, stop=None, cookiefile=None):
+        def fake(url, *, settings=None, stop=None, cookiefile=None,
+                 log=None, attempt_chain=False):
             calls.append(url)
             seen["cookiefile"] = cookiefile
             return dict(info)

@@ -11,7 +11,11 @@
   label    - подпись для окна (вкладка, список источников);
   domains  - хосты площадки (конечное сравнение, с учётом поддоменов);
   adult    - возрастной контент: свой гейт 18+, скрыт в общих вкладках;
-  account  - площадка живёт с куки/входом аккаунта (подсказка UI).
+  account  - площадка живёт с куки/входом аккаунта (подсказка UI);
+  token_capability - что площадка принимает вместо «подтвердите, что вы не
+             бот»: "po" (visitor-info/PO-токен), "age" (подтверждение
+             возраста cookie-площадкой), None - не принимает (тогда отказ
+             «bot» лечится только аккаунтом/куками и mesh).
 """
 
 from __future__ import annotations
@@ -23,6 +27,8 @@ PLATFORMS: tuple = (
         "domains": ("youtube.com", "youtu.be", "youtube-nocookie.com"),
         "adult": False,
         "account": True,
+        # Анти-бот YouTube принимает visitor-info и PO-токен (M13).
+        "token_capability": "po",
     },
     {
         "id": "pornhub",
@@ -32,6 +38,9 @@ PLATFORMS: tuple = (
         "domains": ("pornhub.com", "pornhub.org", "pornhub.net"),
         "adult": True,
         "account": False,
+        # Площадка требует подтверждение возраста (cookie-подтверждение),
+        # токена содержимого у неё нет.
+        "token_capability": "age",
     },
     {
         "id": "vk",
@@ -39,6 +48,7 @@ PLATFORMS: tuple = (
         "domains": ("vk.com", "vkvideo.ru", "mail.ru", "my.mail.ru"),
         "adult": False,
         "account": True,     # часть клипов требует входа (куки аккаунта)
+        "token_capability": None,
     },
 )
 
@@ -71,3 +81,11 @@ def is_adult(platform_id) -> bool:
 def adult_ids() -> tuple:
     """Идентификаторы взрослых площадок (фильтры общих списков)."""
     return tuple(item["id"] for item in PLATFORMS if item.get("adult"))
+
+
+def token_capability(platform_id) -> str | None:
+    """Что площадка принимает вместо «подтвердите, что вы не бот» (M13):
+    "po", "age" или None. Нейтральная механика, имя площадки не меняется."""
+    item = by_id(platform_id)
+    value = item.get("token_capability") if item else None
+    return str(value) if value else None
