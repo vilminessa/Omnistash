@@ -742,6 +742,29 @@ body[data-theme="light"] .row { border-bottom-color: rgba(0, 0, 0, .05); }
 .row input.row-check { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
 .row.picked { background: var(--widget); }
 
+/* M17: чекбокс строки в плитке: тот же размер, что в списке, и подложка
+   обложки - иначе чекбокс теряется на тёмной картинке. */
+.tile input.row-check {
+  accent-color: var(--accent);
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  background: var(--widget);
+  border-radius: 3px;
+}
+
+/* M17: панель папки-коллекции целиком (те же операции без мультивыбора) */
+.col-bar { display: flex; align-items: center; gap: 10px; }
+.col-bar select { max-width: 240px; }
+.col-bar .muted { font-size: 11.5px; }
+
+/* M17: диалог массовых операций над группой/папкой */
+.bulk-grid { display: flex; flex-direction: column; gap: 12px; }
+.bulk-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.bulk-row > .field-label { min-width: 110px; }
+.bulk-row input[type="text"] { flex: 1 1 240px; }
+.bulk-hint { font-size: 11.5px; color: var(--muted); }
+
 /* ---------------------------- хранилища ------------------------------- */
 
 .storages { display: flex; flex-direction: column; gap: 6px; width: 100%; }

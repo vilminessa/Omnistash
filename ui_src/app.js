@@ -558,6 +558,282 @@
   }
 
   /* ------------------------------------------------------------------ *
+   *  Массовые операции (M17): выбранная группа ИЛИ папка-коллекция целиком
+   * ------------------------------------------------------------------ */
+
+  function collectionNode(id) {
+    var list = (state.tree && state.tree.collections) || [];
+    return list.filter(function (c) { return c.id === Number(id); })[0] || null;
+  }
+
+  function bulkTarget() {
+    // Выделение сильнее контекста: отметили строки - работаем над ними;
+    // иначе папка целиком (те же эндпоинты, но без мультивыбора).
+    if (state.selected.size) return { ids: Array.from(state.selected) };
+    var scope = state.scope || { type: "pool" };
+    if (scope.type === "collection" && scope.id) return { collection_id: scope.id };
+    return null;
+  }
+
+  function bulkLabel() {
+    if (state.selected.size) {
+      var n = state.selected.size;
+      return n + " " + plural(n, ["строка", "строки", "строк"]);
+    }
+    var scope = state.scope || { type: "pool" };
+    var col = collectionNode(scope.id);
+    return "папка «" + ((col && col.name) || scope.id || "") + "»";
+  }
+
+  function askAdult() {
+    // Гейт 18+ тот же, что при добавлении возрастной ссылки (PH5): явное
+    // подтверждение человека; после него бэк пропускает повторный вызов.
+    return legalDialog(
+      "Возрастной контент",
+      "Группа содержит строки взрослой площадки. Подтвердите, что вам есть " +
+      "18 лет, вы применяете эти материалы только для личного пользования и " +
+      "несёте ответственность за скачиваемое (docs/ACCEPTABLE_USE.md).",
+      "Мне есть 18 лет - подтверждаю"
+    ).then(function (ok) {
+      if (!ok) return false;
+      return call("legal_accept", { adult: true }).then(function () { return true; });
+    });
+  }
+
+  function bulkCall(endpoint, payload) {
+    var target = bulkTarget();
+    if (!target) {
+      toast("Сначала выберите строки или откройте папку", true);
+      return Promise.resolve(null);
+    }
+    var request = Object.assign(target, payload || {});
+    return call(endpoint, request).then(function (res) {
+      if (!res) return null;
+      if (res.adult_confirm) {
+        return askAdult().then(function (ok) {
+          if (!ok) return { error: "Подтверждение 18+ не получено" };
+          return call(endpoint, request);   // повтор: согласие уже зафиксировано
+        });
+      }
+      return res;
+    });
+  }
+
+  function skipNote(res) {
+    // Причины пропуска приходят из бэка (факт в индексе), а не угадываются UI.
+    var reasons = res.reasons || {};
+    var parts = Object.keys(reasons).map(function (key) {
+      return key + ": " + reasons[key];
+    });
+    return parts.length ? " · пропущено: " + parts.join(", ") : "";
+  }
+
+  function goneNote(res) {
+    // «Строки нет в индексе» - тоже сводка: группа могла устареть, пока
+    // человек её отмечал (другое окно уже убранило строки).
+    return res.gone ? " · строк в индексе нет: " + res.gone : "";
+  }
+
+  function pluralRows(n) {
+    return n + " " + plural(n, ["строка", "строки", "строк"]);
+  }
+
+  function bulkStorage() {
+    // Выделение - селект панели выделения; папка - селект её собственной панели.
+    return state.selected.size ? $("sel-storage").value : $("col-storage").value;
+  }
+
+  function downloadSelection() {
+    var storageId = bulkStorage();
+    if (!storageId) {
+      toast("Не выбрано хранилище - добавьте папку в настройках", true);
+      switchTab("settings");
+      return;
+    }
+    // ОДНО действие на всю группу: бэк ставит queued списком id и запускает
+    // однопоточную очередь - параллельных запросов площадке не появляется.
+    bulkCall("bulk_download", { storage_id: storageId }).then(function (res) {
+      if (!res) return;
+      if (res.error) { toast(res.error, true); return; }
+      toast("В очередь: " + res.queued + " из " + res.total + skipNote(res));
+      switchTab("queue");
+      renderGrid(true);   // снятие выделения + новые статусы строк
+    });
+  }
+
+  function bulkCollectionOptions(current) {
+    var list = (state.tree && state.tree.collections) || [];
+    if (!list.length) return '<option value="">папок пока нет</option>';
+    return list.map(function (c) {
+      return '<option value="' + c.id + '"' +
+        (Number(current) === c.id ? " selected" : "") + ">" +
+        esc(c.name) + " (" + (c.total || 0) + ")</option>";
+    }).join("");
+  }
+
+  function openBulk() {
+    if (!bulkTarget()) {
+      toast("Сначала выберите строки или откройте папку", true);
+      return;
+    }
+    var scope = state.scope || { type: "pool" };
+    $("bulk-title").textContent = "Операции: " + bulkLabel();
+    $("bulk-body").innerHTML =
+      '<div class="bulk-grid">' +
+      '<div class="bulk-row"><span class="field-label">Теги добавить</span>' +
+      '<input type="text" id="bulk-tags-add" placeholder="через запятую, несколько"></div>' +
+      '<div class="bulk-row"><span class="field-label">Теги убрать</span>' +
+      '<input type="text" id="bulk-tags-remove" placeholder="теги, которые надо снять"></div>' +
+      '<div class="bulk-row"><span class="field-label">Рейтинг</span>' +
+      '<span class="stars" data-stars data-touched="" data-value="0">' +
+      starButtons(0) + "</span>" +
+      '<button class="link-btn" data-bulk-clear="rating">сбросить</button></div>' +
+      '<div class="bulk-row"><span class="field-label">Папка</span>' +
+      '<select id="bulk-collection">' +
+      bulkCollectionOptions(scope.type === "collection" ? scope.id : "") + "</select>" +
+      '<button class="btn" data-bulk="collect-add">в папку</button>' +
+      '<button class="btn" data-bulk="collect-remove">из папки</button></div>' +
+      '<div class="bulk-hint">Теги - ваши локальные метки (по ним ищется ' +
+      "поиск), теги площадки не меняются. «Из папки» снимает связи: строки " +
+      "видео остаются. «Скачать» не берёт строки, где файл уже на месте - " +
+      "они считаются пропуском и видны в сводке с причиной. Группа ограничена " +
+      "по размеру (страховка бэка: одна операция не должна переписывать всю " +
+      "библиотеку), слишком большую он откажет - разбейте на части. " +
+      "Кнопка удаления строк работает только после подтверждения диалога.</div>" +
+      "</div>" +
+      '<div class="card-actions">' +
+      '<button class="btn danger" data-bulk="remove-rows">' +
+      "Убрать строки из индекса</button>" +
+      '<span class="spacer"></span>' +
+      '<button class="btn" data-bulk="close">Закрыть</button>' +
+      '<button class="btn primary" data-bulk="apply">Применить</button></div>';
+    $("bulk-overlay").hidden = false;
+    bindBulk();
+  }
+
+  function bulkApply() {
+    var add = ($("bulk-tags-add").value || "").trim();
+    var remove = ($("bulk-tags-remove").value || "").trim();
+    var stars = document.querySelector("#bulk-body [data-stars]");
+    var rating = stars && stars.dataset.touched
+      ? Number(stars.dataset.value || 0) : null;
+    var steps = [];
+    if (add || remove) {
+      steps.push({ endpoint: "bulk_tags", payload: { add: add, remove: remove } });
+    }
+    if (rating !== null) steps.push({ endpoint: "bulk_rating", payload: { rating: rating } });
+    if (!steps.length) { toast("Ничего не заполнено", true); return; }
+    // По очереди, а не параллельно: диалог 18+ должен быть один, а сводка
+    // каждой операции - видна в тостах по порядку.
+    var lines = [];
+    var failed = false;
+    var chain = Promise.resolve();
+    steps.forEach(function (step) {
+      chain = chain.then(function () {
+        if (failed) return null;
+        return bulkCall(step.endpoint, step.payload).then(function (res) {
+          if (!res) return;
+          if (res.error) { toast(res.error, true); failed = true; return; }
+          lines.push(step.endpoint === "bulk_tags"
+            ? "Теги: " + pluralRows(res.updated || 0) + goneNote(res)
+            : "Рейтинг " + res.rating + ": " + pluralRows(res.updated || 0) +
+              goneNote(res));
+        });
+      });
+    });
+    chain.then(function () {
+      if (failed) return;
+      if (lines.length) toast(lines.join(" · "));
+      $("bulk-overlay").hidden = true;
+      renderGrid();       // звёздочки и метки в строках перерисовываются
+    });
+  }
+
+  function runCollect(action, cid) {
+    var payload = { action: action };
+    if (cid) payload.collection_id = cid;
+    bulkCall("bulk_collection", payload).then(function (res) {
+      if (!res) return;
+      if (res.error) { toast(res.error, true); return; }
+      var moved = action === "add" ? (res.added || 0) : (res.removed || 0);
+      toast((action === "add" ? "В папку «" : "Из папки «") +
+        (res.collection_name || "") + "»: " + moved + " из " + res.total +
+        goneNote(res));
+      renderGrid(action === "remove" ? true : false);
+    });
+  }
+
+  function bulkCollect(action) {
+    var cid = Number(($("bulk-collection") || {}).value || 0);
+    if (!cid) {
+      toast("Папка не выбрана - создайте её в дереве слева", true);
+      return;
+    }
+    runCollect(action, cid);
+  }
+
+  function purgeCollection() {
+    var scope = state.scope || { type: "pool" };
+    if (scope.type !== "collection") return;
+    if (!confirm("Убрать все связи из этой папки? Строки видео и файлы " +
+                 "на диске остаются.")) return;
+    runCollect("remove", null);   // target = папка целиком, без мультивыбора
+  }
+
+  function bulkRemoveRows() {
+    // Явная галка человека (тот же механизм, что у правил и 18+): без
+    // подтверждения бэк отказывается, а UI не отправляет confirm.
+    legalDialog(
+      "Убрать строки из индекса",
+      "Строки (" + bulkLabel() + ") уйдут из индекса: название, метаданные, " +
+      "пометки и связи с плейлистами/папками. ФАЙЛЫ НА ДИСКЕ НЕ удаляются - " +
+      "они остаются в хранилище, и переиндексация найдёт их заново.\n\n" +
+      "Отменить операцию можно только переиндексацией папок.",
+      "Я понимаю и подтверждаю"
+    ).then(function (ok) {
+      if (!ok) { toast("Удаление отменено", true); return; }
+      bulkCall("bulk_remove_rows", { confirm: true }).then(function (res) {
+        if (!res) return;
+        if (res.error) { toast(res.error, true); return; }
+        toast("Убраны строки из индекса: " + res.removed + " из " + res.total +
+              " (файлы на диске не тронуты)" + goneNote(res));
+        $("bulk-overlay").hidden = true;
+        renderGrid(true);
+      });
+    });
+  }
+
+  function bindBulk() {
+    var stars = document.querySelector("#bulk-body [data-stars]");
+    bindStars(stars);
+    var clear = document.querySelector("#bulk-body [data-bulk-clear]");
+    if (clear) {
+      clear.addEventListener("click", function () {
+        if (!stars) return;
+        stars.dataset.value = "0";
+        stars.dataset.touched = "1";
+        Array.prototype.forEach.call(stars.querySelectorAll(".star"),
+          function (star) { star.classList.remove("on"); });
+      });
+    }
+    Array.prototype.forEach.call(
+      document.querySelectorAll("#bulk-body [data-bulk]"), function (btn) {
+        var action = btn.dataset.bulk;
+        if (action === "close") {
+          btn.addEventListener("click", function () {
+            $("bulk-overlay").hidden = true;
+          });
+        } else if (action === "apply") {
+          btn.addEventListener("click", bulkApply);
+        } else if (action === "collect-add" || action === "collect-remove") {
+          btn.addEventListener("click", function () { bulkCollect(action); });
+        } else if (action === "remove-rows") {
+          btn.addEventListener("click", bulkRemoveRows);
+        }
+      });
+  }
+
+  /* ------------------------------------------------------------------ *
    *  Установка ffmpeg (по кнопке: GPL не вшиваем)
    * ------------------------------------------------------------------ */
 
@@ -1597,6 +1873,9 @@
     });
 
     $("tree").innerHTML = html.join("");
+    // Счётчики папки в её панели: дерево приходит из poll, поэтому и
+    // заголовок col-bar обновляется вместе с ним.
+    updateCollectionBar();
 
     Array.prototype.forEach.call($("tree").querySelectorAll(".tree-item[data-scope]"),
       function (node) {
@@ -1633,7 +1912,7 @@
     }
   }
 
-  /* P4: управление папкой - кнопки видны только в её контексте. */
+  /* P4/M17: управление папкой - кнопки видны только в её контексте. */
   function updateCollectionBar() {
     var inCollection = state.scope && state.scope.type === "collection";
     ["sel-collect-remove", "sel-collect-rename",
@@ -1641,6 +1920,15 @@
       var node = $(id);
       if (node) node.hidden = !inCollection;
     });
+    // M17: операции над папкой целиком (без мультивыбора) - своя панель.
+    var bar = $("col-bar");
+    if (bar) bar.hidden = !inCollection;
+    if (inCollection) {
+      var col = collectionNode(state.scope.id);
+      $("col-title").textContent = "Папка «" +
+        ((col && col.name) || state.scope.id) + "» · " +
+        pluralRows((col && col.total) || 0);
+    }
   }
 
   /* P4: «В коллекцию…» - список папок + создание новой одним диалогом. */
@@ -2020,24 +2308,6 @@
     renderGridHead();
     applyListColumns();
     return sortChanged;
-  }
-
-  function enqueueSelection() {
-    var ids = Array.from(state.selected);
-    if (!ids.length) return;
-    var storageId = $("sel-storage").value;
-    if (!storageId) {
-      toast("Не выбрано хранилище - добавьте папку в настройках", true);
-      switchTab("settings");
-      return;
-    }
-    call("enqueue", { ids: ids, storage_id: storageId }).then(function (res) {
-      if (!res) return;
-      if (res.error) { toast(res.error, true); return; }
-      toast("В очередь поставлено: " + res.queued);
-      clearSelection();
-      switchTab("queue");
-    });
   }
 
   function renderGrid(reset) {
@@ -4744,11 +5014,18 @@
 
     // Мультивыбор в таблице библиотеки.
     $("sel-clear").addEventListener("click", clearSelection);
-    $("sel-download").addEventListener("click", enqueueSelection);
-    $("sel-mark").addEventListener("click", openMark);
+    $("sel-download").addEventListener("click", downloadSelection);
+    $("sel-bulk").addEventListener("click", openBulk);
+    $("bulk-close").addEventListener("click", function () {
+      $("bulk-overlay").hidden = true;
+    });
     $("mark-close").addEventListener("click", function () {
       $("mark-overlay").hidden = true;
     });
+    // M17: операции над папкой целиком - те же эндпоинты, без мультивыбора.
+    $("col-download").addEventListener("click", downloadSelection);
+    $("col-ops").addEventListener("click", openBulk);
+    $("col-purge").addEventListener("click", purgeCollection);
     $("sel-move").addEventListener("click", openMigrate);
     $("migrate-close").addEventListener("click", function () {
       // Идёт перенос - закрыть окно нельзя: процесс должен быть виден.
@@ -5283,6 +5560,27 @@
         view_count: 42000, like_count: 900, comment_count: 55,
         synced_at: "2026-10-10T21:04:00", has_thumb: false }
     ];
+    // M17: коллекции-папки в превью (id строк из rows выше): панель папки и
+    // массовые операции должны быть проверяемы без бэка.
+    var mockCollections = [
+      { id: 7, name: "Избранное", items: [1, 3, 5] },
+      { id: 8, name: "На потом", items: [2] }
+    ];
+    var mockCollectionNext = 9;
+    function mockCollection(id) {
+      return mockCollections.filter(function (c) { return c.id === Number(id); })[0] || null;
+    }
+    function mockCollectionView(c) {
+      return { id: c.id, name: c.name, total: c.items.length,
+               created_at: "2026-10-06T12:00:00" };
+    }
+    function mockBulkIds(req) {
+      // Группа: ids мультивыбора ИЛИ папка целиком - как в настоящем бэке.
+      var ids = (req || {}).ids;
+      if (ids) return ids.slice();
+      var col = mockCollection((req || {}).collection_id);
+      return col ? col.items.slice() : [];
+    }
     var settings = {
       library_roots: [{ path: "D:\\видео\\библиотека", recursive: true, enabled: true }],
       default_storage_id: "st_preview1",
@@ -5672,7 +5970,8 @@
                        { id: 2, title: "Автор Б", total: 1, downloaded: 0 }],
             playlists: [{ id: 1, title: "Тестовый плейлист", kind: "remote",
                           total: 3, downloaded: 1, sync_mode: "partial",
-                          last_synced_at: "2026-10-05T21:00:00" }]
+                          last_synced_at: "2026-10-05T21:00:00" }],
+            collections: mockCollections.map(mockCollectionView)
           },
           scan: JSON.parse(JSON.stringify(mockScan)),
           sources: [{ id: 1, title: "Тестовый плейлист", kind_label: "плейлист",
@@ -5764,6 +6063,11 @@
       list_videos: function (req) {
         req = req || {};
         var list = rows.filter(function (row) {
+          // M17: папка-коллекция показывает только свои строки (как бэк).
+          if (req.scope && req.scope.type === "collection") {
+            var col = mockCollection(req.scope.id);
+            if (!col || col.items.indexOf(row.id) < 0) return false;
+          }
           if (req.status && row.status !== req.status) return false;
           if (req.rating_min && (row.user_rating || 0) < Number(req.rating_min)) return false;
           if (req.query && row.title.toLowerCase().indexOf(req.query.toLowerCase()) < 0) return false;
@@ -5968,6 +6272,173 @@
       },
       enqueue: function (req) {
         return Promise.resolve({ queued: ((req || {}).ids || []).length });
+      },
+      /* M17: коллекции и массовые операции в превью - та же сводка, что
+         отдаёт бэк (сделано / пропущено с причиной), чтобы панель и диалог
+         были проверяемы без Python. */
+      collections_list: function () {
+        return Promise.resolve({ ok: true,
+          collections: mockCollections.map(mockCollectionView) });
+      },
+      collection_create: function (req) {
+        var name = ((req || {}).name || "").trim();
+        if (!name) return Promise.resolve({ error: "коллекции нужно имя" });
+        var id = mockCollectionNext++;
+        mockCollections.push({ id: id, name: name, items: [] });
+        return Promise.resolve({ ok: true, id: id });
+      },
+      collection_rename: function (req) {
+        var col = mockCollection((req || {}).id);
+        var name = ((req || {}).name || "").trim();
+        if (!col) return Promise.resolve({ error: "коллекция не найдена" });
+        if (!name) return Promise.resolve({ error: "коллекции нужно имя" });
+        col.name = name;
+        return Promise.resolve({ ok: true });
+      },
+      collection_delete: function (req) {
+        mockCollections = mockCollections.filter(
+          function (c) { return c.id !== Number((req || {}).id); });
+        return Promise.resolve({ ok: true });
+      },
+      collection_edit: function (req) {
+        var col = mockCollection((req || {}).id);
+        if (!col) return Promise.resolve({ error: "коллекция не найдена" });
+        var added = 0;
+        ((req || {}).add || []).forEach(function (id) {
+          if (col.items.indexOf(id) < 0) { col.items.push(id); added += 1; }
+        });
+        var removed = 0;
+        var before = col.items.length;
+        col.items = col.items.filter(function (id) {
+          return ((req || {}).remove || []).indexOf(id) < 0;
+        });
+        removed = before - col.items.length;
+        return Promise.resolve({ ok: true, added: added, removed: removed });
+      },
+      bulk_download: function (req) {
+        var ids = mockBulkIds(req);
+        var reasons = {};
+        var queued = 0;
+        ids.forEach(function (id) {
+          var row = rows.filter(function (r) { return r.id === id; })[0];
+          var reason = null;
+          if (!row) reason = "нет строки в индексе";
+          else if (row.status === "downloaded") reason = "уже скачано";
+          else if (row.status === "downloading") reason = "качается сейчас";
+          else if (row.status === "unavailable") reason = "удалено на площадке";
+          if (reason) { reasons[reason] = (reasons[reason] || 0) + 1; return; }
+          row.status = "queued";
+          row.status_label = "в очереди";
+          queued += 1;
+        });
+        var skipped = 0;
+        Object.keys(reasons).forEach(function (key) { skipped += reasons[key]; });
+        mockDl.running = queued > 0;   // однопоточная «очередь» превью
+        return Promise.resolve({ ok: true, total: ids.length, queued: queued,
+                                 skipped: skipped, reasons: reasons,
+                                 storage_id: (req || {}).storage_id || null });
+      },
+      bulk_tags: function (req) {
+        var ids = mockBulkIds(req);
+        var names = function (value) {
+          var parts = typeof value === "string"
+            ? value.split(",") : (value || []).map(String);
+          return parts.map(function (part) { return part.trim(); })
+            .filter(function (part) { return part; });
+        };
+        var add = names((req || {}).add);
+        var drop = names((req || {}).remove).map(function (tag) {
+          return tag.toLowerCase();
+        });
+        if (!add.length && !drop.length) {
+          return Promise.resolve({ error: "Нужны теги: «добавить» или «убрать»" });
+        }
+        var updated = 0;
+        var gone = 0;
+        ids.forEach(function (id) {
+          var row = rows.filter(function (r) { return r.id === id; })[0];
+          if (!row) { gone += 1; return; }
+          var kept = (row.user_tags || "").split(",")
+            .map(function (tag) { return tag.trim(); })
+            .filter(function (tag) {
+              return tag && drop.indexOf(tag.toLowerCase()) < 0;
+            });
+          add.forEach(function (tag) {
+            if (kept.map(function (t) { return t.toLowerCase(); })
+              .indexOf(tag.toLowerCase()) < 0) kept.push(tag);
+          });
+          row.user_tags = kept.join(", ");
+          updated += 1;
+        });
+        return Promise.resolve({ ok: true, total: ids.length, updated: updated,
+                                 unchanged: ids.length - updated - gone,
+                                 gone: gone });
+      },
+      bulk_rating: function (req) {
+        var ids = mockBulkIds(req);
+        var rating = Number((req || {}).rating);
+        if (!(rating >= 0 && rating <= 5)) {
+          return Promise.resolve({ error: "Рейтинг - целое число от 1 до 5 (0: сбросить)" });
+        }
+        var updated = 0;
+        var gone = 0;
+        ids.forEach(function (id) {
+          var row = rows.filter(function (r) { return r.id === id; })[0];
+          if (!row) { gone += 1; return; }
+          row.user_rating = rating;
+          updated += 1;
+        });
+        return Promise.resolve({ ok: true, total: ids.length, rating: rating,
+                                 updated: updated, unchanged: 0, gone: gone });
+      },
+      bulk_collection: function (req) {
+        var action = (req || {}).action;
+        var col = mockCollection((req || {}).collection_id);
+        if (!col) return Promise.resolve({ error: "Коллекция не найдена" });
+        if (action !== "add" && action !== "remove") {
+          return Promise.resolve({ error: "Нужно действие: add или remove" });
+        }
+        var ids = mockBulkIds(req);
+        var moved = 0;
+        if (action === "add") {
+          ids.forEach(function (id) {
+            if (col.items.indexOf(id) < 0) { col.items.push(id); moved += 1; }
+          });
+        } else {
+          var before = col.items.length;
+          col.items = col.items.filter(function (id) {
+            return ids.indexOf(id) < 0;
+          });
+          moved = before - col.items.length;
+        }
+        return Promise.resolve({
+          ok: true, total: ids.length, action: action,
+          collection_id: col.id, collection_name: col.name,
+          added: action === "add" ? moved : 0,
+          removed: action === "remove" ? moved : 0,
+          unchanged: ids.length - moved
+        });
+      },
+      bulk_remove_rows: function (req) {
+        // Тот же гейт, что в бэке: без явного подтверждения - отказ.
+        if (!(req || {}).confirm) {
+          return Promise.resolve({ error: "Нужно явное подтверждение удаления" });
+        }
+        var ids = mockBulkIds(req);
+        var removed = 0;
+        rows = rows.filter(function (row) {
+          if (ids.indexOf(row.id) < 0) return true;
+          removed += 1;
+          return false;
+        });
+        mockCollections.forEach(function (col) {
+          col.items = col.items.filter(function (id) {
+            return ids.indexOf(id) < 0;
+          });
+        });
+        return Promise.resolve({ ok: true, total: ids.length,
+                                 removed: removed, gone: ids.length - removed,
+                                 files_kept: true });
       },
       open_path: function () { return Promise.resolve(null); },
       open_url: function () { return Promise.resolve(null); },

@@ -276,6 +276,18 @@ def collection_remove(conn: sqlite3.Connection, collection_id: int,
     return removed
 
 
+def collection_ids(conn: sqlite3.Connection, collection_id: int) -> list[int]:
+    """Видео папки в порядке добавления.
+
+    Нужно для массовых операций над коллекцией целиком (M17): те же
+    эндпоинты, что для мультивыбора, но без выделения строк в окне.
+    """
+    return [int(row["video_id"]) for row in conn.execute(
+        """SELECT ci.video_id FROM collection_items ci
+            WHERE ci.collection_id=?
+            ORDER BY ci.position, ci.added_at""", (int(collection_id),))]
+
+
 def tags_popular(conn: sqlite3.Connection, platform: str | None = None,
                  limit: int = 40) -> list[dict]:
     """Теги счётчиками для чипсов фильтра: популярные первыми.
@@ -906,6 +918,228 @@ def save_fields(conn, ids, fields: dict) -> int:
         f"UPDATE videos SET {columns} WHERE id IN ({marks})",
         [*allowed.values(), *[int(i) for i in ids]])
     return int(cursor.rowcount)
+
+
+# --------------------------------------------------------------------------- #
+#  Массовые операции (M17): выбранная группа строк или папка целиком
+# --------------------------------------------------------------------------- #
+
+BULK_LIMIT = 500  # страховка: одна операция не должна переписать всю библиотеку
+
+
+def _limit(video_ids) -> list[int]:
+    """Лимит группы здесь же, а не только в окне: вызов мог прийти из mesh
+    или из теста без проверки окна, и одна операция не должна переписывать
+    всю библиотеку разом. Дубли схлопываются здесь же: «три раза один id»
+    считается одной строкой, а не тремя работа."""
+    ids = sorted({int(v) for v in video_ids if int(v) > 0})
+    if len(ids) > BULK_LIMIT:
+        raise ValueError(f"Группа слишком большая: {len(ids)} строк, "
+                         f"лимит {BULK_LIMIT} - разбейте на части")
+    return ids
+
+
+def _video_rows_by_id(conn, video_ids) -> dict[int, dict]:
+    """Строки индекса по id - одним запросом на чанк.
+
+    «Строки нет» это тоже результат: группа из окна могла устареть (другое
+    окно удалило строку), и её нельзя молча «пометить». have - число
+    видеофайлов на месте (missing=0): «уже скачано» решается по факту в
+    индексе, а не по одному статусу (строка может быть 'known', а файл
+    уже лежать - его нашёл скан).
+    """
+    ids = sorted({int(v) for v in video_ids})
+    out: dict[int, dict] = {}
+    for chunk in _chunks(ids):
+        marks = ",".join("?" * len(chunk))
+        for row in conn.execute(
+            f"""SELECT v.id, v.title, v.status, v.platform, v.user_tags,
+                       (SELECT COUNT(*) FROM files f
+                          WHERE f.video_id=v.id AND f.kind='video'
+                            AND f.missing=0) AS have
+                  FROM videos v WHERE v.id IN ({marks})""", chunk):
+            out[int(row["id"])] = dict(row)
+    return out
+
+
+def tag_names(value) -> list[str]:
+    """Теги из запроса окна: список ИЛИ строка через запятую -> список имён.
+
+    Окно присылает и то, и другое (поле ввода и чипсы) - разбор здесь, чтобы
+    эндпоинт не зависел от формы ввода. Пустые и пробельные части отсекаются:
+    «   » - это «тегов нет», а не «тег из пробелов».
+    """
+    if isinstance(value, str):
+        parts = value.replace("\n", ",").split(",")
+    else:
+        parts = []
+        for item in (value or []):
+            parts.extend(str(item or "").replace("\n", ",").split(","))
+    return [part.strip()[:48] for part in parts if part.strip()]
+
+
+def _transaction(conn, work):
+    """Одна транзакция на массовую запись: падение откатывает всё.
+
+    autocommit (isolation_level=None) пишет каждую строку сразу, поэтому
+    без транзакции half-way отказ оставил бы группу «наполовину помеченной».
+    """
+    conn.execute("BEGIN")
+    try:
+        result = work()
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+    return result
+
+
+def count_adult(conn, video_ids) -> int:
+    """Сколько строк группы принадлежат взрослой площадке (гейт 18+)."""
+    adult = platforms_mod.adult_ids()
+    if not adult:
+        return 0
+    rows = _video_rows_by_id(conn, video_ids)
+    return sum(1 for row in rows.values() if row["platform"] in adult)
+
+
+def bulk_enqueue(conn, video_ids, storage_id: str | None = None) -> dict:
+    """Одним действием: группа -> очередь, с честными пропусками.
+
+    Очередь однопоточная (app.queue), поэтому вся группа идёт списком id за
+    один вызов: параллельных запросов площадке это не создаёт. Пропуски
+    считаются по факту, а не угадываются: уже скачанный файл не уходит в
+    очередь повторно, «удалено на площадке» не повторяется бессмысленно.
+    """
+    incoming = _limit(video_ids)
+    rows = _video_rows_by_id(conn, incoming)
+    reasons: dict[str, int] = {}
+    go: list[int] = []
+    for vid in sorted(rows):
+        status = rows[vid]["status"]
+        if int(rows[vid]["have"]) or status == "downloaded":
+            reason = "уже скачано"
+        elif status == "downloading":
+            reason = "качается сейчас"
+        elif status == "unavailable":
+            reason = "удалено на площадке"
+        else:
+            go.append(vid)
+            continue
+        reasons[reason] = reasons.get(reason, 0) + 1
+    missing = len(incoming) - len(rows)
+    if missing:
+        reasons["нет строки в индексе"] = missing
+
+    def write():
+        return enqueue(conn, go, storage_id=storage_id) if go else 0
+
+    queued = _transaction(conn, write)
+    return {"queued": queued, "skipped": sum(reasons.values()),
+            "reasons": reasons}
+
+
+def bulk_tags(conn, video_ids, *, add=None, remove=None) -> dict:
+    """Добавить/убрать ЛОКАЛЬНЫЕ теги (user_tags) у группы - сразу несколько.
+
+    Теги площадки (tags/video_tags) не трогаем: они принадлежат источнику и
+    перезаписываются синком. Здесь merge, а не замена: группа обычно
+    разнородная, и замена стёрла бы метки, которые человек ставил раньше.
+    updated_at не меняется (как в save_fields): правка тега не должна
+    переставлять очередь.
+    """
+    add_tags = tag_names(add)
+    drop = {tag.casefold() for tag in tag_names(remove)}
+    incoming = _limit(video_ids)
+    rows = _video_rows_by_id(conn, incoming)
+    updated = 0
+
+    def write():
+        nonlocal updated
+        for vid in sorted(rows):
+            current = [part.strip() for part in (rows[vid]["user_tags"] or "").split(",")
+                       if part.strip()]
+            kept = [tag for tag in current if tag.casefold() not in drop]
+            merged = normalize_tags(", ".join(kept + add_tags)) if (add_tags or drop) \
+                else rows[vid]["user_tags"]
+            if merged == rows[vid]["user_tags"]:
+                continue
+            conn.execute("UPDATE videos SET user_tags=? WHERE id=?",
+                         (merged, vid))
+            updated += 1
+        return updated
+
+    touched = _transaction(conn, write)
+    return {"updated": touched, "unchanged": len(rows) - touched,
+            "gone": len(incoming) - len(rows)}
+
+
+def bulk_rating(conn, video_ids, rating: int) -> dict:
+    """Рейтинг для группы: 1..5 (0 - сбросить). Ограничение - в save_fields."""
+    incoming = _limit(video_ids)
+    rows = _video_rows_by_id(conn, incoming)
+
+    def write():
+        return save_fields(conn, sorted(rows), {"user_rating": int(rating)})
+
+    updated = _transaction(conn, write)
+    return {"updated": updated, "unchanged": len(rows) - updated,
+            "gone": len(incoming) - len(rows)}
+
+
+def bulk_collection(conn, video_ids, collection_id: int, action: str) -> dict:
+    """Строки в папку / из папки.
+
+    Папка проверяется здесь: без неё «добавить» создал бы сиротские связи
+    (INSERT OR IGNORE не отличает несуществующую папку от дубля позиции).
+    Удаление строки видео каскадом убирает её позиции - сюда это не входит.
+    """
+    cid = int(collection_id)
+    if action not in ("add", "remove"):
+        raise ValueError(f"неизвестное действие {action!r}")
+    if not conn.execute("SELECT id FROM collections WHERE id=?",
+                        (cid,)).fetchone():
+        raise ValueError(f"коллекция {cid} не найдена")
+    incoming = _limit(video_ids)
+    ids = sorted(_video_rows_by_id(conn, incoming))
+
+    def write():
+        if action == "add":
+            return collection_add(conn, cid, ids)
+        return collection_remove(conn, cid, ids)
+
+    changed = _transaction(conn, write)
+    key = "added" if action == "add" else "removed"
+    untouched = len(ids) - changed
+    return {key: changed, "unchanged": untouched,
+            "gone": len(incoming) - len(ids)}
+
+
+def bulk_delete_rows(conn, video_ids) -> dict:
+    """Убрать строки из индекса. ФАЙЛЫ на диске остаются: здесь только DELETE.
+
+    Связи (files, playlist_items, video_tags, позиции коллекций) уходят
+    каскадом по FK - это записи об индексе, а не сами файлы. Скан
+    (app.indexer) найдёт копии на диске заново, поэтому удаление строки
+    ничего с диска не стирает и контент на носителе остаётся.
+    """
+    incoming = _limit(video_ids)
+    rows = _video_rows_by_id(conn, incoming)
+    ids = sorted(rows)
+    removed = 0
+
+    def write():
+        nonlocal removed
+        for chunk in _chunks(ids):
+            marks = ",".join("?" * len(chunk))
+            cursor = conn.execute(
+                f"DELETE FROM videos WHERE id IN ({marks})", chunk)
+            removed += int(cursor.rowcount)
+        return removed
+
+    deleted = _transaction(conn, write)
+    return {"removed": deleted,
+            "gone": len(incoming) - len(rows)}
 
 
 # Сортировка списка: ключ из запроса окна -> выражение SQL. Только эти
