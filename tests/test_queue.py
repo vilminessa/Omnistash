@@ -50,11 +50,13 @@ class QueueCase(GuiCase):
         """Подмена downloader.download: пишет файл и сайдкар в хранилище."""
 
         def download(video, settings, *, stop, on_progress=None, dest=None,
-                     overwrite=False, account_id=None):
+                     overwrite=False, account_id=None, log=None,
+                     attempt_chain=False):
             if behaviour:
                 return behaviour(video, settings, stop=stop,
                                  on_progress=on_progress, dest=dest,
-                                 overwrite=overwrite)
+                                 overwrite=overwrite, log=log,
+                                 attempt_chain=attempt_chain)
             # dest приходит из очереди - цель, которую выбрал человек.
             target = pathlib.Path(dest or ".")
             target.mkdir(parents=True, exist_ok=True)

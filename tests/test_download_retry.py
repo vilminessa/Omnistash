@@ -14,6 +14,7 @@ from unittest import mock
 
 from app import downloader
 from app import google_auth
+from app import paths
 from yt_dlp.utils import DownloadError
 
 VIDEO = {"webpage_url": "https://example.com/v1", "id": "v1"}
@@ -54,6 +55,13 @@ class RetryCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.dest = Path(self._tmp.name)
+        # Профиль под тестовым (как в test_bypass.py): цепочка дорог выкачки
+        # пишет кэш победителя и токены в bypass_cache_path/profile_dir, а не
+        # в реальный %LOCALAPPDATA%\Omnistash.
+        self._profile = mock.patch.object(paths, "profile_dir",
+                                          lambda: self.dest)
+        self._profile.start()
+        self.addCleanup(self._profile.stop)
 
     def run_plan(self, plan, settings=None):
         captured: list = []

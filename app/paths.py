@@ -77,3 +77,22 @@ def google_cookies_path() -> Path:
 def google_tokens_path() -> Path:
     """Зашифрованный (DPAPI) refresh-токен OAuth (G1b)."""
     return profile_dir() / "google_tokens.bin"
+
+
+def bypass_cache_path() -> Path:
+    """Кэш выигравшей «дороги выкачки» по площадке (M13).
+
+    Не секрет: имена дорог и момент проверки. Тот же приём, что кэш стратегии
+    в Synfronia (dpi.py:1155-1205) - отдельный файл рядом с профилем.
+    """
+    return profile_dir() / "bypass_routes.json"
+
+
+def platform_tokens_path() -> Path:
+    """Зашифрованные (DPAPI) подтверждения «я человек» площадок (M13).
+
+    visitor-info / PO-токен / подтверждающие cookie площадки - секретные
+    значения сессии, поэтому шифруются тем же способом, что куки аккаунта
+    (google_auth.encrypt): без учётки Windows файл бесполезен.
+    """
+    return profile_dir() / "platform_tokens.bin"
