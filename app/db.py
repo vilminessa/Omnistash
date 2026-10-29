@@ -36,6 +36,11 @@ STATUSES = (
 # Режимы синхронизации источника.
 SYNC_MODES = ("full", "partial", "manual")
 
+# Тип строки индекса (миграция v12): дорожка видео или аудиозапись.
+# Отдельно от files.kind: тот описывает роль файла в записи (видео/субтитры/
+# обложка/сайдкар), а media_kind - чем является сама дорожка.
+MEDIA_KINDS = ("video", "audio")
+
 
 def _migrate_v1(conn: sqlite3.Connection) -> None:
     """Первая схема: каналы, видео, файлы, плейлисты, связи, запуски, поиск."""
@@ -655,10 +660,30 @@ def _migrate_v11(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v12(conn: sqlite3.Connection) -> None:
+    """Тип строки: видео или аудио (E0 - платформенный адаптер аудио).
+
+    Отдельная колонка, а НЕ новый вариант files.kind: `kind` описывает
+    роль файла в записи (видео/субтитры/обложка/сайдкар) и на него
+    опираются скан, перенос, сверка и очередь - «audio» там сломал бы
+    подсчёт копий и поиск переездов. Контейнер дорожки (mp3/m4a/opus) -
+    свойство САМОЙ строки, поэтому она и получает media_kind.
+
+    ADD COLUMN с DEFAULT: существующие строки получают 'video' и остаются
+    валидными (CHECK проверяет только новые записи). Идемпотентность -
+    в _add_column: обрыв на середине лечится повтором той же миграции.
+    """
+    _add_column(conn, "videos",
+                "media_kind TEXT NOT NULL DEFAULT 'video'"
+                " CHECK (media_kind IN ('video','audio'))")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS videos_media_idx ON videos(media_kind)")
+
+
 # Порядок важен: номер версии = индекс + 1.
 MIGRATIONS = (_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4,
                _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8,
-               _migrate_v9, _migrate_v10, _migrate_v11)
+               _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12)
 
 
 class Database:

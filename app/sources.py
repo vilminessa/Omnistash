@@ -207,7 +207,12 @@ def fetch_video(url: str, *, settings: dict | None = None, stop=None,
 
 
 def classify(url: str) -> dict:
-    """Что за ссылка: плейлист, канал или не поддерживаемое."""
+    """Что за ссылка: плейлист, канал или не поддерживаемое.
+
+    E0: media_kind из metadata.classify_url ('audio' у аудио-площадок)
+    здесь сохраняется как есть - add-flow ветит диалог по типу дорожки,
+    а качалка для аудио идёт по кнопке человека (enqueue include_audio).
+    """
     info = metadata.classify_url(url)
     if info["kind"] == "channel":
         # Канал - это тот же плейлист загрузок: yt-dlp сам развернёт @handle.

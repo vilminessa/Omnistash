@@ -26,13 +26,17 @@ import re
 import time
 from pathlib import Path
 
-from . import aggregate, repo, storages as storages_mod
+from . import aggregate, audio as audio_mod, repo, storages as storages_mod
 from .metadata import PLATFORM, normalize_video, video_key
 from .util import SIDECAR_SUFFIX, norm_title, now_iso, sanitize_name
 
 # Расширения, которые считаем видео (индексируются как kind='video').
 MEDIA_EXT = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".flv", ".wmv",
              ".ts", ".mpg", ".mpeg", ".ogv", ".3gp", ".vob"}
+# Аудио (E0): тот же порядок опознания, но строка получает media_kind='audio'.
+# Набор отдельный: видео-список остаётся прежним, а старые видео-строки
+# скан не правит (см. _index_one).
+AUDIO_EXT = audio_mod.AUDIO_EXT
 SUB_EXT = {".srt", ".vtt", ".ass", ".ssa", ".sub"}
 THUMB_EXT = {".jpg", ".jpeg", ".png", ".webp", ".avif"}
 
@@ -240,11 +244,16 @@ def _walk(root: Path, recursive: bool, with_stat: bool = True):
 
 
 def _attach_aux(conn, video_id: int, media_path: Path, size, mtime, digest,
-                storages_list: list[dict] | None = None) -> None:
+                storages_list: list[dict] | None = None,
+                cover_path: str | None = None) -> None:
     """Сайдкар, субтитры и обложка рядом с видео -> строки files того же видео.
 
     Обход - os.listdir, а не glob: имена вида «Title [dQw4w9WgXcQ].mp4»
     glob читает как символный класс и молча ничего не находит.
+
+    cover_path - обложка, извлечённая из ТЕГА аудио-файла (кэш в профиле):
+    она становится той же строкой kind='thumbnail', что и соседний jpg -
+    плитка и карточка показывают её без отдельного пути.
     """
     stem = media_path.stem
     parent = media_path.parent
@@ -258,6 +267,8 @@ def _attach_aux(conn, video_id: int, media_path: Path, size, mtime, digest,
             repo.record_file(conn, video_id, str(sidecar), "sidecar",
                              size=stat.st_size, mtime=stat.st_mtime,
                              storages_list=storages_list)
+    if cover_path:
+        _record_cover(conn, video_id, cover_path, storages_list)
     try:
         names = os.listdir(parent)
     except OSError:
@@ -301,7 +312,7 @@ def scan(roots, db, *, progress=None, stop=None, compute_hash: bool = True,
     report = {"roots": [], "scanned": 0, "added": 0, "bound_sidecar": 0,
               "bound_id": 0, "bound_title": 0, "updated": 0, "unchanged": 0,
               "rebound": 0, "missing": 0, "skipped": 0, "sidecars": 0,
-              "duplicates": 0, "possible_moves": 0,
+              "duplicates": 0, "possible_moves": 0, "audio": 0,
               "dup_details": [], "move_details": [],
               "errors": [], "stopped": False}
 
@@ -352,14 +363,15 @@ def scan(roots, db, *, progress=None, stop=None, compute_hash: bool = True,
             seen_paths.add(file_path)
 
             ext = Path(file_path).suffix.lower()
-            if ext not in MEDIA_EXT:
+            kind = audio_mod.media_kind_of(file_path)   # 'audio' or None
+            if ext not in MEDIA_EXT and kind is None:
                 report["skipped"] += 1
                 continue
 
             try:
                 _index_one(conn, lookups, file_path, size, mtime,
                            compute_hash, multi_title, report, keep_sidecar,
-                           sidecar_mode)
+                           sidecar_mode, media_kind=kind or "video")
             except OSError as exc:
                 report["errors"].append(f"{file_path}: {exc}")
                 continue
@@ -532,8 +544,10 @@ def _hash_case(lookups, old_path: str) -> str:
 
 def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
                compute_hash: bool, multi_title: set[str], report: dict,
-               keep_sidecar: bool = True, sidecar_mode: str = "files") -> str:
+               keep_sidecar: bool = True, sidecar_mode: str = "files",
+               media_kind: str = "video") -> str:
     """Опознать один файл и записать его в индекс. Возвращает исход."""
+    audio = media_kind == "audio"
     known = lookups.by_path.get(file_path)
     if known is not None and known["size"] == size and known["mtime"] == mtime:
         # Ничего не поменялось: пишем только если файл «пропал» и вернулся -
@@ -548,6 +562,19 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
         else:
             report["unchanged"] += 1
         return "same"
+
+    # Метки аудио-файла читаем только здесь: для файлов «как есть» они уже
+    # лежат в своей строке files (fast-path выше возвращает "same"), поэтому
+    # лишнего чтения на весь скан не появляется. Длительность и обложка -
+    # из самого файла (см. app/audio.py), честные NULL без ffprobe.
+    meta = None
+    meta_json = None
+    cover_path = None
+    if audio:
+        meta = audio_mod.audio_meta(file_path)
+        meta_json = audio_mod.dumps(meta)
+        cover_path = meta.get("cover_path")
+        report["audio"] += 1
 
     media_path = Path(file_path)
     stem = media_path.stem
@@ -570,10 +597,18 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
         if not data.get("remote_id"):
             data["remote_id"] = sidecar["remote_id"]
             data["key"] = video_key(PLATFORM, sidecar["remote_id"])
-        vid, _created = repo.upsert_video(conn, data, full=True)
+        vid, created = repo.upsert_video(conn, data, full=True)
         if vid:
-            _register_media(conn, vid, file_path, size, mtime, None, lookups.storages)
-            _attach_aux(conn, vid, media_path, size, mtime, None, lookups.storages)
+            _register_media(conn, vid, file_path, size, mtime, None,
+                            lookups.storages, format_json=meta_json)
+            # Тип строки ставим ТОЛЬКО новой строке: существующую видео-
+            # строку скан не меняет - у неё могла лежать и видекопия.
+            if audio and created:
+                repo.set_media_kind(conn, vid, "audio")
+            if audio:
+                _apply_audio_duration(conn, vid, meta)
+            _attach_aux(conn, vid, media_path, size, mtime, None,
+                       lookups.storages, cover_path=cover_path)
             report["bound_sidecar"] += 1
             lookups.by_path[file_path] = {"video_id": vid, "hash": sidecar.get("hash"),
                                           "size": size, "mtime": mtime}
@@ -585,11 +620,15 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
             key = video_key(PLATFORM, token)
             vid = lookups.by_key.get(key)
             if vid:
-                _register_media(conn, vid, file_path, size, mtime, None, lookups.storages)
+                _register_media(conn, vid, file_path, size, mtime, None,
+                                lookups.storages, format_json=meta_json)
                 digest_for_sidecar = _ensure_hash(conn, lookups, file_path, vid,
                                                   compute_hash)
                 heal(vid, file_path, digest_for_sidecar)
-                _attach_aux(conn, vid, media_path, size, mtime, None, lookups.storages)
+                if audio:
+                    _apply_audio_duration(conn, vid, meta)
+                _attach_aux(conn, vid, media_path, size, mtime, None,
+                            lookups.storages, cover_path=cover_path)
                 report["bound_id"] += 1
                 lookups.by_path[file_path] = {"video_id": vid, "hash": None,
                                               "size": size, "mtime": mtime}
@@ -601,10 +640,14 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
         if not ids or variant in multi_title:
             continue
         vid = ids[0]
-        _register_media(conn, vid, file_path, size, mtime, None, lookups.storages)
+        _register_media(conn, vid, file_path, size, mtime, None,
+                        lookups.storages, format_json=meta_json)
         heal(vid, file_path, _ensure_hash(conn, lookups, file_path, vid,
                                           compute_hash))
-        _attach_aux(conn, vid, media_path, size, mtime, None, lookups.storages)
+        if audio:
+            _apply_audio_duration(conn, vid, meta)
+        _attach_aux(conn, vid, media_path, size, mtime, None,
+                    lookups.storages, cover_path=cover_path)
         report["bound_title"] += 1
         lookups.by_path[file_path] = {"video_id": vid, "hash": None,
                                       "size": size, "mtime": mtime}
@@ -614,9 +657,14 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
     # кто-то другой - привязываем новый файл к той же записи.
     if known is not None:
         vid = known["video_id"]
-        _register_media(conn, vid, file_path, size, mtime, None, lookups.storages)
+        _register_media(conn, vid, file_path, size, mtime, None,
+                        lookups.storages, format_json=meta_json)
         heal(vid, file_path, _ensure_hash(conn, lookups, file_path, vid,
                                           compute_hash))
+        if audio:
+            _apply_audio_duration(conn, vid, meta)
+        if cover_path:
+            _record_cover(conn, vid, cover_path, lookups.storages)
         report["updated"] += 1
         lookups.by_path[file_path] = {"video_id": vid, "hash": known["hash"],
                                       "size": size, "mtime": mtime}
@@ -651,6 +699,7 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
                 # ещё и тут»), а разбор - в отчёте.
                 repo.record_file(conn, vid, file_path, "video", size=size,
                                  mtime=mtime, digest=digest,
+                                 format_json=meta_json,
                                  storages_list=lookups.storages)
                 if case == "copy":
                     report["duplicates"] += 1
@@ -669,14 +718,20 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
             lookups.by_path[file_path] = {"video_id": vid, "hash": digest,
                                           "size": size, "mtime": mtime}
             heal(vid, file_path, digest)
-            _attach_aux(conn, vid, media_path, size, mtime, digest, lookups.storages)
+            if audio:
+                _apply_audio_duration(conn, vid, meta)
+            _attach_aux(conn, vid, media_path, size, mtime, digest,
+                       lookups.storages, cover_path=cover_path)
             return "hash"
 
     # 6. ничего не подошло - честный импорт без площадочной личности
-    vid = repo.insert_local_video(conn, title=sanitize_name(stem), path=file_path,
-                                   size=size, mtime=mtime, digest=digest,
-                                   storages_list=lookups.storages)
-    _attach_aux(conn, vid, media_path, size, mtime, digest, lookups.storages)
+    vid = repo.insert_local_video(
+        conn, title=sanitize_name(stem), path=file_path,
+        size=size, mtime=mtime, digest=digest,
+        storages_list=lookups.storages, media_kind=media_kind,
+        duration_s=(meta or {}).get("duration_s"), format_json=meta_json)
+    _attach_aux(conn, vid, media_path, size, mtime, digest,
+                lookups.storages, cover_path=cover_path)
     if digest:
         lookups.by_hash[digest] = (vid, file_path)
     lookups.by_path[file_path] = {"video_id": vid, "hash": digest,
@@ -687,14 +742,50 @@ def _index_one(conn, lookups: _Lookups, file_path: str, size: int, mtime: float,
 
 def _register_media(conn, video_id: int, file_path: str, size: int,
                     mtime: float, digest: str | None,
-                    storages_list: list[dict] | None = None) -> None:
+                    storages_list: list[dict] | None = None,
+                    format_json: str | None = None) -> None:
     """Привязать видеофайл к записи (и снять с неё флаг «пропало»).
 
     Вся логика - в repo.record_file: туда же сводится привязка к хранилищу
-    (storage_id/rel_path) и перевод статуса в downloaded.
+    (storage_id/rel_path) и перевод статуса в downloaded. Аудио-файл лежит
+    той же строкой kind='video': `kind` описывает роль файла в записи, а
+    тип дорожки - на самой строке (videos.media_kind).
     """
     repo.record_file(conn, video_id, file_path, "video", size=size,
-                     mtime=mtime, digest=digest, storages_list=storages_list)
+                     mtime=mtime, digest=digest, format_json=format_json,
+                     storages_list=storages_list)
+
+
+def _record_cover(conn, video_id: int, cover_path: str,
+                  storages_list: list[dict] | None = None) -> None:
+    """Обложку из тега аудио -> строка files(kind='thumbnail').
+
+    Картинка лежит в кэше профиля (app.audio.cover_dir), а не рядом с
+    файлом пользователя: библиотека человека не обрастает файлами, которых
+    он не просил. Без обложки вызывающий ничего не пишет.
+    """
+    try:
+        stat = os.stat(cover_path)
+    except OSError:
+        return
+    repo.record_file(conn, video_id, cover_path, "thumbnail",
+                     size=stat.st_size, mtime=stat.st_mtime,
+                     storages_list=storages_list)
+
+
+def _apply_audio_duration(conn, video_id: int, meta: dict | None) -> None:
+    """Длительность из probe аудио - строке audio-типа, если она пуста.
+
+    Строка-видео остаётся нетронутой (у неё свои метки площадки), строка
+    audio получает честную длительность файла: без ffprobe meta=None и
+    duration_s=None - колонка stays NULL, карточка скажет «не получена».
+    """
+    duration = (meta or {}).get("duration_s")
+    if duration is None:
+        return
+    conn.execute(
+        "UPDATE videos SET duration_s=? WHERE id=? AND media_kind='audio'"
+        " AND duration_s IS NULL", (int(duration), video_id))
 
 
 def _mark_missing(conn, root_path: Path, seen: set[str],

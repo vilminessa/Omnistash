@@ -522,6 +522,10 @@ class Api:
         """Страница таблицы библиотеки (виртуализация на стороне окна)."""
         request = request or {}
         scope = request.get("scope") or {"type": "pool"}
+        config = self._current_settings()
+        # E0: настройка «Показывать аудио» выключена - общий список только
+        # для видео; явный фильтр окна «только аудио/видео» важнее настройки
+        # (ветвление в repo.list_videos).
         try:
             return repo.list_videos(
                 self.db.conn,
@@ -533,6 +537,9 @@ class Api:
                 tag=request.get("tag") or "",
                 platform=request.get("platform") or "",
                 exclude_adult=bool(request.get("exclude_adult")),
+                media_kind=(str(request.get("media_kind") or "")
+                            or None),
+                exclude_audio=not bool(config.get("show_audio", True)),
                 offset=int(request.get("offset") or 0),
                 limit=min(int(request.get("limit") or 200), 500),
             )
@@ -1827,7 +1834,13 @@ class Api:
             storage = storages_mod.get(self.db.conn, storage_id)
             if not storage or storage["status"] != "active":
                 return {"error": "Хранилище не найдено или отвязано"}
-        queued = repo.enqueue(self.db.conn, ids, storage_id=storage_id)
+        # E0: «Скачать» - явное действие человека, поэтому аудио-строки
+        # здесь проходят (include_audio): очередь НЕ собирает аудио сама
+        # (режимы синка и repair его не ставят), а кнопка пользователя -
+        # ставит. Аудио со стоящим файлом и так 'downloaded' - enqueue
+        # его не трогает («не требует перекачки»).
+        queued = repo.enqueue(self.db.conn, ids, storage_id=storage_id,
+                              include_audio=True)
         with self._lock:
             self._heavy_at = 0.0
         self._log(f"В очередь поставлено: {queued}"
@@ -2557,7 +2570,17 @@ class Api:
     # ------------------------------------------------------------------ #
 
     def _video_file(self, video_id: int) -> tuple:
-        """(путь к файлу видео, причина отказа). Путь - строго из индекса."""
+        """(путь к файлу дорожки, причина отказа). Путь - строго из индекса.
+
+        E0: аудио-строка открывается тем же путём - её файл записан той же
+        строкой files(kind='video'): `kind` описывает роль файла, а тип
+        дорожки - на videos.media_kind. Подсказки читаются по типу строки:
+        «аудио не скачано» честнее для аудио-строки, чем «видео не скачано».
+        """
+        kind_row = self.db.conn.execute(
+            "SELECT media_kind FROM videos WHERE id=?", (video_id,)).fetchone()
+        media = ("аудио" if kind_row and kind_row["media_kind"] == "audio"
+                 else "видео")
         row = self.db.conn.execute(
             """SELECT path FROM files
                 WHERE video_id=? AND kind='video' AND missing=0
@@ -2567,13 +2590,13 @@ class Api:
                 "SELECT COUNT(*) n FROM files WHERE video_id=? AND kind='video'",
                 (video_id,)).fetchone()["n"]
             return None, ("файл пропал с диска - переиндексируйте"
-                          if known else "видео не скачано")
+                          if known else f"{media} не скачано")
         if not os.path.exists(row["path"]):
             return None, "файл пропал с диска - переиндексируйте"
         return row["path"], None
 
     def open_file(self, request=None) -> dict:
-        """Открыть видео в системном плеере (двойной клик по плитке/строке)."""
+        """Открыть видео или аудио в системном плеере (двойной клик по строке)."""
         try:
             video_id = int((request or {}).get("id") or 0)
         except (TypeError, ValueError):
