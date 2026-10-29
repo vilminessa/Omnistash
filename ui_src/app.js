@@ -114,7 +114,10 @@
     if (sec === null || sec === undefined || isNaN(sec)) return "—";
     sec = Number(sec);
     if (sec < 0) return "—";
-    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    // Дробные секунды (ffprobe отдаёт float, например 254.300000000000011)
+    // округляются до целых: иначе строка выглядела как «4:14.300000000000011».
+    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60),
+        s = Math.floor(sec % 60);
     var pad = function (v) { return (v < 10 ? "0" : "") + v; };
     return h ? h + ":" + pad(m) + ":" + pad(s) : m + ":" + pad(s);
   }
