@@ -200,9 +200,11 @@ class TestAccountColumnV3(unittest.TestCase):
         ).fetchone()["sql"]
         self.assertIn("account_id", sql, "колонка аккаунта должна появиться")
         # База поехала дальше: v4 (счётчики площадки), v5 (стоп-лист mesh),
-        # v6 (доверие), v7 (каталоги), v8 (адреса) и v9 (видео-источники).
+        # v6 (доверие), v7 (каталоги), v8 (адреса), v9 (видео-источники),
+        # v12 (тип дорожки) - итог считаем по списку миграций.
         self.assertEqual(
-            int(database.conn.execute("PRAGMA user_version").fetchone()[0]), 11)
+            int(database.conn.execute("PRAGMA user_version").fetchone()[0]),
+            len(db_mod.MIGRATIONS))
         row = database.conn.execute("SELECT remote_id FROM playlists").fetchone()
         self.assertEqual(row["remote_id"], "PLv2", "данные должны пережить")
 
@@ -221,7 +223,8 @@ class TestAccountColumnV3(unittest.TestCase):
         database = db_mod.Database(self.path)
         self.addCleanup(database.close)
         self.assertEqual(
-            int(database.conn.execute("PRAGMA user_version").fetchone()[0]), 11)
+            int(database.conn.execute("PRAGMA user_version").fetchone()[0]),
+            len(db_mod.MIGRATIONS))
         count = database.conn.execute(
             "SELECT COUNT(*) n FROM playlists").fetchone()["n"]
         self.assertEqual(count, 1, "повторный запуск не должен дублировать")

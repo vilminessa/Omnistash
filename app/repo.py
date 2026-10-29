@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import platforms as platforms_mod
 from . import storages as storages_mod
-from .db import STATUSES, SYNC_MODES
+from .db import MEDIA_KINDS, STATUSES, SYNC_MODES
 from .metadata import PLATFORM, local_key, video_key
 from .util import SIDECAR_SUFFIX, now_iso
 
@@ -45,6 +45,18 @@ _CHUNK = 400  # меньше лимита SQLite на ?-параметры, с �
 def _chunks(seq, size: int = _CHUNK):
     for start in range(0, len(seq), size):
         yield seq[start:start + size]
+
+
+def _media_kind_value(data: dict) -> str | None:
+    """Тип строки для записи из площадки: 'audio' или None.
+
+    None означает «не известно» и не превращает аудио-строку в видео при
+    быстром синке без vcodec: SQL coalesce оставляет прежнее значение.
+    'video' сюда не проходит: тип строки решают скан и человек, а площадка
+    про «видео» ничего не говорит - признаём только явное 'audio'.
+    """
+    value = str(data.get("media_kind") or "").strip().lower()
+    return value if value == "audio" else None
 
 
 # --------------------------------------------------------------------------- #
@@ -130,6 +142,11 @@ def upsert_video(conn: sqlite3.Connection, data: dict, *,
                  thumb_url=coalesce(?, thumb_url),
                  raw_json=coalesce(?, raw_json),
                  channel_id=coalesce(?, channel_id),
+                 -- тип строки правим ТОЛЬКО когда площадка сама сказала
+                 -- 'audio' (music/soundcloud, audio-only поток): None
+                 -- означает «не известно» и не должен превращать аудио
+                 -- строку в видео при быстром синке без vcodec.
+                 media_kind=coalesce(?, media_kind),
                  updated_at=?
                WHERE id=?""",
             (data.get("title"), data.get("description"), data.get("uploaded_at"),
@@ -137,7 +154,7 @@ def upsert_video(conn: sqlite3.Connection, data: dict, *,
              data.get("like_count"), data.get("comment_count"),
              data.get("category"), data.get("webpage_url"),
              data.get("thumb_url"), raw,
-             channel_id, now, vid),
+             channel_id, _media_kind_value(data), now, vid),
         )
         if data.get("platform_tags") is not None:
             set_platform_tags(conn, vid, platform,
@@ -149,14 +166,17 @@ def upsert_video(conn: sqlite3.Connection, data: dict, *,
                                description, uploaded_at, duration_s, view_count,
                                like_count, comment_count, category, webpage_url,
                                thumb_url, raw_json, origin, status,
-                               first_seen_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                               first_seen_at, updated_at, media_kind)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (key, platform, remote_id, channel_id, data.get("title"),
          data.get("description"), data.get("uploaded_at"), data.get("duration_s"),
          data.get("view_count"), data.get("like_count"),
          data.get("comment_count"), data.get("category"),
          data.get("webpage_url"), data.get("thumb_url"), data.get("raw_json"),
-         data.get("origin") or "yt-dlp", "known", now, now),
+         data.get("origin") or "yt-dlp", "known", now, now,
+         # INSERT не принимает None (колонка NOT NULL): новой строке,
+         # о которой площадка ничего не сказала, - 'video'.
+         _media_kind_value(data) or "video"),
     )
     vid = int(cur.lastrowid)
     if data.get("platform_tags") is not None:
@@ -466,7 +486,8 @@ def set_status(conn: sqlite3.Connection, video_ids, status: str) -> int:
 
 
 def enqueue(conn: sqlite3.Connection, video_ids,
-            storage_id: str | None = None) -> int:
+            storage_id: str | None = None, *,
+            include_audio: bool = False) -> int:
     """Поставить в очередь: только то, что ещё не скачано и не качается.
 
     storage_id - куда качать. Цель записывается в строку, потому что фоновый
@@ -474,16 +495,24 @@ def enqueue(conn: sqlite3.Connection, video_ids,
     постановки (панель выделения, настройка канала, глобальное хранилище).
     None - цель остаётся прежней, а на старте загрузки её достроит
     storages.resolve_target.
+
+    include_audio=False (по умолчанию) - аудиостроки в очередь не попадают:
+    загрузчик собирает видео, а аудио-строка приходит из диска (скан) или из
+    аудио-площадки. Качать её - осознанное действие человека («Скачать» в
+    карточке или в панели выделения), а не следствие режима «Полная».
+    include_audio=True открывает этот путь.
     """
     changed = 0
     now = now_iso()
+    audio_sql = "" if include_audio else " AND media_kind<>'audio'"
     for chunk in _chunks([int(v) for v in video_ids]):
         marks = ",".join("?" * len(chunk))
         cur = conn.execute(
             f"""UPDATE videos SET status='queued', updated_at=?,
                        target_storage_id=coalesce(?, target_storage_id)
                 WHERE id IN ({marks})
-                  AND status NOT IN ('downloaded','downloading','unavailable')""",
+                  AND status NOT IN ('downloaded','downloading','unavailable')
+                   {audio_sql}""",
             [now, storage_id, *chunk])
         changed += cur.rowcount
     return changed
@@ -781,6 +810,9 @@ def _entry_to_video(entry: dict, platform: str = PLATFORM) -> dict:
         "raw_json": entry.get("raw"),
         "origin": "yt-dlp",
         "channel": entry.get("channel"),
+        # Тип дорожки (E0): 'audio' из hint записи (flat_entry/normalize);
+        # None - «не известно», и coalesce в upsert оставляет прежнее.
+        "media_kind": entry.get("media_kind"),
     }
 
 
@@ -1162,6 +1194,9 @@ ORDER_COLS: dict[str, str] = {
     # без тегов - NULL (последними в обе стороны).
     "tag": ("(SELECT MIN(t.name) FROM video_tags vt JOIN tags t "
             "ON t.id=vt.tag_id WHERE vt.video_id=v.id)"),
+    # E0 (аудио): тип дорожки - сортировка складывает аудио- и видео-строки
+    # в группы; колонка «Тип» списка тем же ключом сортируется.
+    "media_kind": "v.media_kind",
 }
 
 
@@ -1170,6 +1205,8 @@ def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
                 rating_min: int | None = None, order: dict | None = None,
                 tag: str = "", platform: str = "",
                 exclude_adult: bool = False,
+                media_kind: str | None = None,
+                exclude_audio: bool = False,
                 offset: int = 0, limit: int = 200) -> dict:
     """Строки таблицы библиотеки: (total, rows) для виртуализированного списка.
 
@@ -1179,12 +1216,25 @@ def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
     (platform: вкладка 18+ показывает только pornhub), страница -
     offset/limit. exclude_adult (P2) прячет возрастные площадки из
     ОБЩИХ списков - их вкладка «18+» отдельная.
+    media_kind (E0): явный фильтр типа дорожки ('video'|'audio') -
+    «только аудио»/«только видео» из toolbar окна; прочее значение
+    отвергается молча (белый список). exclude_audio прячет аудио-строки
+    из общего списка (настройка «Показывать аудио» выключена); с
+    фильтром media_kind не работает: явный выбор человека важнее
+    настройки.
     order: {"col": <ключ из ORDER_COLS>, "dir": "asc"|"desc"} - сортировка
     по белому списку: ключ из запроса окна попадает в SQL только через
     этот словарь, произвольный текст отвергается молча (дефолтная дата).
     """
     scope = scope or {"type": "pool"}
     joins, where, args = [], [], []
+    if media_kind in MEDIA_KINDS:
+        # Явный фильтр типа дорожки (E0): «только аудио»/«только видео».
+        where.append("v.media_kind=?")
+        args.append(str(media_kind))
+    elif exclude_audio:
+        # Настройка «Показывать аудио» выключена: общий список без аудио.
+        where.append("v.media_kind<>'audio'")
     if platform:
         where.append("v.platform=?")
         args.append(str(platform))
@@ -1255,6 +1305,7 @@ def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
         f"""SELECT v.id, v.key, v.title, v.status, v.duration_s, v.uploaded_at,
                    v.origin, v.user_rating, v.user_tags, v.watched_at,
                    v.view_count, v.like_count, v.comment_count, v.synced_at,
+                   v.media_kind,
                    c.title AS channel,
                    (SELECT SUM(size) FROM files f
                      WHERE f.video_id=v.id AND f.kind='video' AND f.missing=0) AS size
@@ -1266,6 +1317,10 @@ def list_videos(conn: sqlite3.Connection, *, scope: dict | None = None,
         [*args, int(limit), int(offset)])]
     for row in rows:
         row["status_label"] = STATUS_LABELS.get(row["status"], row["status"])
+        # Подпись типа дорожки для колонки «Тип» (E0): окно рисует её
+        # прямо из строки выборки, без ветвления по media_kind.
+        row["media_label"] = ("аудио" if row.get("media_kind") == "audio"
+                              else "видео")
 
     # Теги страницы одним запросом (PH4: колонка сетки «Теги»).
     ids = [row["id"] for row in rows]
@@ -2013,14 +2068,26 @@ def video_account_id(conn: sqlite3.Connection, video_id: int) -> str | None:
 def insert_local_video(conn: sqlite3.Connection, *, title: str, path: str,
                        size: int | None, mtime: float | None,
                        digest: str | None,
-                       storages_list: list[dict] | None = None) -> int:
+                       storages_list: list[dict] | None = None,
+                       media_kind: str = "video",
+                       duration_s: int | None = None,
+                       format_json: str | None = None) -> int:
     """Файл, у которого не нашлось площадочного ID: строка platform='local'.
 
     Такие записи - честный «импорт из проводника»: они участвуют в
     библиотеке, но не синхронизируются (место занято, автор неизвестен).
     Хеш содержимого - единственная связь, по которой скан later
     перепривяжет файл, если он той же самый встал под новый путь.
+
+    media_kind (E0): 'audio' для аудио-файла (mp3/m4a/opus...); новые
+    значения проверяются по MEDIA_KINDS, прочее - 'video'. Существующую
+    строку (файл переехал под новый путь) функция НЕ правит: тип
+    строки остаётся тем, что решил скан или человек.
+    duration_s - длительность из probe аудио-файла (NULL без ffprobe);
+    format_json - метки аудио в строке files.
     """
+    if media_kind not in MEDIA_KINDS:
+        media_kind = "video"
     key = local_key(path)
     now = now_iso()
     row = conn.execute("SELECT id FROM videos WHERE key=?", (key,)).fetchone()
@@ -2030,11 +2097,31 @@ def insert_local_video(conn: sqlite3.Connection, *, title: str, path: str,
         cur = conn.execute(
             """INSERT INTO videos (key, platform, remote_id, title, uploaded_at,
                                    origin, status, first_seen_at, updated_at,
-                                   webpage_url)
-               VALUES (?,?,?,?,?,?,?,?,?,NULL)""",
+                                   webpage_url, duration_s, media_kind)
+               VALUES (?,?,?,?,?,?,?,?,?,NULL,?,?)""",
             (key, "local", key.split(":", 1)[1], title, None,
-             "path", "downloaded", now, now))
+             "path", "downloaded", now, now, duration_s, media_kind))
         vid = int(cur.lastrowid)
     record_file(conn, vid, path, "video", size=size, mtime=mtime, digest=digest,
-                storages_list=storages_list)
+                format_json=format_json, storages_list=storages_list)
     return vid
+
+
+# --------------------------------------------------------------------------- #
+#  E0 (аудио): тип дорожки строки. Блок добавлен этапом E0 - см. db.v12.
+# --------------------------------------------------------------------------- #
+
+def set_media_kind(conn: sqlite3.Connection, video_id: int,
+                   kind: str) -> int:
+    """Явно поставить тип строки: 'video'|'audio' (миграция v12, E0).
+
+    Только явное действие: скан ставит 'audio' НОВой строке аудио-файла,
+    человек - из карточки. Существующую видео-строку скан не переключает
+    (у неё могла лежать и видекопия). updated_at НЕ трактуем: очередь
+    сортируется по нему, смена типа не должна менять порядок загрузки.
+    """
+    if kind not in MEDIA_KINDS:
+        raise ValueError(f"неизвестный тип дорожки {kind!r}")
+    cur = conn.execute("UPDATE videos SET media_kind=? WHERE id=?",
+                       (kind, int(video_id)))
+    return int(cur.rowcount)

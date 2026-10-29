@@ -31,6 +31,102 @@ _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _CHANNEL_ID_RE = re.compile(r"^UC[A-Za-z0-9_-]{22}$")
 _PLAYLIST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{10,64}$")
 
+# Площадки, которые отдают АУДИО (E0): ссылки этих хостов классифицируются
+# как audio-строки. Реестр площадок (platforms.py) эти хосты пока не
+# знает - functional id здесь локальные: добавление в реестр - следующий
+# этап, а классификация уже работает и не гадаеет о «видео» на audio-хосте.
+_AUDIO_HOSTS = {"soundcloud.com": "soundcloud", "bandcamp.com": "bandcamp"}
+
+# Extractors yt-dlp, запись которых - аудиодорожка (не видеопоток).
+_AUDIO_EXTRACTORS = {"soundcloud", "bandcamp"}
+
+
+def audio_host_of(url: str) -> str | None:
+    """Хост аудио-площадки (functional id) или None для прочих хостов."""
+    host = (urlparse(url).netloc or "").lower().split(":")[0]
+    if host in _AUDIO_HOSTS:
+        return _AUDIO_HOSTS[host]
+    for base, platform in _AUDIO_HOSTS.items():
+        if host.endswith("." + base):
+            return platform
+    return None
+
+
+def _audio_hint(info: dict) -> bool:
+    """Что info-запись - аудиодорожка (честно: только признаки yt-dlp).
+
+    type='audio' у записей аудио-экстракторов; vcodec=None при разрешённом
+    acodec - audio-only поток; vcodec=None и acodec=None вместе - «не
+    известно», а не аудио: битрейт и кодек нам тогда не принадлежат.
+    Экстракторы soundcloud/bandcamp - их собственные признаки.
+    """
+    if not isinstance(info, dict):
+        return False
+    if str(info.get("type") or "").lower() == "audio":
+        return True
+    extractor = str(info.get("extractor") or "").split(":", 1)[0]
+    if extractor in _AUDIO_EXTRACTORS:
+        return True
+    acodec = to_text(info.get("acodec"))
+    vcodec = info.get("vcodec")
+    return bool(acodec) and (vcodec is None or str(vcodec) == "NoneType")
+
+
+def _classify_soundcloud(parsed, result: dict) -> dict:
+    """Soundcloud (E0): /@handle/track - трек, /@handle - профиль автора.
+
+    Идентичность решается на fetch: remote_id берём из info yt-dlp
+    (numeric id трека), slug из пути - placeholder video_id, чтобы
+    add-flow не падал на «unknown». Правила пути - известные формы
+    ссылок площадки; сложное (search/плейлисты площадки) - unknown.
+    """
+    segments = [s for s in (parsed.path or "").split("/") if s]
+    if not segments or segments[0] in ("people", "sounds", "discover"):
+        return result
+    handle = segments[0].lstrip("@")
+    if len(segments) >= 2:
+        result["video_id"] = segments[1]
+        result["handle"] = handle
+        result["kind"] = "video"
+    else:
+        result["handle"] = handle
+        result["kind"] = "channel"
+    return result
+
+
+def _classify_bandcamp(parsed, query: dict, result: dict) -> dict:
+    """Bandcamp (E0): /album/<slug> - альбом (список треков),
+    /album/<slug>/<track> - трек, поддомен художника - канал.
+
+    Точная форма трека уточняется на fetch (info альбома отдаёт entries);
+    здесь только конечные формы URL, без гадания о прочих местах площадки.
+    """
+    path = parsed.path or ""
+    match = re.match(r"/album/([^/?#]+)/([^/?#]+)", path)
+    if match:
+        result["playlist_id"] = match.group(1)
+        result["video_id"] = match.group(2)
+        result["kind"] = "video"
+        return result
+    match = re.match(r"/album/([^/?#]+)", path)
+    if match:
+        result["playlist_id"] = match.group(1)
+        result["kind"] = "playlist"
+        return result
+    track = (query.get("track") or [None])[0]
+    if track:
+        result["video_id"] = str(track)
+        result["kind"] = "video"
+        return result
+    host = (parsed.netloc or "").lower()
+    prefix = (host[: -len(".bandcamp.com")]
+              if host.endswith(".bandcamp.com") else "")
+    if prefix and prefix != "www":
+        result["handle"] = prefix
+        result["kind"] = "channel"
+    return result
+
+
 
 def video_key(platform: str, remote_id: str) -> str:
     """Стабильный ключ записи: «youtube:dQw4w9WgXcQ»."""
@@ -147,6 +243,9 @@ def normalize_video(info: dict, platform: str = PLATFORM, origin: str = "yt-dlp"
         "origin": origin,
         "channel": channel_ref(info, platform),
         "platform_tags": _platform_tags(info),
+        # Тип дорожки (E0): 'audio' по честным признакам info (см. _audio_hint),
+        # None - «не известно» (площадка про тип молчит, coalesce не трогает).
+        "media_kind": "audio" if _audio_hint(info) else None,
     }
 
 
@@ -189,6 +288,11 @@ def video_url(platform: str, remote_id: str) -> str | None:
     площадке»): youtube-шаблон ломал бы PH-строки."""
     remote_id = to_text(remote_id) or ""
     if not remote_id:
+        return None
+    # E0: аудио-площадки (soundcloud/bandcamp) адрес трека не собирают из
+    # id - гадать не будем; живой URL строки лежит в webpage_url (raw_json
+    # и поле строки), фолбэк youtube-шаблон для них был бы ложью.
+    if platform in _AUDIO_HOSTS.values():
         return None
     if platform == "pornhub":
         return ("https://www.pornhub.com/view_video.php?viewkey="
@@ -261,6 +365,10 @@ def flat_entry(entry, position: int, platform: str = PLATFORM) -> dict:
         # Теги площадки (PH2): строки площадки; None = в источнике их не
         # было (не трогаем связи), [] = площадка явно вернула пусто.
         "platform_tags": _platform_tags(entry),
+        # Тип дорожки (E0): тот же честный hint, что в normalize_video.
+        # None - «не известно» (площадка про тип молчит), и coalesce
+        # в upsert_video оставляет прежнее значение строки.
+        "media_kind": "audio" if _audio_hint(entry) else None,
     }
 
 
@@ -293,7 +401,22 @@ def classify_url(url: str) -> dict:
     platform = str(matched["id"]) if matched else PLATFORM
     result = {"kind": "unknown", "url": text, "platform": platform,
               "video_id": None, "playlist_id": None, "channel_id": None,
-              "handle": None, "tag": None}
+              "handle": None, "tag": None,
+              # Тип дорожки (E0): 'audio' у аудио-площадок, None у прочих.
+              # Площадка про «видео» ничего не говорит: None для youtube и
+              # прочих хостов и есть «не известно» (coalesce не трогает).
+              "media_kind": None}
+    audio = audio_host_of(text)
+    if audio and not matched:
+        # Аудио-площадка (E0): её ссылки - аудио; functional id пока живёт
+        # здесь (реестр площадок её не знает - правку реестра делает
+        # следующий этап), правила классификации - свои.
+        result["platform"] = audio
+        result["media_kind"] = "audio"
+        if audio == "soundcloud":
+            return _classify_soundcloud(parsed, result)
+        if audio == "bandcamp":
+            return _classify_bandcamp(parsed, query, result)
 
     if platform == "pornhub":
         return _classify_ph(parsed, query, result)

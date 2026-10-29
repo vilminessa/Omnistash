@@ -31,6 +31,7 @@
     scope: { type: "pool" },
     status: "",
     ratingMin: "",
+    media: "",            // E0: фильтр по типу дорожки ('audio'|'video'|'')
     query: "",
     pages: {},            // номер страницы -> строки
     total: 0,
@@ -2202,6 +2203,7 @@
   var LIST_COLS = [
     { key: "check", label: "", w: [26, 26] },
     { key: "status", label: "Статус", w: [116, 104], sortable: "status" },
+    { key: "media", label: "Тип", w: [70, 58], sortable: "media_kind" },
     { key: "title", label: "Название",
       w: ["minmax(180px, 1fr)", "minmax(140px, 1fr)"], sortable: "title" },
     { key: "channel", label: "Канал", w: [190, 130], sortable: "channel" },
@@ -2338,6 +2340,7 @@
           ? { col: state.sort.col, dir: state.sort.dir } : null,
         tag: state.tag || "",
         exclude_adult: true,      // P2: взрослое - только на своей вкладке
+        media_kind: state.media || "",   // E0: «только аудио/видео» из toolbar
         offset: page * PAGE, limit: PAGE
       }).then(function (res) {
         if (res) {
@@ -2478,6 +2481,11 @@
         ' aria-label="Выбрать строку"></span>',
       status: '<span class="cell status" data-s="' + esc(row.status) + '">' +
         esc(row.status_label || statusLabel(row.status)) + "</span>",
+      // E0: тип дорожки из строки выборки (media_label от бэка); фолбэк
+      // для моков и старых выборок - по media_kind.
+      media: '<span class="cell c-media">' +
+        esc(row.media_label || (row.media_kind === "audio" ? "аудио" : "видео")) +
+        "</span>",
       title: '<span class="cell c-title" title="' + esc(row.title) + '">' +
         esc(row.title || "—") + stars + watched + "</span>",
       channel: '<span class="cell c-channel" title="' + esc(row.channel) + '">' +
@@ -2548,6 +2556,8 @@
       '<div class="tile-sub" title="' + esc(row.channel) + '">' +
         esc(row.channel || "") +
         (row.duration_s ? " · " + humanDuration(row.duration_s) : "") +
+        // E0: метка типа для аудио-плитки (обложка из тега уже показана).
+        (row.media_kind === "audio" ? " · аудио" : "") +
       "</div>" +
       "</div>";
   }
@@ -2572,6 +2582,8 @@
         kv.push("<dt>" + esc(label) + "</dt><dd>" + esc(value) + "</dd>");
       };
       add("Статус", data.status_label || statusLabel(data.status));
+      // E0: тип дорожки - из строки (media_kind миграции v12).
+      add("Тип", data.media_kind === "audio" ? "аудио" : "видео");
       add("Ключ", data.key);
       add("Канал", data.channel);
       add("Опубликовано", shortDate(data.uploaded_at));
@@ -2600,6 +2612,39 @@
           prov += " ⚠ носитель уже приносил несовпадения: " + m.peer_offenses;
         }
         add("Провенанс mesh", prov);
+      }
+      // E0: метки АУДИО-файла из files.format_json (читаются из самого
+      // файла, не площадки). Ничего не выдумываем: без ffprobe - честная
+      // «не получена» с причиной; без обложки в теге - тоже «не получена».
+      var audioInfo = audioFileInfo(data);
+      if (audioInfo) {
+        var a = audioInfo.meta;
+        add("Длительность файла",
+          a.duration_s ? humanDuration(a.duration_s) : "не получена");
+        if (a.probe !== "ffprobe") {
+          add("Метки файла", a.probe_note || "не получены");
+        } else {
+          if (a.bitrate_bps) {
+            add("Битрейт", Math.round(a.bitrate_bps / 1000) + " кбит/с");
+          }
+          if (a.sample_rate_hz) {
+            add("Частота", (Math.round(a.sample_rate_hz / 100) / 10) + " кГц");
+          }
+          if (a.channels) add("Каналы", String(a.channels));
+          if (a.codec) add("Кодекс", a.codec);
+        }
+        if (a.artist) add("Исполнитель", a.artist);
+        if (a.album) add("Альбом", a.album);
+        if (a.genre) add("Жанр", a.genre);
+        if (a.date) add("Дата релиза", a.date);
+        if (a.track) add("Номер трека", a.track);
+        if (a.tags_scheme) add("Тег читан из", a.tags_scheme);
+        var coverFile = (data.files || []).filter(function (f) {
+          return f.kind === "thumbnail" && !f.missing;
+        })[0];
+        add("Обложка", coverFile
+          ? "из тега файла"
+          : "не получена (в теге файла её нет)");
       }
       add("Происхождение", data.origin);
       add("URL", data.webpage_url);
@@ -2695,6 +2740,23 @@
       try {
         var meta = JSON.parse(f.format_json);
         if (meta && meta.source === "mesh") {
+          found = { file: f, meta: meta };
+        }
+      } catch (e) { /* чужой формат - не наш случай */ }
+    });
+    return found;
+  }
+
+  function audioFileInfo(data) {
+    // E0: метки аудио-файла в files[].format_json (media="audio" - ключ
+    // модуля app.audio). Тот же путь, что meshFileInfo: формат читаем
+    // только свой, чужой JSON молча пропускаем.
+    var found = null;
+    (data.files || []).forEach(function (f) {
+      if (found || f.kind !== "video" || !f.format_json) return;
+      try {
+        var meta = JSON.parse(f.format_json);
+        if (meta && meta.media === "audio") {
           found = { file: f, meta: meta };
         }
       } catch (e) { /* чужой формат - не наш случай */ }
@@ -4965,6 +5027,13 @@
       renderGrid(true);
     });
 
+    // E0: тип дорожки (аудио/видео) - фильтр toolbar-а; бэк ветит его с
+    // настройкой «Показывать аудио» (явный выбор важнее настройки).
+    $("media-filter").addEventListener("change", function () {
+      state.media = $("media-filter").value;
+      renderGrid(true);
+    });
+
     $("grid-body").addEventListener("scroll", function () {
       // Шапка лежит ВНЕ скроллера тела: сдвигаем её вручную, иначе при
       // горизонтальной прокрутке заголовки разъезжаются с колонками.
@@ -5532,33 +5601,47 @@
         channel: "Автор А", size: 240000000, user_rating: 5, has_thumb: true,
         view_count: 182000, like_count: 4310, comment_count: 152,
         synced_at: "2026-10-10T21:04:00",
-        watched_at: "2026-01-02T10:00:00" },
+        watched_at: "2026-01-02T10:00:00",
+        media_kind: "video", media_label: "видео" },
       { id: 2, key: "youtube:ccc333ddd44", title: "Утренний туман", status: "known",
         status_label: "в индексе", duration_s: 130, uploaded_at: "2024-11-02",
         channel: "Автор Б", size: 0, user_rating: 0, watched_at: null,
         view_count: 9400, like_count: 210, comment_count: 7,
-        synced_at: "2026-10-10T21:04:00", has_thumb: false },
+        synced_at: "2026-10-10T21:04:00", has_thumb: false,
+        media_kind: "video", media_label: "видео" },
       { id: 3, key: "youtube:eee555fff66", title: "Долгая дорога", status: "downloaded",
         status_label: "скачано", duration_s: 540, uploaded_at: "2023-06-30",
         channel: "Автор А", size: 272000000, user_rating: 3, watched_at: null,
         view_count: 45000, like_count: 980, comment_count: 44,
-        synced_at: "2026-09-30T08:12:00", has_thumb: true },
+        synced_at: "2026-09-30T08:12:00", has_thumb: true,
+        media_kind: "video", media_label: "видео" },
       { id: 4, key: "local:abc", title: "Файл без личности", status: "downloaded",
         status_label: "скачано", duration_s: 61, uploaded_at: null,
         channel: null, size: 0, user_rating: 0, watched_at: null,
         view_count: null, like_count: null, comment_count: null,
-        synced_at: null, has_thumb: false },
+        synced_at: null, has_thumb: false,
+        media_kind: "video", media_label: "видео" },
       { id: 5, key: "youtube:ggg777hhh88", title: "Снятый клип", status: "missing",
         status_label: "файл пропал", duration_s: 200, uploaded_at: "2022-02-02",
         channel: "Автор В", size: 0, user_rating: 0, watched_at: null,
         view_count: 1500000, like_count: null, comment_count: 89,
-        synced_at: null, has_thumb: false },
+        synced_at: null, has_thumb: false,
+        media_kind: "video", media_label: "видео" },
       { id: 6, key: "youtube:hhh111iii22", title: "Архивное видео",
         status: "unavailable", status_label: "удалено на площадке",
         duration_s: 300, uploaded_at: "2021-05-05", channel: "Автор А",
         size: 99000000, user_rating: 0, watched_at: null,
         view_count: 42000, like_count: 900, comment_count: 55,
-        synced_at: "2026-10-10T21:04:00", has_thumb: false }
+        synced_at: "2026-10-10T21:04:00", has_thumb: false,
+        media_kind: "video", media_label: "видео" },
+      // E0: аудио-строка (mp3 со стоящим на диске файлом): обложка из тега,
+      // метки ffprobe получены; карточка показывает битрейт/частоту/каналы.
+      { id: 7, key: "local:m4a-def", title: "Джазовый мик", status: "downloaded",
+        status_label: "скачано", duration_s: 254, uploaded_at: null,
+        channel: null, size: 8200000, user_rating: 0, watched_at: null,
+        view_count: null, like_count: null, comment_count: null,
+        synced_at: null, has_thumb: true,
+        media_kind: "audio", media_label: "аудио" }
     ];
     // M17: коллекции-папки в превью (id строк из rows выше): панель папки и
     // массовые операции должны быть проверяемы без бэка.
@@ -5588,6 +5671,7 @@
       sync_depth: "full",
       col_views: true, col_likes: true, col_comments: true, col_sync: true,
       col_tags: true,
+      show_audio: true,          // E0: по умолчанию включена
       sort_col: "", sort_dir: "desc",
       tabs_hidden: "",
       mesh_enabled: false, mesh_peers: "", mesh_port: 1000, mesh_upnp: true,
@@ -5806,6 +5890,13 @@
         label: "Колонка «Теги»",
         hint: "Жанры/теги площадки у строки (для PH и других вторых " +
               "площадок); локальные пометки - в карточке видео.",
+        default: true },
+      { key: "show_audio", type: "bool", section: "Библиотека",
+        label: "Показывать аудио",
+        hint: "Аудио-файлы (mp3, m4a, aac, opus, ogg, flac, wav) в " +
+              "библиотеке наравне с видео. Выключите - в общих списках " +
+              "останутся только видео (фильтр «только аудио» работает и " +
+              "при выключенной настройке). Очередь аудио не качает сама.",
         default: true },
       { key: "_refresh_meta", type: "action", section: "Библиотека",
         label: "Метаданные с площадки",
@@ -6071,6 +6162,13 @@
           if (req.status && row.status !== req.status) return false;
           if (req.rating_min && (row.user_rating || 0) < Number(req.rating_min)) return false;
           if (req.query && row.title.toLowerCase().indexOf(req.query.toLowerCase()) < 0) return false;
+          // E0: явный фильтр типа и настройка «Показывать аудио» - как в бэке.
+          var kind = req.media_kind || "";
+          if (kind === "audio" || kind === "video") {
+            if (row.media_kind !== kind) return false;
+          } else if (req.exclude_audio && row.media_kind === "audio") {
+            return false;
+          }
           return true;
         });
         // Сортировка как в бэке: белый список колонок, пустые - последними.
@@ -6079,7 +6177,8 @@
         var access = { title: "title", channel: "channel", duration: "duration_s",
                        date: "uploaded_at", size: "size", views: "view_count",
                        likes: "like_count", comments: "comment_count",
-                       sync: "synced_at", status: "status" };
+                       sync: "synced_at", status: "status",
+                       media_kind: "media_kind" };
         if (sortKey && access[sortKey]) {
           var field = access[sortKey];
           var sign = order.dir === "asc" ? 1 : -1;
@@ -6103,6 +6202,27 @@
       },
       get_video: function (id) {
         var row = rows.filter(function (r) { return r.id === id; })[0] || rows[0];
+        // E0: карточка аудио-строки - метки файла из format_json (как
+        // пишет app.audio), карточка показывает длительность/битрейт/частоту.
+        if (row.media_kind === "audio") {
+          return Promise.resolve(Object.assign({}, row, {
+            origin: "scan",
+            webpage_url: null,
+            files: [
+              { kind: "video", size: 8200000, missing: 0,
+                path: "D:\\видео\\музыка\\Джазовый мик.mp3",
+                format_json: JSON.stringify({
+                  media: "audio", format: ".mp3", probe: "ffprobe",
+                  duration_s: 254.3, bitrate_bps: 320000,
+                  sample_rate_hz: 44100, channels: 2, codec: "mp3",
+                  artist: "Исполнитель превью", album: "Альбом превью",
+                  tags_scheme: "id3v2", obtained_at: "2026-10-28T12:00:00" }) },
+              { kind: "thumbnail", size: 42000, missing: 0,
+                path: "C:\\Users\\...\\audio-covers\\deadbeef.jpg" }
+            ],
+            raw: { preview: true, id: row.key }
+          }));
+        }
         return Promise.resolve(Object.assign({}, row, {
           origin: "preview",
           webpage_url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",

@@ -112,14 +112,15 @@ class TagsCase(unittest.TestCase):
         # без tags - None (связи не трогаем)
         self.assertIsNone(normalize_video({"id": "ph9"})["platform_tags"])
 
-    def test_migrated_version_is_10(self):
+    def test_migrated_version_current(self):
         path = Path(self.dir.name) / "v10.db"
         db_mod.Database(path).close()
         conn = db_mod.Database(path)
         self.addCleanup(conn.close)
         version = int(conn.conn.execute(
             "PRAGMA user_version").fetchone()[0])
-        self.assertEqual(version, 11)
+        # Версия считает по списку миграций (v12 - тип дорожки added).
+        self.assertEqual(version, len(db_mod.MIGRATIONS))
         tables = {r["name"] for r in conn.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertIn("tags", tables)
