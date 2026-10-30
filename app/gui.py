@@ -28,6 +28,8 @@ from . import ffmpeg_installer as ffmpeg_mod
 from . import google_auth
 from . import legal as legal_mod
 from . import catalog
+from . import data_api
+from . import oauth
 from . import platforms as platforms_mod
 from . import repack as repack_mod
 from . import schedule as schedule_mod
@@ -50,7 +52,7 @@ from .db import SYNC_MODES, Database
 from .metadata import normalize_video, video_url
 from .paths import log_path, profile_dir
 from .queue import DownloadWorker
-from .util import human_size, now_iso
+from .util import clean_text, human_size, now_iso
 
 MAX_LOG = 2000          # строк в кольцевом буфере памяти
 MAX_LOG_BYTES = 1_000_000   # ротация файла журнала: больше - обрезаем
@@ -4323,6 +4325,93 @@ class Api:
                                   else "Аккаунт забыт (копии и так не было)")
         self._log(f"Аккаунт Google забыт: {account_id}")
         return {"ok": True, "removed": bool(result.get("removed"))}
+
+    # ------------------------------------------------------------------ #
+    #  OAuth (installed app + PKCE) и метаданные Data API (этап G2)
+    # ------------------------------------------------------------------ #
+
+    def _oauth_state(self) -> dict:
+        """Состояние OAuth-цикла: lazily - чтобы не править __init__."""
+        state = getattr(self, "_oauth", None)
+        if state is None:
+            state = {"phase": "idle", "url": "", "error": None, "reason": ""}
+            self._oauth = state
+        return state
+
+    def oauth_start(self, request=None) -> dict:
+        """Начать OAuth-вход (installed app + PKCE + loopback 127.0.0.1).
+        client_id - публичный из настройки «OAuth client_id» (или из request),
+        client_secret нет нигде. Окно не ждёт: цикл идёт в своём потоке,
+        отказ виден в oauth_status и в журнале."""
+        cfg = self._current_settings()
+        client_id = str((request or {}).get("client_id")
+                        or cfg.get("oauth_client_id") or "").strip()
+        if not client_id:
+            return {"error": "Не задано OAuth client_id: настройка "
+                             "«OAuth client_id» (публичный client_id "
+                             "desktop-приложения)"}
+        state = self._oauth_state()
+        if state.get("phase") in ("waiting", "exchanging"):
+            return {"error": "Вход уже идёт: дождитесь окончания или "
+                             "«Забыть вход»"}
+        state.update({"phase": "waiting", "url": "", "error": None,
+                      "reason": "Запуск OAuth-цикла"})
+        thread = threading.Thread(target=self._oauth_worker,
+                                  args=(client_id, state), daemon=True,
+                                  name="omnistash-oauth")
+        with self._lock:
+            self._oauth_thread = thread
+        thread.start()
+        return {"ok": True}
+
+    def _oauth_worker(self, client_id: str, state: dict) -> None:
+        """run_flow не бросает наружу: отказ - {"ok": False} с подсказкой."""
+        result = oauth.run_flow(client_id, state=state, log=self._log)
+        if result.get("ok"):
+            self._log("OAuth: вход выполнен, refresh-токен сохранён "
+                      "в профиле (DPAPI)")
+        else:
+            self._log(f"OAuth: вход не выполнен - {result.get('error')}")
+
+    def oauth_status(self) -> dict:
+        """Состояние OAuth для UI: фаза цикла + configured/signed_in из
+        oauth.status (значения токенов и client_id не возвращаются)."""
+        state = dict(self._oauth_state())
+        info = oauth.status(self._current_settings())
+        return {"phase": state.get("phase"), "url": state.get("url") or "",
+                "reason": state.get("reason") or "",
+                "error": state.get("error"), **info}
+
+    def oauth_forget(self) -> dict:
+        """Забыть OAuth-вход: удалить refresh-токен из профиля."""
+        result = oauth.forget()
+        state = self._oauth_state()
+        state.update({"phase": "idle", "error": None, "reason": "Вход забыт"})
+        self._log("OAuth: вход забыт (сохранённые токены удалены из профиля)")
+        return {"ok": True, "removed": bool(result.get("removed"))}
+
+    def data_api_status(self) -> dict:
+        """Состояние Data API: флаги наличия ключа/входа, значения молчат."""
+        return data_api.status(self._current_settings())
+
+    def data_api_meta(self, request=None) -> dict:
+        """Метаданные одиночного видео: Data API (если включён и настроен),
+        после отказа/не настройки - обычный скрейп. Ничего не пишет в базу:
+        честный dict с источником метаданных и причиной отката."""
+        url = str((request or {}).get("url") or "").strip()
+        if not url:
+            return {"error": "Не указана ссылка видео"}
+        cfg = self._current_settings()
+        try:
+            result = data_api.meta(url, cfg, log=self._log)
+        except sources.FetchError as exc:
+            return {"error": clean_text(exc), "kind": exc.kind}
+        except Exception as exc:  # noqa: BLE001 - кривой ответ не роняет окно
+            return {"error": clean_text(exc), "kind": "network"}
+        return {"ok": True, "source": result["source"],
+                "video": result["video"],
+                "api_error": result.get("api_error"),
+                "api_kind": result.get("api_kind")}
 
     # ------------------------------------------------------------------ #
     #  Расписание
