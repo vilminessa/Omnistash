@@ -109,7 +109,7 @@ class TestPersistence(unittest.TestCase):
         sections = {f["section"] for f in fields}
         self.assertEqual(sections, {"Библиотека", "Загрузка", "Mesh",
                                     "Расписание", "Аккаунт Google",
-                                    "Внешний вид"})
+                                    "Метаданные API", "Внешний вид"})
 
     def test_every_field_has_label(self):
         for spec in settings_schema.FIELDS:
