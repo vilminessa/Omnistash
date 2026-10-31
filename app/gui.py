@@ -26,6 +26,7 @@ from . import __version__, indexer, migrate as migrate_mod, repo, settings
 from . import downloader as downloader_mod
 from . import ffmpeg_installer as ffmpeg_mod
 from . import google_auth
+from . import i18n as i18n_mod
 from . import legal as legal_mod
 from . import catalog
 from . import data_api
@@ -35,6 +36,7 @@ from . import repack as repack_mod
 from . import schedule as schedule_mod
 from . import settings_schema, sources
 from . import storages as storages_mod
+from . import themes as themes_mod
 from . import wormhole as wormhole_mod
 from . import verify as verify_mod
 from .mesh import dht as mesh_dht
@@ -3571,6 +3573,179 @@ class Api:
             self._log("Предупреждение о передаче принято: файлы уходят "
                       "другим лицам - только в рамках ваших прав")
         return {"ok": True, **data}
+
+    # ------------------------------------------------------------------ #
+    #  M15: темы/шрифт, второй язык и вкладка взрослой площадки
+    # ------------------------------------------------------------------ #
+
+    def _ui_language(self) -> str:
+        """Язык интерфейса из настроек: битое значение -> русский (app/i18n)."""
+        return i18n_mod.normalize(self._current_settings().get("language"))
+
+    def theme_list(self, request=None) -> dict:
+        """Темы и шрифт для окна и карточки: реестр из app/themes.py.
+
+        current - годная тема (битое значение настройки -> дефолт), vars -
+        её CSS-переменные (значения те же, что в ui_src/app.css: блок
+        body[data-theme="<id>") сверяет с реестром тест), font_px - базовый
+        размер с учётом множителя, row_h - высота строки списка (тот же
+        расчёт, что --row-h в CSS).
+        """
+        config = self._current_settings()
+        theme = themes_mod.safe_theme(config.get("theme"))
+        size = themes_mod.normalize_size(config.get("font_size"))
+        scale = themes_mod.normalize_scale(config.get("font_scale"))
+        return {"ok": True, "themes": themes_mod.themes(),
+                "theme_ids": list(themes_mod.ids()),
+                "current": theme["id"], "dark": bool(theme["dark"]),
+                "vars": dict(theme["vars"]),
+                "readable": themes_mod.readable(theme["id"]),
+                "problems": themes_mod.check(theme),
+                "font_family": themes_mod.normalize_font(
+                    config.get("font_family")),
+                "font_stack": themes_mod.font_stack(
+                    config.get("font_family")),
+                "font_size": size, "font_scale": scale,
+                "font_px": themes_mod.font_px(size, scale),
+                "row_h": themes_mod.row_px(size, scale),
+                "language": self._ui_language()}
+
+    def theme_set(self, value=None) -> dict:
+        """Сменить тему (значение из карточки/списка тем).
+
+        Битое значение возвращается дефолтной темой (themes.normalize): окно
+        не остаётся на «серой палитре». Палитра - CSS-переменные, новых
+        зависимостей и скачивания шрифтов здесь нет.
+        """
+        theme_id = themes_mod.normalize(
+            value.get("theme") if isinstance(value, dict) else value)
+        saved = self.save_setting({"key": "theme", "value": theme_id})
+        if saved.get("error"):
+            return saved
+        theme = themes_mod.safe_theme(theme_id)
+        return {"ok": True, "theme": theme["id"], "dark": bool(theme["dark"]),
+                "vars": dict(theme["vars"]),
+                "readable": themes_mod.readable(theme["id"]),
+                "problems": themes_mod.check(theme), **saved}
+
+    def font_set(self, request=None) -> dict:
+        """Размер, множитель и семейство шрифта - одним вызовом.
+
+        Значения проверяются границами поля (themes.normalize_*): битое
+        значение возвращается дефолтом, подпись окна не «ломается».
+        Стеки - только системные: скачивания шрифтов нет.
+        """
+        request = request if isinstance(request, dict) else {}
+        for key, normalize in (("font_size", themes_mod.normalize_size),
+                               ("font_scale", themes_mod.normalize_scale),
+                               ("font_family", themes_mod.normalize_font)):
+            if key in request:
+                saved = self.save_setting(
+                    {"key": key, "value": normalize(request.get(key))})
+                if saved.get("error"):
+                    return saved
+        config = self._current_settings()
+        size = themes_mod.normalize_size(config.get("font_size"))
+        scale = themes_mod.normalize_scale(config.get("font_scale"))
+        with self._lock:
+            rev = self._settings_rev
+        return {"ok": True,
+                "font_size": size, "font_scale": scale,
+                "font_family": themes_mod.normalize_font(
+                    config.get("font_family")),
+                "font_stack": themes_mod.font_stack(
+                    config.get("font_family")),
+                "font_px": themes_mod.font_px(size, scale),
+                "row_h": themes_mod.row_px(size, scale),
+                "settings": settings.as_public(config),
+                "settings_rev": rev}
+
+    def language_list(self, request=None) -> dict:
+        """Доступные языки интерфейса и текущий (app/i18n.py)."""
+        return {"ok": True, "languages": i18n_mod.languages(),
+                "language": self._ui_language()}
+
+    def language_set(self, value=None) -> dict:
+        """Сменить язык интерфейса: подписи приходят из того же словаря.
+
+        Русский - по умолчанию; непокрытые словарём подписи остаются
+        русскими (UI держит русскую строку как fallback).
+        """
+        language = i18n_mod.normalize(
+            value.get("language") if isinstance(value, dict) else value)
+        saved = self.save_setting({"key": "language", "value": language})
+        if saved.get("error"):
+            return saved
+        return {"ok": True, "language": language, **self._ui_maps(language),
+                **saved}
+
+    def ui_texts(self, request=None) -> dict:
+        """Подписи текущего языка, перевод полей карточки и разделы.
+
+        Для русского labels и sections пустые: карточка рисуется подписями
+        из settings_schema (русскими), а UI подставляет свои русские
+        строки из разметки - ничего не «переписывается» на русском.
+        """
+        language = self._ui_language()
+        return {"ok": True, "language": language, **self._ui_maps(language)}
+
+    def _ui_maps(self, language: str) -> dict:
+        """Подписи, перевод полей/разделов и нейтральное имя площадки."""
+        return {"texts": i18n_mod.ui_texts(language),
+                "labels": i18n_mod.schema_labels(language),
+                "sections": i18n_mod.sections(language),
+                "adult_site": i18n_mod.adult_site_name(language)}
+
+    def adult_tab(self, request=None) -> dict:
+        """Доступ к вкладке взрослой площадки (M15) - только для UI.
+
+        Вкладка видна ТОЛЬКО при обоих условиях: факт «мне есть 18»
+        (app/legal.py, фиксируется датой согласия) И включённый флаг
+        настройки. Флаг сам по себе доступа не даёт. Здесь нет ни имени
+        площадки, ни её доменов: подпись нейтральная. Гейты 18+
+        (add_start, массовые операции, каталог площадки) от этого не
+        меняются - метод только сообщает, что рисовать в вкладках.
+        """
+        language = self._ui_language()
+        confirmed = bool(legal_mod.state().get("adult_ok"))
+        shown = bool(self._current_settings().get("show_adult_tab"))
+        return {"ok": True, "confirmed": confirmed, "shown": shown,
+                "visible": bool(confirmed and shown),
+                "label": i18n_mod.adult_site_name(language)}
+
+    def adult_tab_show(self, request=None) -> dict:
+        """Разрешить вкладку взрослой площадки (флаг настройки).
+
+        Без подтверждения 18+ - отказ: флаг не обходит и не ослабляет
+        возрастные гейты. Подтверждение остаётся фактом человека
+        (app/legal.py), а не «молчаливой» настройкой.
+        """
+        confirmed = bool(legal_mod.state().get("adult_ok"))
+        if not confirmed:
+            self._log("Вкладка взрослой площадки не открыта: подтверждения "
+                      "18+ нет")
+            return {"ok": False, "error": "Нужно подтверждение 18+",
+                    "confirmed": False, "visible": False}
+        saved = self.save_setting({"key": "show_adult_tab", "value": True})
+        if saved.get("error"):
+            return saved
+        return {"ok": True, "confirmed": True, "shown": True,
+                "visible": True,
+                "label": i18n_mod.adult_site_name(self._ui_language()),
+                **saved}
+
+    def adult_tab_hide(self, request=None) -> dict:
+        """Скрыть вкладку взрослой площадки (флаг выключается).
+
+        Подтверждение 18+ при этом НЕ снимается: это про видимость
+        вкладки, а не про согласие; возрастные гейты остаются.
+        """
+        saved = self.save_setting({"key": "show_adult_tab", "value": False})
+        if saved.get("error"):
+            return saved
+        return {"ok": True, "confirmed": bool(
+            legal_mod.state().get("adult_ok")), "shown": False,
+            "visible": False, **saved}
 
     # ------------------------------------------------------------------ #
     #  Этап 1: диагностика устройства (doctor, 1.5)
