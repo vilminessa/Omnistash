@@ -328,6 +328,34 @@
     <div class="toolbar" id="ph-tags" aria-label="Фильтр по тегам"></div>
     <div class="toolbar" id="cat-tags" aria-label="Фильтр каталога: исполнители и теги карточек" hidden></div>
     <div class="toolbar" id="cat-channels" aria-label="Каналы каталога" hidden></div>
+
+    <!-- Площадка в отдельном нативном окне (этап D): встроенный <iframe>
+     страницу площадки не пускает (X-Frame-Options/CSP), поэтому окно
+     открывается рядом с приложением, а панель показывает захваченный адрес. -->
+    <div class="browser-panel" id="browser-panel">
+      <div class="browser-line">
+        <button class="btn primary" id="browser-open-btn"
+                title="Открыть площадку в отдельном окне рядом с Omnistash">Открыть площадку</button>
+        <button class="btn ghost" id="browser-system-btn" hidden
+                title="Открыть ссылку в системном браузере (webview-окно не поднялось)">В системном браузере</button>
+        <button class="btn ghost" id="browser-pick-btn" hidden
+                title="Снять адрес со страницы окна (location.href)">Забрать адрес</button>
+        <button class="btn ghost" id="browser-close-btn" hidden>Закрыть окно</button>
+        <input type="text" id="browser-url" autocomplete="off"
+               placeholder="ссылка площадки или адрес из окна…"
+               title="Ссылка для окна или адрес, вставленный из браузера">
+      </div>
+      <div class="browser-address" id="browser-address" hidden></div>
+      <div class="browser-line" id="browser-actions" hidden>
+        <button class="btn primary" id="browser-download-btn"
+                title="Одиночное видео по адресу: пишется и встаёт в очередь сразу">Скачать это видео</button>
+        <button class="btn ghost" id="browser-source-btn"
+                title="Плейлист или канал по адресу: план в диалоге «Добавить источник»">Как источник</button>
+        <span class="muted" id="browser-pending"></span>
+      </div>
+      <div class="browser-hint muted" id="browser-hint"></div>
+    </div>
+
     <div id="ph-library-wrap">
       <div class="table-wrap">
         <table class="table">

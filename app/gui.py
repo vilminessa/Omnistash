@@ -21,8 +21,10 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import urlparse
 
 from . import __version__, indexer, migrate as migrate_mod, repo, settings
+from . import browser as browser_mod
 from . import downloader as downloader_mod
 from . import ffmpeg_installer as ffmpeg_mod
 from . import google_auth
@@ -2860,6 +2862,122 @@ class Api:
         return {"ok": True, "path": path}
 
     # ------------------------------------------------------------------ #
+    #  Браузер площадки (D): отдельное нативное окно вместо встроенного iframe
+    #
+    #  Честная рамка: страницы площадок отдают X-Frame-Options/CSP, поэтому
+    #  их страницу встроенный <iframe> не загрузит - вместо него второе
+    #  нативное webview-окно рядом с главным (app.browser), а панель вкладки
+    #  площадки показывает захваченный адрес и даёт кнопки «Скачать / Как
+    #  источник». Бкенд не поднялся - фоллбэк в системный браузер.
+    # ------------------------------------------------------------------ #
+
+    def _browser_target(self, request=None) -> dict:
+        """Что открывать: ссылка человека или адрес площадки из реестра.
+
+        Возрастная площадка под гейтом 18+ (P1/PH5): без явного «мне18+»
+        окно не открывается - та же рамка, что в add_start, и имя площадки
+        в тексте не звучит.
+        """
+        request = request or {}
+        platform_id = str(request.get("platform") or "").strip()
+        url = str(request.get("url") or "").strip()
+        if not url:
+            url = browser_mod.home_url(platform_id) or ""
+        text = browser_mod.clean_url(url)
+        if not text:
+            return {"error": "Площадка не названа: выберите вкладку площадки "
+                             "или вставьте ссылку"}
+        item = (platforms_mod.by_host(urlparse(text).netloc)
+                or platforms_mod.by_id(platform_id))
+        if item and item.get("adult") and not legal_mod.state().get("adult_ok"):
+            return {"adult_confirm": True,
+                    "error": "Возрастная площадка: подтвердите, что вам есть "
+                             "18 лет и вы несёте ответственность за "
+                             "скачиваемое"}
+        return {"ok": True, "url": text, "label": (item or {}).get("label") or ""}
+
+    def browser_open(self, request=None) -> dict:
+        """Открыть площадку в отдельном нативном окне рядом с главным."""
+        target = self._browser_target(request)
+        if target.get("error"):
+            self._log("Окно площадки не открыто: " + target["error"])
+            return target
+        result = browser_mod.open_window(target["url"], label=target["label"])
+        if result.get("error"):
+            self._log(f"Окно площадки не открылось: {result['error']}")
+            return result
+        if result.get("mode") == "system":
+            self._log(f"Площадка открыта в системном браузере: "
+                     f"{result.get('reason') or ''}")
+        else:
+            self._log(f"Окно площадки открыто: {target['url']}")
+        return result
+
+    def browser_open_system_browser(self, request=None) -> dict:
+        """Явный фоллбэк: открыть ссылку в системном браузере (без окна)."""
+        target = self._browser_target(request)
+        if target.get("error"):
+            self._log("Системный браузер не открыт: " + target["error"])
+            return target
+        result = browser_mod.open_system_browser(target["url"],
+                                                 label=target["label"])
+        if result.get("error"):
+            self._log(f"Системный браузер не открылся: {result['error']}")
+            return result
+        self._log(f"Ссылка открыта в системном браузере: {target['url']}")
+        return result
+
+    def browser_address(self, request=None) -> dict:
+        """«Забрать адрес»: текущий адрес страницы окна площадки.
+
+        Адрес берется у самой страницы (evaluate_js): бкенд, который не
+        ответил, - это «адрес не получен», а не выдуманный адрес.
+        """
+        window_id = str((request or {}).get("id") or "").strip() or None
+        result = browser_mod.address(window_id)
+        if result.get("error"):
+            self._log("Адрес не получен: " + result["error"])
+            return result
+        if result.get("address"):
+            self._log(f"Адрес площадки взят: {result['address']}")
+        else:
+            self._log("Адрес не получен: "
+                      + (result.get("note") or "окно не ответило"))
+        return result
+
+    def browser_close(self, request=None) -> dict:
+        """Закрыть окно площадки (последний захваченный адрес остаётся)."""
+        window_id = str((request or {}).get("id") or "").strip() or None
+        result = browser_mod.close(window_id)
+        if result.get("error"):
+            self._log("Окно площадки не закрылось: " + result["error"])
+            return result
+        self._log("Окно площадки закрыто")
+        return result
+
+    def browser_add_from_address(self, request=None) -> dict:
+        """Кнопки панели: «Скачать это видео» и «Как источник» по адресу из окна.
+
+        Воронка добавления одна - add_start: одиночное видео (auto) пишется
+        сразу, плейлист/канал показывают диалог плана, гейт 18+ проверяется
+        там же (add_start возвращает adult_confirm).
+        """
+        request = dict(request or {})
+        url = str(request.get("url") or "").strip()
+        if not url:
+            return {"error": "Адрес не взят: «Забрать адрес» или вставьте его "
+                             "из браузера"}
+        if not browser_mod.clean_url(url):
+            return {"error": "Адрес не http/https: скачивать нечего"}
+        request["url"] = url
+        result = self.add_start(request)
+        if result.get("error"):
+            self._log(f"Добавление по адресу не вышло: {result['error']}")
+        elif result.get("ok"):
+            self._log(f"Добавление по адресу из окна площадки: {url}")
+        return result
+
+    # ------------------------------------------------------------------ #
     #  Проверка целостности (сверка файлов с хешем в индексе)
     # ------------------------------------------------------------------ #
 
@@ -4887,6 +5005,9 @@ class Api:
                 login_window.destroy()
             except Exception:  # noqa: BLE001 - окно могло закрыться само
                 pass
+        # Окна площадки закрываем вместе с приложением: иначе нативное окно
+        # осталось бы живым после выхода (и журнал не дописался бы).
+        browser_mod.close_all()
         self.dl.stop()
         self.sched.stop()
         for thread in (self._scan_thread, self._add_thread, self._sync_thread,
