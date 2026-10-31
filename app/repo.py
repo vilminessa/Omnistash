@@ -270,28 +270,54 @@ def collection_delete(conn: sqlite3.Connection, collection_id: int) -> None:
 
 def collection_add(conn: sqlite3.Connection, collection_id: int,
                    video_ids) -> int:
-    """Добавить строки (игнор дублей); возвращает число новых позиций."""
-    added = 0
+    """Добавить строки (игнор дублей); возвращает число новых позиций.
+
+    Позиция считается ОДНАЖДЕ до цикла: раньше на каждую строку шёл
+    подзапрос MAX(position), который перебирал всю папку по строке
+    (позиция не входит в индекс PRIMARY KEY). На группу из сотни строк
+    это сотни обращений к индексу на потоке API - окно ждёт ответа и
+    опрос в это время заблокирован. Дальше позиции идут списком от
+    одного базового значения.
+    """
+    cid = int(collection_id)
+    # Порядок входящий (не sorted): «добавить PH, потом YT» читается в папке
+    # в том же порядке - position присваивается по порядку запроса.
+    ids = _dedupe_ids(video_ids)
+    if not ids:
+        return 0
+    base = int(conn.execute(
+        "SELECT COALESCE(MAX(position), 0) + 1 FROM collection_items "
+        "WHERE collection_id=?", (cid,)).fetchone()[0])
     stamp = now_iso()
-    for vid in video_ids:
-        cursor = conn.execute(
+    added = 0
+    offset = 0
+    for chunk in _chunks(ids):
+        cursor = conn.executemany(
             "INSERT OR IGNORE INTO collection_items "
             "(collection_id, video_id, position, added_at) "
-            "VALUES (?,?,COALESCE((SELECT MAX(position)+1 FROM "
-            "collection_items WHERE collection_id=?),1),?)",
-            (int(collection_id), int(vid), int(collection_id), stamp))
+            "VALUES (?,?,?,?)",
+            [(cid, vid, base + offset + i, stamp)
+             for i, vid in enumerate(chunk)])
         added += int(cursor.rowcount)
+        offset += len(chunk)
     return added
 
 
 def collection_remove(conn: sqlite3.Connection, collection_id: int,
                       video_ids) -> int:
-    """Убрать строки из папки (сами строки не трогаем)."""
+    """Убрать строки из папки (сами строки не трогаем).
+
+    Одним удалением на чанк, а не по строке: дубли схлопываются здесь,
+    иначе «один id прислан три раза» считался бы тремя операциями.
+    """
+    cid = int(collection_id)
+    ids = _dedupe_ids(video_ids)
     removed = 0
-    for vid in video_ids:
+    for chunk in _chunks(ids):
+        marks = ",".join("?" * len(chunk))
         cursor = conn.execute(
-            "DELETE FROM collection_items WHERE collection_id=? "
-            "AND video_id=?", (int(collection_id), int(vid)))
+            f"DELETE FROM collection_items WHERE collection_id=? "
+            f"AND video_id IN ({marks})", [cid, *chunk])
         removed += int(cursor.rowcount)
     return removed
 
@@ -867,9 +893,21 @@ def stats(conn: sqlite3.Connection) -> dict:
     }
 
 
-def tree(conn: sqlite3.Connection) -> dict:
-    """Дерево «Пул / Каналы / Плейлисты» - виртуальные узлы над videos."""
-    pool = stats(conn)
+def tree(conn: sqlite3.Connection, *, pool: dict | None = None) -> dict:
+    """Дерево «Пул / Каналы / Плейлисты» - виртуальные узлы над videos.
+
+    pool можно передать: снимок окна считает stats сам и передаёт результат
+    сюда, иначе агрегатный проход по библиотеке делается дважды на каждый
+    тик опроса. Без переданного pool считаем сами (вызывающий из теста или
+    из mesh не обязан знать счётчики).
+
+    Плейлисты ограничены тем же лимитом, что каналы: без него список
+    плейлистов рос без границ и попадал в снимок целиком, а окно на каждый
+    тик сериализовало его целиком. count_all говорит честно, сколько
+    плейлистов всего - окно показывает «показаны первые N из M».
+    """
+    if pool is None:
+        pool = stats(conn)
     channels = [dict(row) for row in conn.execute(
         """SELECT c.id, c.title, c.remote_id,
                   COUNT(v.id) total,
@@ -889,8 +927,12 @@ def tree(conn: sqlite3.Connection) -> dict:
              LEFT JOIN playlist_items pi ON pi.playlist_id = p.id
              LEFT JOIN videos v ON v.id = pi.video_id
             GROUP BY p.id
-            ORDER BY p.title COLLATE NOCASE""")]
+            ORDER BY p.title COLLATE NOCASE
+            LIMIT 500""")]
+    all_playlists = int(conn.execute(
+        "SELECT COUNT(*) n FROM playlists").fetchone()["n"])
     return {"pool": pool, "channels": channels, "playlists": playlists,
+            "playlists_all": all_playlists,
             "collections": collection_list(conn)}
 
 
@@ -959,12 +1001,36 @@ def save_fields(conn, ids, fields: dict) -> int:
 BULK_LIMIT = 500  # страховка: одна операция не должна переписать всю библиотеку
 
 
+def _dedupe_ids(video_ids) -> list[int]:
+    """id из запроса -> список без дублей, ПОРЯДОК ВХОДЯЩИЙ.
+
+    Дубли схлопываются («один id прислан три раза» — одна строка, не три
+    работа), а порядок сохраняется: для папки («добавить PH, потом YT»)
+    порядок добавления — это порядок чтения. Нечисловые id получают свою
+    причину: сырой ValueError от int() («invalid literal for int()»)
+    выглядел бы в окне как «Не удалось выполнить: …».
+    """
+    out: list[int] = []
+    seen: set[int] = set()
+    for value in video_ids:
+        try:
+            vid = int(value)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректный список строк: id должны быть числами") \
+                from None
+        if vid <= 0 or vid in seen:
+            continue
+        seen.add(vid)
+        out.append(vid)
+    return out
+
+
 def _limit(video_ids) -> list[int]:
     """Лимит группы здесь же, а не только в окне: вызов мог прийти из mesh
     или из теста без проверки окна, и одна операция не должна переписывать
     всю библиотеку разом. Дубли схлопываются здесь же: «три раза один id»
     считается одной строкой, а не тремя работа."""
-    ids = sorted({int(v) for v in video_ids if int(v) > 0})
+    ids = _dedupe_ids(video_ids)
     if len(ids) > BULK_LIMIT:
         raise ValueError(f"Группа слишком большая: {len(ids)} строк, "
                          f"лимит {BULK_LIMIT} - разбейте на части")
@@ -986,6 +1052,7 @@ def _video_rows_by_id(conn, video_ids) -> dict[int, dict]:
         marks = ",".join("?" * len(chunk))
         for row in conn.execute(
             f"""SELECT v.id, v.title, v.status, v.platform, v.user_tags,
+                       v.media_kind,
                        (SELECT COUNT(*) FROM files f
                           WHERE f.video_id=v.id AND f.kind='video'
                             AND f.missing=0) AS have
@@ -1055,6 +1122,11 @@ def bulk_enqueue(conn, video_ids, storage_id: str | None = None) -> dict:
             reason = "качается сейчас"
         elif status == "unavailable":
             reason = "удалено на площадке"
+        elif rows[vid].get("media_kind") == "audio":
+            # enqueue() молча отсекает аудио-строку (загрузчик собирает
+            # видео), поэтому пропуск считается здесь и назван причиной:
+            # иначе сводка «N из M» выглядела бы с дырой.
+            reason = "аудио — качается только по явной команде"
         else:
             go.append(vid)
             continue
@@ -1154,11 +1226,26 @@ def bulk_delete_rows(conn, video_ids) -> dict:
     каскадом по FK - это записи об индексе, а не сами файлы. Скан
     (app.indexer) найдёт копии на диске заново, поэтому удаление строки
     ничего с диска не стирает и контент на носителе остаётся.
+
+    Одно исключение из «файлы остаются»: обложки, которые мы извлекли из
+    тега сами (кэш audio-covers, строка files kind='thumbnail'). Они
+    принадлежат индексу, а не библиотеке человека, и без уборки кэш рос бы
+    без границ: строки уходят, картинки остаются. Файлы пользователя
+    (видео, сайдкеры, обложки рядом с файлом) не трогаются.
     """
+    from . import audio          # локально: repo тянет audio только когда чистит кэш
     incoming = _limit(video_ids)
     rows = _video_rows_by_id(conn, incoming)
     ids = sorted(rows)
     removed = 0
+
+    covers: list[str] = []
+    for chunk in _chunks(ids):
+        marks = ",".join("?" * len(chunk))
+        for row in conn.execute(
+                f"SELECT path FROM files WHERE kind='thumbnail' "
+                f"AND video_id IN ({marks})", chunk):
+            covers.append(str(row["path"]))
 
     def write():
         nonlocal removed
@@ -1170,8 +1257,10 @@ def bulk_delete_rows(conn, video_ids) -> dict:
         return removed
 
     deleted = _transaction(conn, write)
+    cleaned = audio.drop_covers(covers) if covers else 0
     return {"removed": deleted,
-            "gone": len(incoming) - len(rows)}
+            "gone": len(incoming) - len(rows),
+            "covers_cleaned": cleaned}
 
 
 # Сортировка списка: ключ из запроса окна -> выражение SQL. Только эти

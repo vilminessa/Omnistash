@@ -79,6 +79,10 @@ def _probe_candidates() -> list[Path]:
 
 def find_ffprobe() -> str | None:
     """Путь к ffprobe (None - не установлен: метки будут «не получены»)."""
+    # «не установлен» тоже результат: без этой проверки каждый файл в скане
+    # заново перебирал PATH, кандидатов в профиле и импорт ffmpeg_installer.
+    if "none" in _PROBE_CACHE:
+        return None
     found = shutil.which("ffprobe")
     if found:
         exe = Path(found)
@@ -115,13 +119,16 @@ def _run(cmd: list[str], timeout: float = 15.0) -> subprocess.CompletedProcess:
                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
-def probe(path: str | Path) -> dict | None:
+def probe(path: str | Path, *, exe: str | None = None) -> dict | None:
     """Метки из ffprobe: {duration_s, bitrate_bps, sample_rate_hz, channels, codec}.
 
     None, когда читать нечем (нет ffprobe, файл битый, процесс не запустился).
     Никаких «примерных» значений: вызывающий пишет «не получена» с причиной.
+
+    exe - уже решённый путь к ffprobe. Вызывающий (audio_meta) решает его
+    один раз и передаёт сюда, иначе путь искался бы дважды на файл.
     """
-    exe = find_ffprobe()
+    exe = exe if exe is not None else find_ffprobe()
     if not exe:
         return None
     cmd = [exe, "-hide_banner", "-loglevel", "error", "-nostats",
@@ -241,9 +248,21 @@ def _id3v2(data: bytes) -> dict | None:
     size = _sync_safe(data[6:10])
     frames = data[10:10 + size]
     if version == 3 and (flags & 0x40):      # расширенный заголовок
-        if len(frames) < 6:
+        # Байт 4 - это флаги расширенного заголовка, а не размер. v2.3.0
+        # пишет размер в первых 4 байтах (не считая самих этих байтов),
+        # v2.3.1 - «EXH» + 4-байтный размер после него. Прежний приём
+        # frames[6 + frames[4]] сдвигал разбор на флаг: у файлов, размеченных
+        # старыми теггерами, кадры начинались не там, где надо, и теги с
+        # обложкой молча терялись (без ошибки).
+        if len(frames) < 7:
             return None
-        frames = frames[6 + frames[4]:]      # v2.3: свой размер в байтах
+        if frames[:3] == b"EXH":              # v2.3.1
+            extended = 3 + 4 + int.from_bytes(frames[3:7], "big")
+        else:                                # v2.3.0
+            extended = 4 + int.from_bytes(frames[:4], "big")
+        if extended >= len(frames):
+            return None
+        frames = frames[extended:]
     elif version == 4 and (flags & 0x08):
         ext_size = _sync_safe(frames[:4])
         frames = frames[4 + ext_size:]
@@ -644,17 +663,62 @@ def cover_dir() -> Path:
 
 
 def write_cover(path: str | Path, blob: bytes, mime: str) -> str | None:
-    """Обложку из тега -> файл кэша; возвращает путь (None - не записали)."""
+    """Обложку из тега -> файл кэша; возвращает путь (None - не записали).
+
+    Два факта, которые раньше молча портили кэш:
+      * перезапись на каждый переиндекс даже когда байты те же - лишняя
+        запись до COVER_MAX_BYTES на каждый скан;
+      * расширение берётся из mime, поэтому смена PNG -> JPEG оставляла
+        старый <digest>.png рядом с новым <digest>.jpg, и окно могло
+        показать stale-картинку.
+    Поэтому: пишем только когда содержимое изменилось, и одноимённые файлы
+    других расширений убираем.
+    """
     if not blob or len(blob) > COVER_MAX_BYTES:
         return None
     ext = COVER_MIME_EXT.get(str(mime or "").lower(), ".jpg")
     digest = hashlib.sha1(str(path).encode("utf-8", "surrogatepass")).hexdigest()[:16]
-    target = cover_dir() / f"{digest}{ext}"
+    folder = cover_dir()
+    target = folder / f"{digest}{ext}"
     try:
+        if target.exists() and target.read_bytes() == blob:
+            return str(target)          # содержимое то же - запись не нужна
         target.write_bytes(blob)
     except OSError:
         return None
+    # Соседи с другими расширениями того же digest: их mime мог измениться
+    # (PNG -> JPEG), и старая картинка осталась бы висеть в кэше.
+    for stale in folder.glob(f"{digest}.*"):
+        if stale != target:
+            try:
+                stale.unlink()
+            except OSError:
+                pass                    # чужой файл не должен валить скан
     return str(target)
+
+
+def drop_covers(paths) -> int:
+    """Убрать кэшированные обложки по путям строк (обложки из тега).
+
+    Только то, что лежит в нашем кэше audio-covers: файлы библиотеки
+    человека не трогаются. Вызывается при удалении строки из индекса -
+    иначе кэш рос бы без границ (строки уходят, картинки остаются).
+    """
+    folder = cover_dir()
+    removed = 0
+    for value in paths or []:
+        try:
+            candidate = Path(str(value))
+        except (TypeError, ValueError):
+            continue
+        if candidate.parent != folder or not candidate.is_file():
+            continue
+        try:
+            candidate.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 def audio_meta(path: str | Path, *, want_probe: bool = True,
@@ -671,11 +735,14 @@ def audio_meta(path: str | Path, *, want_probe: bool = True,
     """
     path = str(path)
     meta: dict = {"media": "audio", "format": Path(path).suffix.lower()}
-    probe_data = probe(path) if want_probe else None
+    # Один поиск ffprobe на файл: раньше путь резолвился внутри probe() и
+    # ещё раз здесь же (для «почему не получено»).
+    exe = find_ffprobe() if want_probe else None
+    probe_data = probe(path, exe=exe) if want_probe else None
     if probe_data is None:
         meta["probe"] = None
         meta["probe_note"] = ("ffprobe не установлен: длительность и битрейт "
-                              "не получены" if not find_ffprobe()
+                              "не получены" if not exe
                               else "ffprobe не прочитал файл")
     else:
         meta.update(probe_data)

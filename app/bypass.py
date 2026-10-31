@@ -47,6 +47,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -423,13 +424,20 @@ def _plain(ctx, kind, text) -> dict:
 
 
 def _cookies_browser(ctx, kind, text) -> dict | None:
-    """Следующий браузер рабочего порядка; повтор с теми же куками - None."""
+    """Следующий браузер рабочего порядка; повтор с теми же куками - None.
+
+    Брауер выталкивается только когда оверлей действительно returned: раньше
+    name.pop(0) шёл до проверки «куки уже подключены» / «этот браузер уже
+    в opts», и из рабочего порядка терялся браузер, который мог пригодиться
+    на следующей дороге.
+    """
     browsers = ctx.get("browsers") or []
     if not browsers:
         return None
-    name = browsers.pop(0)
+    name = browsers[0]
     if ctx.get("has_cookies") or ctx["opts"].get("cookiesfrombrowser") == (name,):
-        return None
+        return None                       # повтор бессмыслен - порядок не трогаем
+    browsers.pop(0)
     ctx["browser_used"] = name
     return {"cookiesfrombrowser": (name,)}
 
@@ -634,14 +642,43 @@ ROUTE_IDS = {route["id"]: route for route in ROUTES}
 #  Кэш выигравшей дороги (по площадке, с возрастом)
 # --------------------------------------------------------------------- #
 
-def read_winning(platform_id) -> str | None:
-    """Дорога, которая последней выкачала это у этой площадки (или None)."""
+# Кэш читается потоком очереди (победа дороги) и потоком окна («попробовать
+# другую дорогу»). Без блокировки это read-modify-write на одном файле:
+# один поток прочитал, другой записал, первый пишет результат своей read -
+# чужая площадка теряется. Заодно запись атомарная (tmp + replace): файл не
+# может быть пойман посреди записи.
+_CACHE_LOCK = threading.Lock()
+
+
+def _read_cache() -> dict:
     try:
         data = json.loads(bypass_cache_path().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(data, dict):
-        return None
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_cache(data: dict) -> bool:
+    path = bypass_cache_path()
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        try:
+            tmp.unlink()               # профиль забит: мусор не оставляем
+        except OSError:
+            pass
+        return False                   # кэш не критичен - загрузка не зависит от него
+
+
+def read_winning(platform_id) -> str | None:
+    """Дорога, которая последней выкачала это у этой площадки (или None)."""
+    with _CACHE_LOCK:
+        data = _read_cache()
     entry = data.get(str(platform_id or ""))
     if not isinstance(entry, dict):
         return None
@@ -656,37 +693,22 @@ def remember_winning(platform_id, route_id: str) -> None:
     """Запомнить выигравшую дорогу площадки («обычный запрос» не кэшируется)."""
     if route_id == "plain":
         return
-    try:
-        data = json.loads(bypass_cache_path().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        data = None
-    if not isinstance(data, dict):
-        data = {}
-    data[str(platform_id or "")] = {"route": str(route_id),
-                                    "checked": int(time.time())}
-    try:
-        bypass_cache_path().write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except OSError:
-        pass                       # профиль забит: кэш не критичен
+    with _CACHE_LOCK:
+        data = _read_cache()
+        data[str(platform_id or "")] = {"route": str(route_id),
+                                        "checked": int(time.time())}
+        _write_cache(data)
 
 
 def forget_winning(platform_id) -> dict:
     """Забыть выигравшую дорогу — «попробовать другую дорогу» (attempt_chain)."""
     platform_id = str(platform_id or "")
-    try:
-        data = json.loads(bypass_cache_path().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-    existed = platform_id in data
-    data.pop(platform_id, None)
-    try:
-        bypass_cache_path().write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except OSError:
-        return {"ok": False, "cleared": False}
+    with _CACHE_LOCK:
+        data = _read_cache()
+        existed = platform_id in data
+        data.pop(platform_id, None)
+        if not _write_cache(data):
+            return {"ok": False, "cleared": False}
     return {"ok": True, "cleared": existed}
 
 
