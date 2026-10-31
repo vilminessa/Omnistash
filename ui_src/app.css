@@ -995,6 +995,30 @@ body[data-theme="light"] .row { border-bottom-color: rgba(0, 0, 0, .05); }
 .cat-card.failed { opacity: 0.45; }
 .cat-card.failed .cat-thumb, .cat-card.failed .cat-title { cursor: default; }
 
+/* Панель площадки (этап D): окно рядом с приложением, захваченный адрес.
+   Встроенный <iframe> площадку не пускает (X-Frame-Options/CSP), поэтому
+   здесь только адрес, кнопки и подсказка. */
+.browser-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 12px 6px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.browser-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.browser-line input[type="text"] { flex: 1 1 300px; min-width: 200px; }
+.browser-address {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--info);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.browser-hint { font-size: 11.5px; max-width: 90%; }
+
 @media (max-width: 900px) {
   .tree { width: 180px; flex-basis: 180px; }
   /* Колонки списка на узком экране пересчитывает JS (applyListColumns):

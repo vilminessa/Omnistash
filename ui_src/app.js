@@ -233,6 +233,17 @@
         // Диалог плейлиста/канала освободил флоу - очередь карточек продолжает.
         setTimeout(catRunAdd, 0);
       }
+      // Адрес из окна площадки (этап D): ход и итог того же флоу в панели.
+      if (browserPending.url && flow) {
+        if (flow.phase === "idle" || flow.url !== browserPending.url) {
+          browserDrop(browserPending.url, "Добавление по адресу остановлено");
+        } else if (flow.phase === "done" || flow.phase === "error") {
+          browserFlowDone(flow);
+        } else {
+          browserPending.phase = flow.phase;   // fetching / confirm / committing
+          browserRender();
+        }
+      }
       renderAddFlow(flow);
     }
     if (changed("migrate", snap.migrate)) {
@@ -4817,6 +4828,199 @@
     });
   }
 
+  /* ------------------------------------------------------------------ *
+   *  Площадка в отдельном окне (этап D): панель вместо встроенного iframe
+   * ------------------------------------------------------------------ */
+
+  /* Площадки отдают X-Frame-Options/CSP, поэтому встроенный <iframe> их
+     страницу не загрузит: окно открывается нативным webview-окном рядом с
+     приложением (app.browser), а панель показывает захваченный адрес и
+     кнопки «Скачать это видео» и «Как источник». Бкенд не поднялся -
+     фоллбэк в системный браузер, адрес вставляется руками. */
+  var BROWSER_HINT = "Площадка открывается отдельным окном рядом с " +
+    "приложением: её страницу встроенный <iframe> не пускает " +
+    "(X-Frame-Options/CSP), поэтому Omnistash забирает адрес из окна и " +
+    "качает по нему.";
+
+  var browserState = { id: "", mode: "", url: "", label: "", address: "",
+                       note: "", fallback: false, open: false, windows: [] };
+  var browserPending = { url: "", kind: "", phase: "" };
+
+  function browserTarget() {
+    // Ссылка из поля приоритетнее вкладки площадки: человек мог вставить
+    // произвольную ссылку или адрес из системного браузера.
+    var typed = ($("browser-url").value || "").trim();
+    return typed ? { url: typed } : { platform: platState.platform };
+  }
+
+  function browserAddressValue() {
+    var typed = ($("browser-url").value || "").trim();
+    return typed || browserState.address || "";
+  }
+
+  function browserRender() {
+    var webviewOpen = browserState.open && browserState.mode === "webview";
+    $("browser-pick-btn").hidden = !webviewOpen;
+    $("browser-close-btn").hidden = !browserState.id;
+    // Кнопка системного браузера появляется только когда нативное окно
+    // не поднялось: иначе она лишняя (окно работает).
+    $("browser-system-btn").hidden = !browserState.fallback;
+    var address = browserState.address || "";
+    var line = $("browser-address");
+    line.hidden = !address && !browserState.note;
+    line.textContent = address ? ("адрес: " + address) : (browserState.note || "");
+    $("browser-hint").textContent = browserState.fallback
+      ? ("webview-окно не поднялось: " + browserState.note + " " + BROWSER_HINT)
+      : BROWSER_HINT;
+    $("browser-actions").hidden = !browserAddressValue();
+    var phases = {
+      fetching: "Индексация адреса…",
+      committing: "Записываю…",
+      confirm: "План готов - подтвердите в диалоге"
+    };
+    $("browser-pending").textContent = browserPending.url
+      ? (phases[browserPending.phase] || "") : "";
+    $("browser-url").placeholder = browserState.mode === "system"
+      ? "вставьте адрес из браузера…"
+      : "ссылка площадки или адрес из окна…";
+  }
+
+  function browserApply(result) {
+    if (!result || result.error) return;
+    var windows = result.windows || [];
+    browserState.windows = windows;
+    var record = windows.filter(function (w) {
+      return w.id === result.id;
+    })[0] || (browserState.id ? windows.filter(function (w) {
+      return w.id === browserState.id;
+    })[0] : null) || windows[0] || null;
+    browserState.id = (record || {}).id || browserState.id || "";
+    browserState.mode = (record || {}).mode || result.mode || "";
+    browserState.url = (record || {}).url || result.url || browserState.url;
+    browserState.label = (record || {}).label || browserState.label;
+    browserState.open = !!(record && record.open);
+    browserState.fallback = !!result.fallback || browserState.mode === "system";
+    browserState.note = (record || {}).note || result.note || "";
+    if ((record || {}).address) browserState.address = record.address;
+    if (result.address !== undefined) browserState.address = result.address;
+    if (result.note !== undefined && !result.address) browserState.note = result.note;
+    browserRender();
+  }
+
+  /* Общий ход для всех действий панели: adult_confirm (P1/PH5) - диалог
+     18+, затем повтор того же запроса под подтверждением. */
+  function browserStep(name, request) {
+    return call(name, request).then(function (res) {
+      if (!res) { toast("Omnistash не ответил", true); return null; }
+      if (res.adult_confirm) {
+        return legalDialog(
+          "Возрастной контент",
+          "Эта площадка содержит материалы для взрослых. Подтвердите, что вам " +
+          "есть 18 лет, вы применяете материалы только для личного пользования " +
+          "и несёте ответственность за скачиваемое (docs/ACCEPTABLE_USE.md).",
+          "Мне есть 18 лет - подтверждаю"
+        ).then(function (ok) {
+          if (!ok) {
+            toast("Не выполнено: подтверждение 18+ не получено", true);
+            return null;
+          }
+          return call("legal_accept", { adult: true, aup: true })
+            .then(function (r2) {
+              if (r2 && r2.error) { toast(r2.error, true); return null; }
+              return browserStep(name, request);
+            });
+        });
+      }
+      if (res.error) { toast(res.error, true); return res; }
+      return res;
+    });
+  }
+
+  function browserOpenWindow(systemMode) {
+    var name = systemMode ? "browser_open_system_browser" : "browser_open";
+    browserStep(name, browserTarget()).then(function (res) {
+      if (!res || res.error) return;
+      browserApply(res);
+      toast(systemMode ? "Ссылка открыта в системном браузере"
+                       : (res.mode === "system"
+                          ? "Открыто в системном браузере: " + res.reason
+                          : "Окно площадки открыто рядом с приложением"));
+    });
+  }
+
+  function browserPickAddress() {
+    browserStep("browser_address", { id: browserState.id }).then(function (res) {
+      if (!res || res.error) return;
+      browserApply(res);
+      if (res.address) {
+        $("browser-url").value = res.address;
+        toast("Адрес взят из окна");
+      } else {
+        toast(res.note || "адрес не получен", true);
+      }
+    });
+  }
+
+  function browserCloseWindow() {
+    browserStep("browser_close", { id: browserState.id }).then(function (res) {
+      if (!res || res.error) return;
+      browserApply(res);
+      toast("Окно площадки закрыто: адрес остался");
+    });
+  }
+
+  function browserAdd(kind) {
+    var url = browserAddressValue();
+    if (!url) {
+      toast("Адрес не взят: нажмите «Забрать адрес» или вставьте адрес из браузера", true);
+      return;
+    }
+    browserPending.url = url;
+    browserPending.kind = kind;
+    browserPending.phase = "fetching";
+    browserRender();
+    var request = kind === "video"
+      ? { url: url, auto: true, mode: "full", storage_id: defaultStorageId() }
+      : { url: url, auto: false };
+    browserStep("browser_add_from_address", request).then(function (res) {
+      if (!res) { browserDrop(url, "Не добавлено: окно не ответило"); return; }
+      if (!res.ok) browserDrop(url, res.error || "Не добавлено");
+    });
+  }
+
+  function browserDrop(url, message) {
+    if (browserPending.url === url) {
+      browserPending.url = "";
+      browserPending.phase = "";
+    }
+    toast(message, true);
+    browserRender();
+  }
+
+  function browserFlowDone(flow) {
+    var url = browserPending.url;
+    var result = flow.result || {};
+    if (flow.phase === "done") {
+      if (result.already) {
+        toast("Уже в библиотеке: " + (result.title || url));
+      } else if (result.queued) {
+        toast("Добавлено, в очереди загрузки " + result.queued +
+              (result.storage_label ? " → «" + result.storage_label + "»" : ""));
+      } else {
+        toast("Добавлено: метаданные записаны, качаем по кнопке");
+      }
+    } else {
+      // Причина отказа уже в тексте: sources.failure_message объясняет
+      // обход/VPN, вход в аккаунт и запрос у участников по kind.
+      toast(flow.error || "Не получилось", true);
+    }
+    if (browserPending.url === url) {
+      browserPending.url = "";
+      browserPending.phase = "";
+    }
+    browserRender();
+  }
+
   function bindPh() {
     var search = $("ph-search");
     var timer = null;
@@ -4994,6 +5198,30 @@
       renderGrid(true);
       renderLibTags();
     });
+
+    // Панель площадки (этап D): окно рядом с приложением и адрес из него.
+    $("browser-open-btn").addEventListener("click", function () {
+      browserOpenWindow(false);
+    });
+    $("browser-system-btn").addEventListener("click", function () {
+      browserOpenWindow(true);
+    });
+    $("browser-pick-btn").addEventListener("click", browserPickAddress);
+    $("browser-close-btn").addEventListener("click", browserCloseWindow);
+    $("browser-download-btn").addEventListener("click", function () {
+      browserAdd("video");           // одиночное видео: пишется и качается сразу
+    });
+    $("browser-source-btn").addEventListener("click", function () {
+      browserAdd("source");          // плейлист/канал: план в диалоге
+    });
+    // Enter в поле = «открыть по этой ссылке» (в том числе адрес из браузера).
+    $("browser-url").addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        browserOpenWindow(false);
+      }
+    });
+    browserRender();
   }
 
   /* ------------------------------------------------------------------ *
