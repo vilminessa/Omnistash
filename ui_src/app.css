@@ -24,15 +24,30 @@
   --muted: #8b97a3;
   --accent: #628d7c;
   --accent-2: #7fb3a0;
+  --on-accent: #08150f;   /* подпись на акцентной подложке (кнопка, badge) */
   --warn: #ffb454;
   --ok: #3fbf6b;
   --err: #e0554f;
   --info: #5aa9e6;
   --radius: 8px;
-  --row-h: 34px;
+  /* Шрифт окна (M15): значения приходят из настроек (font_size/font_scale/
+     font_family), здесь - дефолты те же, что app/themes.py. Скачивания
+     шрифтов нет: только системные стек-семейства. */
+  --font-size: 13px;
+  --font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  --row-h: 34px;          /* дефолт: если max() не поддержан, строки те же */
+  /* Высота строки списка растёт вместе с текстом, поэтому подписи при
+     крупном шрифте не обрезаются. Тот же расчёт считает виртуализация
+     (JS читает computed --row-h), а значения границ/множителя сверяет
+     тест с app/themes.py (ROW_MIN/ROW_FACTOR). */
+  --row-h: max(34px, calc(var(--font-size, 13px) * 2.6));
   --shadow: 0 18px 50px rgba(0, 0, 0, .45);
 }
 
+/* Темы (M15): тот же набор переменных, что реестр app/themes.py - значения
+   сверяет тест (tests/test_themes.py), чтобы список тем в окне и палитра в
+   CSS не могли разойтись незаметно. Читаемость каждой темы проверяется
+   контрастом подписей и подложек (themes.check). */
 body[data-theme="light"] {
   --bg: #eef1f5;
   --surface: #ffffff;
@@ -42,11 +57,48 @@ body[data-theme="light"] {
   --text: #1c2430;
   --muted: #66727f;
   --accent: #2f7d67;
-  --accent-2: #2f7d67;
+  --accent-2: #1f6b58;
+  --on-accent: #ffffff;
   --warn: #b87400;
   --ok: #157f47;
   --err: #c0392f;
   --info: #1f6fb2;
+}
+
+body[data-theme="contrast"] {
+  --bg: #05070a;
+  --surface: #0b1017;
+  --surface-2: #121a24;
+  --widget: #1b2632;
+  --line: #33455a;
+  --text: #f6f8fa;
+  --muted: #b6c2cd;
+  --accent: #ffd166;
+  --accent-2: #ffe3a3;
+  --on-accent: #0a0603;
+  --warn: #ff9f43;
+  --ok: #2fd9a0;
+  --err: #ff6b6b;
+  --info: #6cb8ff;
+}
+
+/* «Своя» тема: палитра правится прямо здесь (тёмное дерево + золото),
+   набор переменных тот же - окна с той же структурой подложек. */
+body[data-theme="custom"] {
+  --bg: #14100c;
+  --surface: #1c1712;
+  --surface-2: #241d16;
+  --widget: #2c241c;
+  --line: #3d3226;
+  --text: #ece6dc;
+  --muted: #a89b8c;
+  --accent: #c9a24b;
+  --accent-2: #d9b872;
+  --on-accent: #14100c;
+  --warn: #d99a4a;
+  --ok: #35b07a;
+  --err: #d4573f;
+  --info: #6aa9d8;
 }
 
 * { box-sizing: border-box; }
@@ -61,7 +113,11 @@ body {
   flex-direction: column;
   background: var(--bg);
   color: var(--text);
-  font: 13px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif;
+  /* Шрифт из настроек (M15): семейство и базовый размер - CSS-переменные,
+     множитель уже применён к --font-size на <html> (applyChrome). */
+  font-family: var(--font-family);
+  font-size: var(--font-size);
+  line-height: 1.45;
   overflow: hidden;
   user-select: none;
 }
@@ -136,7 +192,8 @@ body {
 .btn:active:not(:disabled) { transform: translateY(1px); }
 .btn:disabled { opacity: .45; cursor: default; }
 
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #08150f; }
+.btn.primary { background: var(--accent); border-color: var(--accent);
+               color: var(--on-accent); }
 .btn.primary:hover:not(:disabled) { background: var(--accent-2); }
 .btn.ghost { background: transparent; }
 .btn.danger { border-color: var(--err); color: var(--err); background: transparent; }
@@ -196,7 +253,7 @@ body {
 
 .badge {
   background: var(--accent);
-  color: #08150f;
+  color: var(--on-accent);
   border-radius: 999px;
   font-size: 10px;
   font-weight: 700;
@@ -345,7 +402,9 @@ body {
   border: 0;
   border-radius: 50%;
   background: rgba(4, 9, 16, .68);
-  color: var(--text);
+  /* Подпись поверх затемнённой подложки: сама подложка фиксированно тёмная,
+     поэтому светлая подпись читается в любой теме (в том числе светлой). */
+  color: #fff;
   font-size: 16px;
   cursor: pointer;
   opacity: 0;
@@ -474,6 +533,11 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 }
 
 body[data-theme="light"] .row { border-bottom-color: rgba(0, 0, 0, .05); }
+/* Контрастной теме границы строки нужны заметные: на почти чёрной подложке
+   rgba(255,255,255,.04) границу почти не видно (проверка контраста в
+   app/themes.py про границы не проверяет - это рамка, не подпись). */
+body[data-theme="contrast"] .row { border-bottom-color: rgba(255, 255, 255, .16); }
+body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); }
 .row:hover { background: var(--surface-2); }
 .row.selected { background: var(--widget); }
 

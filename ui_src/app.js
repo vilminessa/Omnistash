@@ -9,6 +9,19 @@
   "use strict";
 
   var ROW_H = 34;          // высота строки (должна совпадать с --row-h)
+  // M15 (шрифт): стек-семейства из app/themes.py (FONTS). Ничего не
+  // скачивается: только то, что есть в системе. Значения стеков обязан
+  // сверять тест - расхождение с themes.py дало бы не тот шрифт в окне.
+  var FONT_STACKS = {
+    system: '"Segoe UI", system-ui, -apple-system, sans-serif',
+    sans: '"Helvetica Neue", Arial, system-ui, sans-serif',
+    serif: 'Georgia, "Times New Roman", serif',
+    mono: 'Consolas, "Cascadia Mono", "Segoe UI Mono", monospace'
+  };
+  var FONT_SIZE_DEFAULT = 13;   // совпадает с themes.FONT_SIZE_DEFAULT
+  var FONT_SCALE_DEFAULT = 100; // множитель по умолчанию (проценты)
+  var THEME_DEFAULT = "dark";   // битая настройка темы -> этот же дефолт
+  var ADULT_LABEL_RU = "Взрослая площадка";  // нейтрально: без имени площадки
   // Плитка: ширина подсказка, а фактические колонки считает ширина окна.
   // row - высота ряда плиток (плитка + название + канал + воздух): виртуализация
   // считает по ней, поэтому точность важна - плитка выше ряда легла бы на следующий.
@@ -59,10 +72,156 @@
     mesh: null,             // запрос видео у участников (poll)
     detailId: null,         // открытая карточка (для обновления по mesh)
     account: null,          // состояние аккаунта Google из poll (без секретов)
-    botNoteDismissed: false // «Скрыть» у подсказки про аккаунт
+    botNoteDismissed: false, // «Скрыть» у подсказки про аккаунт
+    // M15: тема/шрифт/язык и доступ к вкладке взрослой площадки
+    texts: {},               // подписи текущего языка из ui_texts
+    lang: "ru",              // язык из бэка (document.lang + подписи)
+    labels: {},              // перевод подписей полей карточки настроек
+    sections: {},            // перевод названий разделов карточки
+    themeIds: [],            // ids тем из theme_list (битая настройка -> дефолт)
+    adultConfirmed: false,   // факт «мне есть 18» (legal.state().adult_ok)
+    adultVisible: false,     // вкладка взрослой площадки доступна (оба условия)
+    adultLabel: ADULT_LABEL_RU // нейтральная подпись площадки (без имени)
   };
   state.selected = new Set();
   state.dedupeResolved = new Set();
+
+  /* ------------------------------------------------------------------ *
+   *  Тема, шрифт и язык окна (M15)
+   * ------------------------------------------------------------------ */
+
+  // Резерв списка тем, пока theme_list не ответил (превью до первого
+  // ответа бэка). Совпадает с themes.ids() - сверяет тест.
+  var THEME_IDS = ["dark", "light", "contrast", "custom"];
+
+  function t(key, fallback) {
+    // Подпись текущего языка. Ключ, которого в словаре нет (или нет
+    // перевод на второй язык) -> русская подпись из разметки/кода:
+    // русские подписи не вырезаются и пустота не показывается.
+    var value = state.texts && state.texts[key];
+    return value || fallback;
+  }
+
+  function themeId(value) {
+    // Настройка темы из файла могла быть битой (правка руками, старый
+    // формат): окно возвращается на дефолтную тему, а не на «серую палитру».
+    var ids = (state.themeIds && state.themeIds.length) ? state.themeIds : THEME_IDS;
+    return ids.indexOf(value) >= 0 ? value : THEME_DEFAULT;
+  }
+
+  function clampInt(value, low, high, fallback) {
+    var num = parseInt(value, 10);
+    if (!isFinite(num)) return fallback;
+    return Math.max(low, Math.min(high, num));
+  }
+
+  function fontPx(size, scale) {
+    // Множитель (проценты) применяем к базовому размеру; битые значения
+    // -> дефолты, как и на стороне бэка (themes.normalize_*).
+    var base = clampInt(size, 10, 22, FONT_SIZE_DEFAULT);
+    var factor = clampInt(scale, 100, 200, FONT_SCALE_DEFAULT);
+    return Math.round(base * factor / 100);
+  }
+
+  function applyChrome() {
+    var s = state.settings || {};
+    document.body.dataset.theme = themeId(s.theme);
+    var px = fontPx(s.font_size, s.font_scale);
+    var root = document.documentElement.style;
+    root.setProperty("--font-size", px + "px");
+    root.setProperty("--font-family",
+                    FONT_STACKS[s.font_family] || FONT_STACKS.system);
+    // --row-h считает CSS по --font-size (растёт вместе с текстом), поэтому
+    // сюда не дублируем: высота строк - один источник в app.css.
+  }
+
+  function rowHeight() {
+    // Виртуализация считает по той же переменной, что и CSS: при larger
+    // размере шрифта строки списка не должны лезть на следующий ряд.
+    var value = getComputedStyle(document.body).getPropertyValue("--row-h");
+    var px = parseFloat(value);
+    return isFinite(px) && px > 0 ? px : ROW_H;
+  }
+
+  /* Переключение языка: подписи из словаря заменяют русские строки
+     разметки, непокрытые ключи остаются русскими (русские подписи не
+     вырезаются из разметки - они и есть fallback). */
+  function applyLanguage() {
+    // Язык размеченной страницы: подписи разметки меняются словарём,
+    // непокрытые ключи остаются русскими (русские подписи не вырезаются).
+    var lang = state.lang || "ru";
+    document.documentElement.lang = lang;
+    Array.prototype.forEach.call(document.querySelectorAll("[data-l]"),
+      function (el) {
+        if (el.dataset.ru === undefined) el.dataset.ru = el.textContent;
+        el.textContent = state.texts[el.dataset.l] || el.dataset.ru;
+      });
+    Array.prototype.forEach.call(document.querySelectorAll("[data-l-tip]"),
+      function (el) {
+        if (el.dataset.ruTip === undefined) el.dataset.ruTip = el.title;
+        el.title = state.texts[el.dataset.lTip] || el.dataset.ruTip;
+      });
+    Array.prototype.forEach.call(document.querySelectorAll("[data-l-ph]"),
+      function (el) {
+        if (el.dataset.ruPh === undefined) el.dataset.ruPh = el.placeholder;
+        el.placeholder = state.texts[el.dataset.lPh] || el.dataset.ruPh;
+      });
+  }
+
+  /* -------------------------------------------------------------- *
+   *  Синхронизация тема/язык/взрослая-вкладка с бэком (M15)
+   * -------------------------------------------------------------- */
+
+  function syncThemes() {
+    // Список тем берём из бэка (app/themes.py), а не из списка CSS-блоков:
+    // окно и карточка настроек показывают один и тот же набор тем.
+    return call("theme_list").then(function (res) {
+      if (!res || !res.ok) return;
+      var ids = (res.themes || []).map(function (item) { return item.id; });
+      if (ids.length) state.themeIds = ids;
+      applyChrome();
+    });
+  }
+
+  function syncLanguage() {
+    // Подписи текущего языка + перевод подписей карточки настроек.
+    // Словарь (app/i18n.py) покрывает не всё: непокрытые ключи UI
+    // рисует русскими подписями из разметки/кода.
+    return call("ui_texts").then(function (res) {
+      if (!res || !res.ok) return;
+      state.lang = res.language || "ru";
+      state.texts = res.texts || {};
+      state.labels = res.labels || {};
+      state.sections = res.sections || {};
+      if (res.adult_site) state.adultLabel = res.adult_site;
+      applyLanguage();
+      renderSettings();
+    });
+  }
+
+  function syncAdultTab() {
+    // Доступ к вкладке взрослой площадки: оба условия (подтверждение 18+
+    // и флаг настройки). До подтверждения вкладка скрыта и в интерфейсе
+    // нет ни ссылки на площадку, ни её карточек, ни фильтров.
+    return call("adult_tab").then(function (res) {
+      if (!res || !res.ok) return;
+      var changed = res.confirmed !== state.adultConfirmed ||
+        res.visible !== state.adultVisible || res.label !== state.adultLabel;
+      state.adultConfirmed = !!res.confirmed;
+      state.adultVisible = !!res.visible;
+      if (res.label) state.adultLabel = res.label;
+      if (changed && !state.adultVisible && platState.adult) {
+        // Вкладка закрылась (флаг выключен или подтверждение отменено) -
+        // окно возвращается на общий список, не висит на взрослой странице.
+        switchTab("library");
+        platState.platform = "";
+        platState.adult = false;
+        platState.rows = [];
+        platState.total = 0;
+      }
+      renderPlatformTabs();
+    });
+  }
 
   /* ------------------------------------------------------------------ *
    *  Мост к Python
@@ -261,7 +420,9 @@
     if (snap.settings_rev !== state.rev) {
       state.rev = snap.settings_rev;
       state.settings = snap.settings || state.settings;
-      document.body.dataset.theme = state.settings.theme === "light" ? "light" : "dark";
+      applyChrome();      // тема + шрифт (CSS-переменные) из настроек
+      syncLanguage();     // язык мог измениться в карточке - подписи обновляем
+      syncAdultTab();     // 18-подтверждение и флаг вкладки - вкладка может вернуться
       // Вид/размер плитки живут в настройках - при смене перерисовываем
       // без сброса: страницы загружены, выделение и скролл не трогаем.
       var viewChanged = syncViewFromSettings();
@@ -593,14 +754,35 @@
     // Гейт 18+ тот же, что при добавлении возрастной ссылки (PH5): явное
     // подтверждение человека; после него бэк пропускает повторный вызов.
     return legalDialog(
-      "Возрастной контент",
-      "Группа содержит строки взрослой площадки. Подтвердите, что вам есть " +
-      "18 лет, вы применяете эти материалы только для личного пользования и " +
-      "несёте ответственность за скачиваемое (docs/ACCEPTABLE_USE.md).",
-      "Мне есть 18 лет - подтверждаю"
+      t("dlg.adult.title", "Возрастной контент"),
+      t("dlg.adult.text",
+        "Группа содержит строки взрослой площадки. Подтвердите, что вам есть " +
+        "18 лет, вы применяете эти материалы только для личного пользования и " +
+        "несёте ответственность за скачиваемое (docs/ACCEPTABLE_USE.md)."),
+      t("dlg.adult.check", "Мне есть 18 лет - подтверждаю")
     ).then(function (ok) {
       if (!ok) return false;
-      return call("legal_accept", { adult: true }).then(function () { return true; });
+      return adultAccept({ adult: true });
+    });
+  }
+
+  function adultAccept(payload) {
+    // Зафиксировать подтверждение 18+ (факт пишется в app/legal.py, а не в
+    // settings) и вернуть вкладку взрослой площадки (M15). adult_tab_show
+    // включает флаг настройки ТОЛЬКО по факту подтверждения: бэк отказывает
+    // без него, поэтому гейты 18+ (add_start, массовые операции, каталог
+    // площадки) остаются в силе и этим вызовом не обходятся.
+    return call("legal_accept", payload || { adult: true }).then(function (res) {
+      if (res && res.error) return false;
+      return call("adult_tab_show", {}).then(function (shown) {
+        if (shown && shown.ok) {
+          state.adultConfirmed = true;
+          state.adultVisible = !!shown.visible;
+          if (shown.label) state.adultLabel = shown.label;
+        }
+        renderPlatformTabs();
+        return true;
+      });
     });
   }
 
@@ -2367,7 +2549,7 @@
     var grid = state.viewMode === "grid";
     var cfg = tileConf();
     var cols = grid ? tileCols() : 1;
-    var rowH = grid ? cfg.row : ROW_H;
+    var rowH = grid ? cfg.row : rowHeight();
     var lineCount = grid ? Math.ceil(total / cols) : total;
     rows.classList.toggle("tiles", grid);
     $("grid-spacer").style.height = (lineCount * rowH) + "px";
@@ -3147,7 +3329,10 @@
       bySection[name].push(field);
     });
     body.innerHTML = sections.map(function (name) {
-      return '<div class="set-section"><h3>' + esc(name) + "</h3>" +
+      // Название раздела на текущем языке; словар не покрывает - русское
+      // имя из схемы остаётся (state.sections строит только покрытые ключи).
+      return '<div class="set-section"><h3>' +
+        esc(state.sections[name] || name) + "</h3>" +
         bySection[name].map(fieldHtml).join("") + "</div>";
     }).join("");
     bindSettings();
@@ -3210,9 +3395,14 @@
       control = '<input type="text" data-key="' + field.key + '" value="' +
         esc(value) + '">';
     }
+    // Подпись поля на текущем языке (app/i18n.py: settings.<key>.label/hint).
+    // Поля, которых словарь не покрывает, остаются подписями из схемы.
+    var tr = state.labels[field.key] || {};
+    var label = tr.label || field.label;
+    var hint = tr.hint || field.hint || "";
     return '<div class="field"><div><div class="field-label">' +
-      esc(field.label) + '</div><div class="field-hint">' +
-      esc(field.hint || "") + "</div></div>" +
+      esc(label) + '</div><div class="field-hint">' +
+      esc(hint) + "</div></div>" +
       '<div class="field-control">' + control + "</div></div>";
   }
 
@@ -3580,17 +3770,24 @@
       if (!res) return;
       state.settings = res.settings || state.settings;
       state.rev = res.settings_rev;
-      document.body.dataset.theme = state.settings.theme === "light" ? "light" : "dark";
+      applyChrome();       // тема и шрифт применяются сразу (CSS-переменные)
+      applyLanguage();     // подписи карточки могли смениться языком
+      if (key === "theme") syncThemes();      // битая тема -> дефолт из бэка
+      if (key === "language") syncLanguage(); // второй язык + подписи карточки
+      if (key === "language" || key === "show_adult_tab") syncAdultTab();
       // Вид библиотеки - тоже настройка, применяем сразу: у следующего
       // опроса rev уже совпадёт, ветка в applySnapshot не сработает.
       var viewChanged = syncViewFromSettings();
       // Скрытие колонки (col_*) меняет шапку, строки и шаблон сетки.
       var colsChanged = /^col_/.test(key);
+      // Смена шрифта меняет высоту строк списка (--row-h): виртуализация
+      // считает по ней же, поэтому ряды перерисовываем заново.
+      var fontChanged = /^font_/.test(key);
       applyViewState();
       renderSettings();
-      if (viewChanged) paintGrid();
+      if (viewChanged || fontChanged) paintGrid();
       if (colsChanged) { syncSortAndCols(); renderGrid(true); }
-      toast("Сохранено");
+      toast(t("toast.saved", "Сохранено"));
     }).catch(function (err) { toast("Не удалось сохранить: " + err, true); });
   }
 
@@ -3932,16 +4129,19 @@
         // PH5: первая возрастная ссылка - явное подтверждение 18+.
         if (res && res.adult_confirm) {
           legalDialog(
-            "Возрастной контент",
-            "Эта площадка содержит материалы для взрослых. Подтвердите, " +
-            "что вам есть 18 лет, вы применяете эти материалы только для " +
-            "личного пользования и несёте ответственность за скачиваемое " +
-            "(docs/ACCEPTABLE_USE.md).",
-            "Мне есть 18 лет - подтверждаю"
+            t("dlg.adult.title", "Возрастной контент"),
+            t("dlg.add_adult.text",
+              "Эта площадка содержит материалы для взрослых. Подтвердите, " +
+              "что вам есть 18 лет, вы применяете эти материалы только для " +
+              "личного пользования и несёте ответственность за скачиваемое " +
+              "(docs/ACCEPTABLE_USE.md)."),
+            t("dlg.adult.check", "Мне есть 18 лет - подтверждаю")
           ).then(function (ok) {
-            if (!ok) { toast("Ссылка не добавлена: подтверждение18+ "
-                             + "не получено", true); return; }
-            call("legal_accept", { adult: true, aup: true }).then(runAdd);
+            if (!ok) {
+              toast(t("toast.adult_denied", "Подтверждение 18+ не получено"), true);
+              return;
+            }
+            adultAccept({ adult: true, aup: true }).then(runAdd);
           });
           return;
         }
@@ -4077,13 +4277,20 @@
 
   function openPlatform(id, label, adult, hasCatalog, hasChannels) {
     platState.platform = id;
-    platState.label = label || id;
+    // M15: для взрослой площадки - нейтральная подпись («взрослая
+    // площадка») без её имени и доменов; внутренние id не меняются.
+    var shown = adult ? (state.adultLabel || ADULT_LABEL_RU) : (label || id);
+    platState.label = shown;
     platState.adult = !!adult;
-    $("pf-title").textContent = platState.label +
+    $("pf-title").textContent = shown +
       (platState.adult ? " · 18+" : "");
-    $("ph-search").placeholder = "Поиск на " + platState.label + "…";
+    $("ph-search").placeholder = platState.adult
+      ? t("ph.site", "Поиск на площадке…")
+      : "Поиск на " + shown + "…";
     if ($("cat-search")) {
-      $("cat-search").placeholder = "Поиск по " + platState.label + "…";
+      $("cat-search").placeholder = platState.adult
+        ? t("ph.site", "Поиск на площадке…")
+        : "Поиск по " + shown + "…";
     }
     // Сброс каталога при смене площадки
     catalogState.platform = id;
@@ -4143,24 +4350,42 @@
   }
 
   function renderPlatformTabs() {
-    call("platforms_list").then(function (res) {
-      if (!res || !res.ok) return;
-      var list = (res.platforms || []).filter(function (p) {
-        return p.count > 0 && !p.hidden;   // авто: только с контентом
-      });
-      var json = JSON.stringify(list);
-      if (json === platTabsJson) return;   // перерисовка при изменении
-      platTabsJson = json;
-      var box = $("platform-tabs");
-      box.innerHTML = list.map(function (p) {
-        return '<button class="tab" data-tab="pf:' + esc(p.id) +
-          '" data-label="' + esc(p.label) + '" data-adult="' +
-          (p.adult ? "1" : "") + '" data-catalog="' +
-          (p.catalog ? "1" : "") + '" data-channels="' +
-          (p.channels ? "1" : "") + '"' +
-          (p.adult ? ' title="Возрастной контент"' : "") + ">" +
-          esc(p.adult ? p.label + " 18+" : p.label) + "</button>";
-      }).join("");
+    // Вкладки площадок + доступ к взрослой (M15). Вкладка взрослой
+    // площадки НЕ появляется до подтверждения 18+: в интерфейсе нет ни
+    // ссылки на площадку, ни её карточек, ни фильтров. Подтверждение -
+    // тот же гейт, что в add_start и массовых операциях (app/legal.py).
+    return Promise.all([call("platforms_list"), call("adult_tab")])
+      .then(function (pair) {
+        var res = pair[0];
+        var adult = pair[1];
+        if (!res || !res.ok) return;
+        if (adult && adult.ok) {
+          state.adultConfirmed = !!adult.confirmed;
+          state.adultVisible = !!adult.visible;
+          if (adult.label) state.adultLabel = adult.label;
+        }
+        var label = state.adultLabel || ADULT_LABEL_RU;
+        var list = (res.platforms || []).filter(function (p) {
+          // авто: только с контентом; взрослая - только после 18+ и флага
+          return p.count > 0 && !p.hidden && (!p.adult || state.adultVisible);
+        });
+        var json = JSON.stringify({ items: list, adult: state.adultVisible,
+                                    label: label });
+        if (json === platTabsJson) return;   // перерисовка при изменении
+        platTabsJson = json;
+        var box = $("platform-tabs");
+        box.innerHTML = list.map(function (p) {
+          // Нейтральная подпись: без имени площадки и её доменов
+          var name = p.adult ? label : p.label;
+          return '<button class="tab" data-tab="pf:' + esc(p.id) +
+            '" data-label="' + esc(name) + '" data-adult="' +
+            (p.adult ? "1" : "") + '" data-catalog="' +
+            (p.catalog ? "1" : "") + '" data-channels="' +
+            (p.channels ? "1" : "") + '"' +
+            (p.adult ? ' title="' +
+              esc(t("adult.tab_note", "Возрастной контент")) + '"' : "") +
+            ">" + esc(p.adult ? name + " 18+" : name) + "</button>";
+        }).join("");
       Array.prototype.forEach.call(box.querySelectorAll(".tab"),
         function (tab) {
           tab.addEventListener("click", function () {
@@ -4298,19 +4523,23 @@
           // PH5: первая возрастная карточка - явное подтверждение 18+,
           // потом тот же url под подтверждением.
           legalDialog(
-            "Возрастной контент",
-            "Эта площадка содержит материалы для взрослых. Подтвердите, " +
-            "что вам есть 18 лет, вы применяете эти материалы только для " +
-            "личного пользования и несёте ответственность за скачиваемое " +
-            "(docs/ACCEPTABLE_USE.md).",
-            "Мне есть 18 лет - подтверждаю"
+            t("dlg.adult.title", "Возрастной контент"),
+            t("dlg.add_adult.text",
+              "Эта площадка содержит материалы для взрослых. Подтвердите, " +
+              "что вам есть 18 лет, вы применяете эти материалы только для " +
+              "личного пользования и несёте ответственность за скачиваемое " +
+              "(docs/ACCEPTABLE_USE.md)."),
+            t("dlg.adult.check", "Мне есть 18 лет - подтверждаю")
           ).then(function (ok) {
             if (!ok) {
-              catDrop(url, "Не добавлено: подтверждение 18+ не получено");
+              catDrop(url, t("toast.adult_denied", "Подтверждение 18+ не получено"));
               return;
             }
-            call("legal_accept", { adult: true, aup: true }).then(function (r2) {
-              if (r2 && r2.error) { catDrop(url, r2.error); return; }
+            adultAccept({ adult: true, aup: true }).then(function (got) {
+              if (!got) {
+                catDrop(url, t("toast.adult_denied", "Подтверждение 18+ не получено"));
+                return;
+              }
               catStart(url);
             });
           });
@@ -4802,18 +5031,25 @@
 
   function catAdultFlow() {
     legalDialog(
-      "Возрастной контент",
-      "Каталог этой площадки содержит материалы для взрослых. Подтвердите, " +
-      "что вам есть 18 лет и использование — личное " +
-      "(docs/ACCEPTABLE_USE.md).",
-      "Мне есть 18 лет - подтверждаю"
+      t("dlg.adult.title", "Возрастной контент"),
+      t("dlg.catalog_adult.text",
+        "Каталог этой площадки содержит материалы для взрослых. Подтвердите, " +
+        "что вам есть 18 лет и использование — личное " +
+        "(docs/ACCEPTABLE_USE.md)."),
+      t("dlg.adult.check", "Мне есть 18 лет - подтверждаю")
     ).then(function (ok) {
       if (!ok) {
-        toast("Каталог не показан: подтверждение 18+ не получено", true);
+        toast(t("toast.adult_denied", "Подтверждение 18+ не получено"), true);
         return;
       }
-      call("legal_accept", { adult: true, aup: true })
-        .then(function () { catLoad({ reset: true, force: true }); });
+      adultAccept({ adult: true, aup: true })
+        .then(function (got) {
+          if (!got) {
+            toast(t("toast.adult_denied", "Подтверждение 18+ не получено"), true);
+            return;
+          }
+          catLoad({ reset: true, force: true });
+        });
     });
   }
 
@@ -4877,7 +5113,7 @@
           if (v === "catalog") {
             // Список каналов решается до запроса: если каналов нет, режим
             // переключается на тренды, и запрос уйдёт именно на них.
-            // Площадки без RSS (PornHub, VK) список не спрашивают.
+            // Площадки без RSS (взрослая площадка, VK) список не спрашивают.
             var openList = catalogState.channels === null &&
               catalogState.mode === "channels"
               ? catChannelsLoad() : Promise.resolve(null);
@@ -5574,7 +5810,8 @@
       state.settings = data.settings || {};
       state.schema = data.schema || [];
       state.rev = data.settings_rev;
-      document.body.dataset.theme = state.settings.theme === "light" ? "light" : "dark";
+      applyChrome();      // тема + шрифт до первого рисования страниц
+      applyLanguage();    // русские подписи разметки до языка из бэка
       $("version").textContent = "Omnistash " + (data.version || "");
       renderSettings();
       // Шапка и шаблон сетки живут по настройкам (sort_col/col_*): до
@@ -5582,6 +5819,11 @@
       syncViewFromSettings();
       syncSortAndCols();
       renderGrid(true);
+      // M15: темы, второй язык и доступ к вкладке взрослой площадки
+      // приходят отдельными запросами (schema и settings уже получены).
+      syncThemes();
+      syncLanguage();
+      syncAdultTab();
     });
     setInterval(tick, POLL_MS);
     tick();
@@ -5687,10 +5929,94 @@
       use_google_cookies: true,
       delay_ms: 500, retries: 3, resume_queue: true,
       scan_interval_min: 0, sync_interval_min: 30,
-      theme: "dark", app_version: ""
+      theme: "dark", app_version: "",
+      // M15: шрифт, язык и флаг взрослой вкладки - те же ключи и значения
+      // по умолчанию, что в app/settings_schema.py (карточку правок в превью
+      // проверяем без бэка).
+      font_size: 13, font_scale: 100, font_family: "system",
+      language: "ru", show_adult_tab: false
     };
     var counter = 0;
     var settingsRev = 1;
+    /* M15: зеркало app/i18n.py для превью - те же ключи и английские строки.
+       Ключ, которого нет в этом словаре, остаётся русским (в настоящем UI
+       русская подпись из разметки/кода и есть fallback). Для русского языка
+       карта подписей пустая: русские строки разметки уже русские. */
+    var MOCK_EN = {
+      "tab.library": "Library", "tab.sync": "Sync", "tab.queue": "Queue",
+      "tab.settings": "Settings",
+      "btn.rescan": "Reindex",
+      "btn.rescan.tip": "Scan library folders and refresh the index",
+      "btn.stop": "Cancel", "btn.add": "Add",
+      "btn.add.tip": "Add a playlist or a channel",
+      "col.status": "Status", "col.title": "Title", "col.channel": "Channel",
+      "col.dur": "Duration", "col.date": "Date", "col.size": "Size",
+      "ph.search": "Search by title, description, tags…",
+      "ph.site": "Search on the site…",
+      "sec.library": "Library", "sec.download": "Downloads",
+      "sec.mesh": "Mesh", "sec.schedule": "Schedule",
+      "sec.account": "Google account", "sec.appearance": "Appearance",
+      "sec.other": "Other",
+      "dlg.adult.title": "Adult content",
+      "dlg.adult.text": "The group contains rows from the adult site. Confirm " +
+        "that you are 18 or older, that you use these materials for personal " +
+        "use only, and that you are responsible for what you download " +
+        "(docs/ACCEPTABLE_USE.md).",
+      "dlg.adult.check": "I am 18 or older - I confirm",
+      "dlg.catalog_adult.text": "The catalog of this site contains adult " +
+        "materials. Confirm that you are 18 or older and that the use is " +
+        "personal (docs/ACCEPTABLE_USE.md).",
+      "dlg.add_adult.text": "This site contains adult materials. Confirm that " +
+        "you are 18 or older, that you use these materials for personal use " +
+        "only, and that you are responsible for what you download " +
+        "(docs/ACCEPTABLE_USE.md).",
+      "dlg.aup.title": "Usage rules",
+      "dlg.aup.check": "Usage rules accepted",
+      "toast.saved": "Saved",
+      "toast.adult_denied": "18+ confirmation not received",
+      "toast.adult_hidden": "The adult site tab is hidden: confirm 18+",
+      "adult.site": "Adult site",
+      "adult.tab_note": "Adult content"
+    };
+    var MOCK_LABELS_EN = {
+      theme: { label: "Theme",
+        hint: "Window palette: dark, light, high contrast, or custom." },
+      font_size: { label: "Font size, pixels",
+        hint: "Base text size of the window. List rows grow with the text." },
+      font_scale: { label: "Text size multiplier",
+        hint: "Multiplies the base size (100 = as set)." },
+      font_family: { label: "Font family",
+        hint: "System font stacks: nothing is downloaded or embedded." },
+      language: { label: "Interface language",
+        hint: "Russian by default; English is the second language." },
+      show_adult_tab: { label: "Show the adult site tab",
+        hint: "Off by default: the adult site tab appears only after an " +
+              "explicit 18+ confirmation. The flag does not bypass 18+ gates." }
+    };
+    var MOCK_SECTIONS_EN = {
+      "Библиотека": "Library", "Загрузка": "Downloads", "Mesh": "Mesh",
+      "Расписание": "Schedule", "Аккаунт Google": "Google account",
+      "Внешний вид": "Appearance", "Прочее": "Other"
+    };
+    // Стеки шрифта и расчёт строк списка - те же значения, что app/themes.py.
+    var MOCK_FONT_STACKS = FONT_STACKS;
+    function mockLang() { return settings.language === "en" ? "en" : "ru"; }
+    function mockAdultLabel() {
+      // Нейтрально: без имени площадки и её доменов (M15)
+      return mockLang() === "en" ? "Adult site" : "Взрослая площадка";
+    }
+    function mockClamp(value, low, high, fallback) {
+      var num = parseInt(value, 10);
+      if (!isFinite(num)) return fallback;
+      return Math.max(low, Math.min(high, num));
+    }
+    function mockFontPx() {
+      return Math.round(mockClamp(settings.font_size, 10, 22, 13) *
+                        mockClamp(settings.font_scale, 100, 200, 100) / 100);
+    }
+    function mockRowH() {
+      return Math.max(34, mockFontPx() * 2.6);   // тот же расчёт, что --row-h
+    }
     // Симуляция качалки: в превью нет сети, но поведение панели очереди
     // (кнопки, полоса, счётчики) должно быть проверяемо.
     var mockDl = { running: false, done: 3, failed: 1, attempted: 4,
@@ -5730,8 +6056,11 @@
         out.push({
           platform: platform,
           video_id: "pv" + n,
+          // Мок карточек взрослой площадки: домена и имени площадки нет
+          // (M15: нейтральные публичные тексты), карточки в превью
+          // появляются только после подтверждения 18+.
           url: platform === "pornhub"
-            ? "https://www.pornhub.com/view_video.php?viewkey=pv" + n
+            ? "https://adult-site.invalid/view_video.php?viewkey=pv" + n
             : "https://www.youtube.com/watch?v=pv" + n,
           title: "(превью) " + (query ? query + " · " : "") + "ролик " + n,
           thumb: "",
@@ -6031,7 +6360,41 @@
         hint: "Вход в окне приложения (куки снимаются сами) или импорт cookies.txt.",
         transient: true, default: [] },
       { key: "theme", type: "choice", section: "Внешний вид", label: "Тема",
-        choices: [["dark", "Тёмная"], ["light", "Светлая"]], default: "dark" }
+        hint: "Палитра окна через CSS-переменные: тёмная (по умолчанию), " +
+              "светлая, контрастная и своя.",
+        choices: [["dark", "Тёмная"], ["light", "Светлая"],
+                  ["contrast", "Контрастная"], ["custom", "Своя"]],
+        default: "dark" },
+      // M15: те же ключи/подписи/границы, что в app/settings_schema.py -
+      // превью проверяет карточку «Внешний вид» без бэка.
+      { key: "font_size", type: "int", section: "Внешний вид",
+        label: "Размер шрифта, пикселов",
+        hint: "Базовый размер текста окна; строки списка растут вместе с " +
+              "текстом (--row-h), плитка остаётся фиксированной.",
+        min: 10, max: 22, default: 13 },
+      { key: "font_scale", type: "int", section: "Внешний вид",
+        label: "Множитель размера текста",
+        hint: "Умножает базовый размер в процентах (100 = как задан).",
+        min: 100, max: 200, default: 100 },
+      { key: "font_family", type: "choice", section: "Внешний вид",
+        label: "Семейство шрифта",
+        hint: "Системные стек-семейства: ничего не скачивается.",
+        choices: [["system", "Системный (Segoe UI)"],
+                  ["sans", "Гравитический (Arial)"],
+                  ["serif", "Серабный (Georgia)"],
+                  ["mono", "Моноширинный (Consolas)"]],
+        default: "system" },
+      { key: "language", type: "choice", section: "Внешний вид",
+        label: "Язык интерфейса",
+        hint: "Русский по умолчанию, английский - второй язык. " +
+              "Непокрытые словарём подписи остаются русскими.",
+        choices: [["ru", "Русский"], ["en", "English"]],
+        default: "ru" },
+      { key: "show_adult_tab", type: "bool", section: "Внешний вид",
+        label: "Показывать вкладку взрослой площадки",
+        hint: "По умолчанию выключено; вкладка появляется только после " +
+              "подтверждения 18+. Флаг не обходит гейты 18+.",
+        default: false }
     ];
     mock = {
       get_initial: function () {
@@ -6053,6 +6416,112 @@
         req = req || {};
         if (req.adult) mockCat.adultOk = true;
         return Promise.resolve({ ok: true, adult_ok: !!req.adult });
+      },
+      /* M15: темы/шрифт, второй язык и вкладка взрослой площадки. Значения,
+         подписи и границы полей те же, что у настоящего бэка (app/themes.py,
+         app/i18n.py, app/settings_schema.py). */
+      theme_list: function () {
+        var ids = ["dark", "light", "contrast", "custom"];
+        var current = ids.indexOf(settings.theme) >= 0 ? settings.theme : "dark";
+        return Promise.resolve({
+          ok: true,
+          themes: [
+            { id: "dark", label: "Тёмная", dark: true },
+            { id: "light", label: "Светлая", dark: false },
+            { id: "contrast", label: "Контрастная", dark: true },
+            { id: "custom", label: "Своя", dark: true }
+          ],
+          theme_ids: ids, current: current, dark: current !== "light",
+          language: mockLang(),
+          font_family: MOCK_FONT_STACKS[settings.font_family] ? settings.font_family : "system",
+          font_stack: MOCK_FONT_STACKS[settings.font_family] || MOCK_FONT_STACKS.system,
+          font_size: mockClamp(settings.font_size, 10, 22, 13),
+          font_scale: mockClamp(settings.font_scale, 100, 200, 100),
+          font_px: mockFontPx(), row_h: mockRowH()
+        });
+      },
+      theme_set: function (req) {
+        req = req || {};
+        var ids = ["dark", "light", "contrast", "custom"];
+        var value = typeof req === "string" ? req : req.theme;
+        settings.theme = ids.indexOf(value) >= 0 ? value : "dark";
+        settingsRev += 1;
+        return Promise.resolve({ ok: true, theme: settings.theme,
+                                 dark: settings.theme !== "light",
+                                 settings: settings, settings_rev: settingsRev });
+      },
+      font_set: function (req) {
+        req = req || {};
+        if (req.font_size !== undefined) {
+          settings.font_size = mockClamp(req.font_size, 10, 22, 13);
+        }
+        if (req.font_scale !== undefined) {
+          settings.font_scale = mockClamp(req.font_scale, 100, 200, 100);
+        }
+        if (req.font_family !== undefined) {
+          settings.font_family = MOCK_FONT_STACKS[req.font_family] ?
+            req.font_family : "system";
+        }
+        settingsRev += 1;
+        return Promise.resolve({ ok: true, font_size: settings.font_size,
+                                 font_scale: settings.font_scale,
+                                 font_family: settings.font_family,
+                                 font_stack: MOCK_FONT_STACKS[settings.font_family] ||
+                                   MOCK_FONT_STACKS.system,
+                                 font_px: mockFontPx(), row_h: mockRowH(),
+                                 settings: settings, settings_rev: settingsRev });
+      },
+      language_list: function () {
+        return Promise.resolve({ ok: true,
+          languages: [["ru", "Русский"], ["en", "English"]],
+          language: mockLang() });
+      },
+      language_set: function (req) {
+        var value = typeof req === "string" ? req : (req || {}).language;
+        settings.language = value === "en" ? "en" : "ru";
+        settingsRev += 1;
+        return Promise.resolve({ ok: true, language: settings.language,
+                                 settings: settings, settings_rev: settingsRev,
+                                 texts: mockLang() === "en" ? MOCK_EN : {},
+                                 labels: mockLang() === "en" ? MOCK_LABELS_EN : {},
+                                 sections: mockLang() === "en" ? MOCK_SECTIONS_EN : {},
+                                 adult_site: mockAdultLabel() });
+      },
+      ui_texts: function () {
+        // Русский: карта пустая - русские подписи разметки/кода и есть fallback.
+        return Promise.resolve({ ok: true, language: mockLang(),
+                                 texts: mockLang() === "en" ? MOCK_EN : {},
+                                 labels: mockLang() === "en" ? MOCK_LABELS_EN : {},
+                                 sections: mockLang() === "en" ? MOCK_SECTIONS_EN : {},
+                                 adult_site: mockAdultLabel() });
+      },
+      /* Взрослая вкладка (M15): видна только при подтверждении 18+ И
+         включённом флаге; флаг сам по себе доступа не даёт, adult_tab_show
+         отказывает без подтверждения (гейты 18+ не обходятся). */
+      adult_tab: function () {
+        return Promise.resolve({ ok: true, confirmed: !!mockCat.adultOk,
+                                 shown: !!settings.show_adult_tab,
+                                 visible: !!mockCat.adultOk && !!settings.show_adult_tab,
+                                 label: mockAdultLabel() });
+      },
+      adult_tab_show: function () {
+        if (!mockCat.adultOk) {
+          return Promise.resolve({ ok: false, error: "Нужно подтверждение 18+",
+                                   confirmed: false, visible: false });
+        }
+        settings.show_adult_tab = true;
+        settingsRev += 1;
+        return Promise.resolve({ ok: true, confirmed: true, shown: true,
+                                 visible: true, label: mockAdultLabel(),
+                                 settings: settings, settings_rev: settingsRev });
+      },
+      adult_tab_hide: function () {
+        // Флаг выключается, подтверждение 18+ остаётся фактом (не снимается).
+        settings.show_adult_tab = false;
+        settingsRev += 1;
+        return Promise.resolve({ ok: true, confirmed: !!mockCat.adultOk,
+                                 shown: false, visible: false,
+                                 settings: settings, settings_rev: settingsRev });
       },
       poll: function () {
         return Promise.resolve({
@@ -6248,7 +6717,9 @@
         return Promise.resolve({ ok: true, platforms: [
           { id: "youtube", label: "YouTube", adult: false, count: 6,
             hidden: false, catalog: true, channels: true },
-          { id: "pornhub", label: "PornHub", adult: true, count: 2,
+          // M15: нейтральная подпись взрослой площадки (без её имени и
+          // доменов); внутренний id реестра остаётся тем же.
+          { id: "pornhub", label: mockAdultLabel(), adult: true, count: 2,
             hidden: false, catalog: true, channels: false },
           { id: "vk", label: "VK", adult: false, count: 3,
             hidden: false, catalog: false, channels: false }
