@@ -680,10 +680,26 @@ def _migrate_v12(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS videos_media_idx ON videos(media_kind)")
 
 
+def _migrate_v13(conn: sqlite3.Connection) -> None:
+    """Индекс аудио становится частичным (ревью #14).
+
+    videos_media_idx по колонке с двумя значениями почти равен размеру
+    таблицы, планнером не выбирается (селективность ~50%) и усиливает каждую
+    запись видео. Нужен только фильтр «аудио» - поэтому частичный индекс:
+    в него попадают строки audio, подавляющее большинство строк видео в
+    индексе не лежит. Старый индекс убирается: он не используется и оставил
+    бы лишние байты в профиле.
+    """
+    conn.execute("DROP INDEX IF EXISTS videos_media_idx")
+    conn.execute("CREATE INDEX IF NOT EXISTS videos_audio_idx "
+                 "ON videos(id) WHERE media_kind='audio'")
+
+
 # Порядок важен: номер версии = индекс + 1.
 MIGRATIONS = (_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4,
                _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8,
-               _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12)
+               _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12,
+              _migrate_v13)
 
 
 class Database:

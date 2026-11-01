@@ -230,5 +230,78 @@ class TestAccountColumnV3(unittest.TestCase):
         self.assertEqual(count, 1, "повторный запуск не должен дублировать")
 
 
+class TestAudioIndexV13(unittest.TestCase):
+    """Миграция v13: частичный индекс аудио вместо индекса по колонке из двух значений.
+
+    Проверка не про «индекс есть», а про то, что старый индекс по media_kind
+    уходит: он почти размером с таблицу и планнером не выбирается, а частичный
+    индекс содержит только строки audio.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "v12.db"
+        conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
+        for step in db_mod.MIGRATIONS[:-1]:       # до v12 включительно
+            step(conn)
+        conn.execute(f"PRAGMA user_version = {len(db_mod.MIGRATIONS) - 1}")
+        for key, remote, title, kind in (("youtube:vid1", "vid1", "видео", "video"),
+                                         ("youtube:aud1", "aud1", "трек", "audio"),
+                                         ("youtube:aud2", "aud2", "трек 2", "audio")):
+            conn.execute(
+                """INSERT INTO videos (key, platform, remote_id, title,
+                                       media_kind, first_seen_at, updated_at)
+                   VALUES (?, 'youtube', ?, ?, ?, 't', 't')""",
+                (key, remote, title, kind))
+        conn.commit()
+        conn.close()
+
+    def index_sql(self, conn, name: str) -> str | None:
+        row = conn.execute("SELECT sql FROM sqlite_master WHERE type='index' "
+                           "AND name=?", (name,)).fetchone()
+        return row["sql"] if row else None
+
+    def test_old_media_index_dropped_and_partial_one_created(self):
+        database = db_mod.Database(self.path)
+        self.addCleanup(database.close)
+        self.assertIsNone(self.index_sql(database.conn, "videos_media_idx"),
+                          "старый индекс по колонке должен быть убран")
+        sql = self.index_sql(database.conn, "videos_audio_idx")
+        self.assertIsNotNone(sql, "частичный индекс аудио должен появиться")
+        self.assertIn("WHERE media_kind='audio'", sql)
+        self.assertEqual(
+            int(database.conn.execute("PRAGMA user_version").fetchone()[0]),
+            len(db_mod.MIGRATIONS))
+
+    def test_audio_filter_still_returns_the_same_rows(self):
+        database = db_mod.Database(self.path)
+        self.addCleanup(database.close)
+        ids = [row["id"] for row in database.conn.execute(
+            "SELECT id FROM videos WHERE media_kind='audio' ORDER BY id")]
+        self.assertEqual(len(ids), 2, "фильтр аудио работает как раньше")
+
+    def test_partial_index_holds_only_audio_rows(self):
+        database = db_mod.Database(self.path)
+        self.addCleanup(database.close)
+        # Частичный индекс не содержит строк video: сверяем по EXPLAIN QUERY PLAN,
+        # что запрос по audio идёт через videos_audio_idx, а по video - нет.
+        plan_audio = " ".join(row["detail"] for row in database.conn.execute(
+            "EXPLAIN QUERY PLAN SELECT id FROM videos WHERE media_kind='audio'"))
+        self.assertIn("videos_audio_idx", plan_audio,
+                      "запрос по аудио обязан использовать частичный индекс")
+        plan_video = " ".join(row["detail"] for row in database.conn.execute(
+            "EXPLAIN QUERY PLAN SELECT id FROM videos WHERE media_kind='video'"))
+        self.assertNotIn("videos_audio_idx", plan_video)
+
+    def test_second_run_is_safe(self):
+        database = db_mod.Database(self.path)
+        self.addCleanup(database.close)
+        db_mod._migrate_v13(database.conn)        # повтор не должен мешать
+        self.assertIsNotNone(self.index_sql(database.conn, "videos_audio_idx"))
+        self.assertIsNone(self.index_sql(database.conn, "videos_media_idx"))
+
+
 if __name__ == "__main__":
     unittest.main()
