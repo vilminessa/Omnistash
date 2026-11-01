@@ -76,11 +76,16 @@
    `--surface-2`, `--widget`, `--line`, `--text`, `--muted`, `--accent`,
    `--accent-2`, `--warn`, `--ok`, `--err`, `--info`, `--radius`, `--shadow`,
    `--row-h` остаются; добавляются `--line-strong`, `--focus`, `--on-accent`,
-   `--ok-*/--err-*/--info-*` для границ статусов, `--focus-ring`, `--log-bg`,
-   `--log-text`.
-3. Тема переключается одним блоком `[data-theme="light"]`
- (`ui_src/app.css:36-50`); внутри темы значения только литералы, никаких
-   `rgba()`-правил в компонентах (замена #10 и #24 из §1).
+   `--hover`, `--selected`, `--accent-dim`, `--on-scrim`, `--on-warn`,
+   `--ok-line/--warn-line/--err-line/--info-line` для границ статусов,
+   `--focus-ring`, `--shadow-1/--shadow-2`, `--veil`, `--log-bg`,
+   `--log-text`, `--scrim`, `--mono`.
+3. Тема переключается блоком `body[data-theme="<id>"]`; внутри темы значения
+   только литералы палитры, никаких `rgba()`-правил в компонентах
+   (замена #10 и #24 из §1). Кольцо фокуса и тени — композитные токены: они
+   содержат var()-ссылки на цвета палитры, и hex-литерал внутри запрещён
+   (`app/themes.py: COMPOSITE_VARS`, проверка `_composite_ok`) - иначе цвет
+   в тени прячется от сверки реестра с CSS.
 4. Внешних шрифтов нет и не будет (`tests/test_gui.py:375-386`): системный
    стек остаётся (`ui_src/app.css:64`), плюс моно-стек для чисел журнала.
 5. Имена токенов — в духе DTCG (Design Tokens Community Group): `color`,
@@ -107,6 +112,8 @@
   --text:   #dcdedd;   /* 13.47:1 к bg, 12.57 к surface */
   --muted:  #96a3b0;   /* 6.60 к surface, 7.08 к bg, 5.29 к widget */
   --on-accent: #04140d;/* 5.06:1 на --accent */
+  --on-scrim:  #dcdedd;/* 14.77:1 на --scrim (значок на обложке) */
+  --on-warn:   #241500;/* 10.07:1 на --warn (подпись на подложке состояния) */
 
   /* акцент */
   --accent:    #628d7c; /* 4.55:1 к surface */
@@ -129,9 +136,12 @@
   --log-bg:   #070d15; /* 8.77:1 с --log-text */
   --log-text: #a8b6c4;
   --scrim:    #040910; /* solid подложка значков на обложке (14.77 с --text) */
-  --shadow:   0 18px 50px rgba(0, 0, 0, .45);
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, .35);
-  --shadow-2: 0 2px 8px rgba(0, 0, 0, .35);
+  /* композитные токены (не hex): строки box-shadow с var()-ссылками;
+      --focus-ring объявлен выше, в блоке фокуса */
+  --shadow:   0 18px 50px rgba(0, 0, 0, .45); /* overlay/диалог */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, .35);   /* всплывающий блок */
+  --shadow-2: 0 2px 8px rgba(0, 0, 0, .35);   /* toast */
+  --veil:     rgba(4, 9, 16, .62);            /* фон под диалогом */
 }
 ```
 
@@ -150,6 +160,8 @@ body[data-theme="light"] {
   --text:   #1c2430;
   --muted:  #576472;      /* 6.05 surface, 5.34 bg, 5.05 widget */
   --on-accent: #ffffff;   /* 4.94:1 на --accent */
+  --on-scrim:  #ffffff;   /* scrim остаётся тёмным: подпись светлая */
+  --on-warn:   #ffffff;   /* --warn тёмный: подпись на подложке светлая */
   --accent:    #2f7d67;
   --accent-2:  #24634f;   /* hover: 7.06:1 с --on-accent — hover виден */
   --accent-dim:#c7ded6;
@@ -163,9 +175,13 @@ body[data-theme="light"] {
   --warn-line:  #d3b585;
   --err-line:   #d3a09a;
   --info-line:  #9dc0dd;
+  --log-bg:   #141b24; /* журнал остаётся тёмным терминалом и в светлой теме */
+  --log-text: #c9d4de;
   --scrim:    #040910;
+  --shadow:   0 18px 50px rgba(28, 36, 48, .22);
   --shadow-1: 0 1px 2px rgba(28, 36, 48, .12);
   --shadow-2: 0 2px 8px rgba(28, 36, 48, .14);
+  --veil:     rgba(28, 36, 48, .45);
 }
 ```
 
@@ -173,31 +189,36 @@ body[data-theme="light"] {
 
 ```css
 :root {
-  /* шаг 2/4/8 — как в Carbon spacing scale (2,4,8,12,16,24,32) */
+  /* шаг отступов — как в Carbon spacing scale (2,4,8,12,16,24,32,48).
+     Значения, которые правила сейчас держат вне шкалы (6, 10, 14, 18px),
+     переезжают на шкалу в шагах 2/3/5 плана (§8) — здесь они остаются
+     литералами, чтобы плотность таблицы и плитки не поехали вместе с токенами. */
   --s-1: 2px;  --s-2: 4px;  --s-3: 8px;  --s-4: 12px;
   --s-5: 16px; --s-6: 24px; --s-7: 32px; --s-8: 48px;
 
   --r-1: 4px; --r-2: 6px; --r-3: 8px; --r-4: 12px; --r-full: 999px;
-  --radius: var(--r-2);          /* legacy-алиас: правила не читают литералы */
+  --radius: var(--r-3);          /* legacy-алиас: 8px — то, что окно держит сейчас */
 
-  /* цели и контролы */
+  /* цели и контролы: эти токены объявляются шагами 2/4/5 (§8) - шаг 1
+     вносит только шкалу отступов/радиуса/типографики/веяний */
   --target:   44px;  /* комфортная цель (WCAG 2.5.8 требует 24 min) */
   --target-min: 24px;
   --ctl-h:    32px;  /* input/select/кнопка в компактном режиме */
   --ctl-h-lg: 40px;
   --gap-cta:  8px;   /* расстояние между соседними целями (сейчас 2px) */
 
-  /* плотность виртуального окна прокрутки */
+  /* плотность виртуального окна прокрутки: --row-h уже объявлен в шаге 1
+     (max(34px, calc(--font-size * 2.6))), --row-h-lg и остальные - шаг 2 */
   --row-h:     34px; /* compact; совпадает с ROW_H в app.js:11 */
   --row-h-lg:  44px; /* comfortable */
   --nav-h:     44px; /* item боковой навигации */
   --tile-min:  240px;
   --tile-row-h: 218px;
 
-  /* elevation */
-  --elev-1: var(--shadow-1);
-  --elev-2: var(--shadow-2);
-  --elev-3: var(--shadow);   /* overlay/диалог — legacy --shadow остаётся */
+  /* elevation: алиасов --elev-* нет. var(--shadow-1) подставляется там, где
+     переменная объявлена (:root), поэтому алиас заморозил бы значение тёмной
+     темы и светлая тема получила бы чёрную тень; правила читают
+     --shadow-1/--shadow-2/--shadow напрямую (значения по теме — §2.2/§2.3). */
 }
 ```
 
@@ -215,6 +236,10 @@ body[data-theme="light"] {
   --lh-tight: 1.25;
   --lh-body:  1.45;
   --track:    .02em;  /* обычный регистр, лёгкий трекинг; вместо ALL CAPS */
+
+  /* моноширинный стек журнала и JSON: то же значение, что
+     app/themes.py: font_stack("mono") (сверяет тест), не литерал в правилах */
+  --mono: Consolas, "Cascadia Mono", "Segoe UI Mono", monospace;
 }
 ```
 
@@ -274,7 +299,11 @@ based on the size of the animation»); в CSS это выражается выб
 | `--muted` (light) | 4.33 на bg | `#576472` | AA по 1.4.3 |
 | `#08150f` на акценте (`app.css:139`, `199`) | 3.78 (light) | `--on-accent` | AA по 1.4.3 |
 | `rgba(255,255,255,.04)` (`app.css:471`) | вне токенов | `--line` | светлая тема не требует отдельного правила |
-| `--shadow` (`app.css:33`) | один уровень | `--elev-1/2/3` | диалог, popover, toast разносят глубину |
+| `--shadow` (`app.css`) | один уровень | `--shadow` + `--shadow-1/--shadow-2` (без алиасов `--elev-*`) | диалог, popover, toast разносят глубину; тени правятся по теме (алиас заморозил бы тёмное значение) |
+| `rgba(4,9,16,.68)` + `#fff` на `.tile-play` | вне токенов | `--scrim` + `--on-scrim` | solid подложка значка, подпись AA 4.5 в любой теме |
+| `#20160a` на `--warn` (бейдж превью) | вне токенов | `--on-warn` | подпись на подложке состояния AA 4.5 |
+| `rgba(4,9,16,.62)` под диалогом | вне токенов | `--veil` | затемнение фона правится по теме |
+| `Consolas` литералом в `.json`/`.log` | два литерала | `--mono` | один стек из реестра `app/themes.py` (сверяет тест) |
 
 ---
 
@@ -298,7 +327,7 @@ based on the size of the animation»); в CSS это выражается выб
 (сейчас `padding: 10px; gap: 10px`, `ui_src/app.css:210`); toolbar — один ряд с
 `flex-wrap`, высота контролов `--ctl-h`; заголовок экрана `--fs-head`,
 обычный регистр; секции — карточка `--surface` + `--line` + `--r-3` +
-`--elev-1`; `overflow: hidden` + `min-width: 0` на текстовых ячейках
+`--shadow-1`; `overflow: hidden` + `min-width: 0` на текстовых ячейках
 (оставить как есть: `ui_src/app.css:550-553`).
 
 ### 3.1 Библиотека: таблица (режим «списком»)
@@ -377,7 +406,7 @@ empty: заменяет сетку (не overlay)
 - Сегмент Библиотека/Каталог: `role="radiogroup"` с `aria-checked`, активный
   фон `--surface-2` + underline `--accent` (2 индикатора, NN/g); высота
   контролов `--ctl-h`.
-- `.cat-card`: фон `--surface-2`, граница `--line`, `--r-3`, `--elev-1`;
+- `.cat-card`: фон `--surface-2`, граница `--line`, `--r-3`, `--shadow-1`;
   hover — `--hover` + граница `--line-strong`; фокус — `--focus-ring`.
 - Прогресс: `role="progressbar"` + `aria-valuenow/min/max` + `aria-label`;
   недетерминированная полоса без `aria-valuenow` и со счётчиком карточек
@@ -441,7 +470,7 @@ dialog (aria-modal,-labelledby)
 Правила диалога (APG Dialog (Modal)): `aria-labelledby` на заголовок, фокус
 переходит в диалог и возвращается на инициатора, Tab по кругу, Escape закрывает,
 фон затемняется `--scrim` за `--dur-slow-02`. Ширина `min(720px, 92vw)`,
-`--elev-3`, `--r-4`. Отказ по `kind` остаётся текстом бэкенда (§7).
+`--shadow`, `--r-4`. Отказ по `kind` остаётся текстом бэкенда (§7).
 
 ### 3.7 Панель мультивыбора (`sel-bar`, `index.html:114-137`, `app.css:730-743`)
 
@@ -452,7 +481,7 @@ sticky bar над content: «Выбрано: N» (#sel-count) · хранили�
 ```
 
 - Sticky (`position: sticky; bottom: 0`) внутри content, фон `--surface`,
-  граница `--line-strong`, `--elev-2`; высота `--ctl-h-lg`; счётчик `var(--nums)`.
+  граница `--line-strong`, `--shadow-2`; высота `--ctl-h-lg`; счётчик `var(--nums)`.
 - Порядок кнопов (9 кнопок, `index.html:114-137`) фиксируется: групповые
   операции → primary «Скачать» → «Снять выбор» последним справа; разрушительные
   («Удалить папку», удаление строк внутри «Операции…`) — с диалогом подтверждения,
@@ -555,7 +584,7 @@ panel: address (readonly input, --fs-sm, mono для URL) · статус зах
 | `.tab` | hover: цвет `--text`; active: цвет `--text` + underline 2 px `--accent` + фон `--selected` (два индикатора) | `--dur-fast-01` |
 | боковая навигация | hover: фон `--hover`; current: фон `--selected` + полоса 3 px `--accent` | `--dur-fast-01` |
 | строка таблицы | hover: фон `--hover`; selected: фон `--selected`; focus: `--focus-ring` | `--dur-fast-02` |
-| плитка | hover: граница `--line-strong`, `--elev-1`; focus: `--focus-ring`; play-кнопка всегда видима | `--dur-fast-02` |
+| плитка | hover: граница `--line-strong`, `--shadow-1`; focus: `--focus-ring`; play-кнопка всегда видима | `--dur-fast-02` |
 | чекбокс | checked: фон `--accent`, галка `--on-accent`; indeterminate: полоса | `--dur-fast-01` |
 | chip-тег | active: фон `--selected`, граница `--line-strong`, подпись «фильтр активен» | `--dur-fast-01` |
 | notice | появление: `opacity 0→1` + `transform translateY(-4px)→0` | `--dur-moderate-02` + `--ease-expressive` |
@@ -639,6 +668,9 @@ WCAG SC 2.3.3 (Animation from Interactions) — анимация не обяза
 | кольцо фокуса `--focus` | нет индикатора | 11.01 / 5.93 к surface; 8.82 / 4.94 к widget | 3:1 ✔ |
 | hover-строка vs base | 1.02 (тон) | фон `--hover` даёт 11.32 / 14.67 для текста | состояние видно |
 | журнал `--log-text`/`--log-bg` | 8.77 | 9.42 | ✔ |
+| подпись на scrim (`--on-scrim`) | `#fff` на `rgba(4,9,16,.68)` — полупрозрачно, зависит от обложки | 14.77 / 19.97 на solid `--scrim` | AA 4.5 ✔ |
+| подпись на подложке `--warn` (`--on-warn`) | `#20160a` вне токенов | 10.07 / 5.93 | AA 4.5 ✔ |
+| hover строки vs selected | один тон наведённого и выбранного в тёмных темах (widget = hover по сути) | разные фоны `--hover`/`--selected`: тон различается на 1.13 / 1.23 | состояние видно |
 
 Нормы: WCAG SC 1.4.3 (4.5:1 обычный текст, 3:1 крупный), SC 1.4.11
 (3:1 компоненты/состояния/значимая графика), SC 2.4.13 (≥2 px сплошная
@@ -648,14 +680,21 @@ SC 2.5.8 (цель ≥24×24 CSS px), SC 2.4.7 (видимый фокус).
 ### 5.2 Фокус (`:focus-visible`)
 
 ```css
-:focus-visible { outline: none; box-shadow: var(--focus-ring); }
-input:focus, select:focus { outline: none; border-color: var(--line-strong);
-                            box-shadow: var(--focus-ring); }        /* замена №1 */
-.tab:focus-visible, .btn:focus-visible, .icon-btn:focus-visible,
-.seg-btn:focus-visible, .grid-head [data-col]:focus-visible,
-.tile:focus-visible, .row:focus-visible, .tree-item:focus-visible,
-nav a:focus-visible, .cat-card:focus-visible { box-shadow: var(--focus-ring); }
-:focus-visible .tile-play, :focus-within .tile-play { opacity: 1; }  /* замена №4 */
+:where(button, .btn, .tab, .icon-btn, .link-btn, .seg-btn, .view-btn,
+       .size-btn, .tree-item, .mode-item, .check, .storage-default,
+       .grid-body, .grid-head [data-col], .tile, .row, .cat-card,
+       .pick-row, .storage-row, .dedupe-actions label):focus-visible {
+  outline: none; box-shadow: var(--focus-ring);
+}
+/* Мышиный фокус: меняется только граница контрола (кольцо на клик не нужен);
+   клавиатурный (:focus-visible) добавляет кольцо поверх границы — замена №1. */
+input:focus, select:focus, textarea:focus {
+  outline: none; border-color: var(--line-strong);
+}
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+  border-color: var(--focus); box-shadow: var(--focus-ring);
+}
+.tile:hover .tile-play, .tile:focus-within .tile-play { opacity: 1; }  /* замена №4 */
 ```
 
 Двухцветное кольцо (`--bg` + `--focus`) — техника C40 из Understanding SC 2.4.7;
@@ -846,23 +885,23 @@ fallback на широком экране (<1200 px — A с nav, >1400 px — B
 
 ---
 
-## 8. План внедрения (порядок, проверка каждой шага)
+## 8. План внедрения (порядок, проверка каждого шага)
 
 Проверка после каждого шага: `python tools/build_preview.py` (офлайн-страница;
 `--first` — первая панель, если нужна конкретная), затем
-`python -m pytest -q` (910 тестов, `python -m pytest -q --collect-only` →
-«910 tests collected in 0.90s»). Плюс ручной офлайн чек: контраст, фокус,
+`python -m unittest discover -s tests` (1138 тестов, OK skipped=17;
+`python tools/build_preview.py` перед этим и `node --check ui_src/app.js` для правок JS). Плюс ручной офлайн чек: контраст, фокус,
 Escape, hover/keyboard, узкий экран.
 
 | Шаг | Что меняется | Файлы | Проверка |
 |---|---|---|---|
-| 1 | **Токен-система**: новые токены цвета/отступов/радиуса/elevation/типографики/веяний; `--line-strong`, `--focus`, `--on-accent`, `--hover`, `--selected`, `--scrim`, `--log-*`; литералы в правилах заменены токенами | `ui_src/app.css` | `build_preview.py`: обе темы, контраст §5.1; `pytest -q` без регрессий; гварды §7 intact |
+| 1 | **Токен-система**: новые токены цвета/отступов/радиуса/elevation/типографики/веяний; `--line-strong`, `--focus`, `--on-accent`, `--hover`, `--selected`, `--scrim`, `--log-*`; литералы в правилах заменены токенами | `ui_src/app.css` | `build_preview.py`: обе темы, контраст §5.1; `python -m unittest discover -s tests` без регрессий; гварды §7 intact |
 | 2 | **Плотность таблицы**: `--row-h` из токена, JS читает CSS-значение (`app.js:11` → `getComputedStyle`); hover/selected/focus состояния; `tabular-nums` на числовые ячейки; шапка sticky и обычный регистр; `aria-sort` на columnheader + табовая семантика; `content-visibility: auto` + `contain-intrinsic-size` | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py` (100k mock): прокрутка, сортировка, selection; `test_grid_view.py`, `test_ui_hidden.py` |
-| 3 | **Карточки каталога**: токены вместо `#000`/`rgba()`, solid-подложки ярлыков, состояния через подпись + границу (без `opacity` для текста), фокус на карточке, `role="progressbar"` + `aria-valuetext`, placeholder без `{площадка}` | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py --first` (каталог), `pytest -q` |
-| 4 | **Панель выделения**: sticky `sel-bar` с `--elev-2`, счётчик `aria-live`, `--target` и `--gap-cta` на кнопках, destructive последним + диалог подтверждения с N | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py`: мультивыбор на 120 строк; `test_bulk_ops.py` |
+| 3 | **Карточки каталога**: токены вместо `#000`/`rgba()`, solid-подложки ярлыков, состояния через подпись + границу (без `opacity` для текста), фокус на карточке, `role="progressbar"` + `aria-valuetext`, placeholder без `{площадка}` | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py --first` (каталог), `python -m unittest discover -s tests` |
+| 4 | **Панель выделения**: sticky `sel-bar` с `--shadow-2`, счётчик `aria-live`, `--target` и `--gap-cta` на кнопках, destructive последним + диалог подтверждения с N | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py`: мультивыбор на 120 строк; `test_bulk_ops.py` |
 | 5 | **Карточка видео/аудио + диалог details/legal**: `aria-labelledby`, ловушка фокуса, Escape, возврат фокуса; action-ряд с `--ctl-h`; meta grid tabular; §3.8 дефолт отказа | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py`: открытие карточки с клавиатуры, Escape, Tab по кругу; `test_gui.py` |
 | 6 | **Настройки**: секции-карточки, `minmax()` вместо 260 px, хинты `--fs-sm` на `--surface`, `role="switch"`, числовые поля с `aria-describedby`, progressive disclosure для «Дополнительно», нейтральный текст хинтов колонок | `ui_src/app.css`, `ui_src/app.js` (+ правка текста хинта в `app/settings_schema.py` — только текст, не ключи) | `build_preview.py`: обе темы, RU/EN расширение; `test_settings_schema.py` |
-| 7 | **Веяния**: переходы из токенов §2.7, асимметричные вход/уход, глобальный `prefers-reduced-motion`, live-регионы тоста/статуса, `--focus-ring` на всех контролах и строках | `ui_src/app.css`, `ui_src/app.js` | `build_preview.py` + `prefers-reduced-motion` эмуляция; `pytest -q`; diff «анимации только CSS» (`@keyframes` новые отсутствуют кроме уже имеющегося `cat-sweep`) |
+| 7 | **Веяния**: переходы из токенов §2.7, асимметричные вход/уход, глобальный `prefers-reduced-motion`, live-регионы тоста/статуса, `--focus-ring` на всех контролах и строках | `ui_src/app.css`, `ui_src/app.js` | `build_preview.py` + `prefers-reduced-motion` эмуляция; `python -m unittest discover -s tests`; diff «анимации только CSS» (`@keyframes` новые отсутствуют кроме уже имеющегося `cat-sweep`) |
 
 Порядок выбран так, чтобы токены были фундаментом (шаг 1), плотность данных —
 самой дорогой частью (шаг 2), а «веяния» шли последними: они не должны
