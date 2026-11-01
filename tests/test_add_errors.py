@@ -5,20 +5,27 @@ kind - единственная правда об отказе: «видео н�
 и путать их нельзя (повтор с VPN против удалённого видео ничего не даст).
 """
 
+import threading
 import unittest
 from unittest import mock
 
 from app import google_auth
 from app import sources
-from app.sources import FetchError, classify_failure, failure_message
+from app.sources import Aborted, FetchError, classify_failure, failure_message
+from app.sources import stop_requested
 from tests.test_gui import GuiCase, wait_until
 
 
 class FakeYDL:
-    """Подмена YoutubeDL: бросает переданный отказ, запоминает opts."""
+    """Подмена YoutubeDL: бросает переданный отказ, запоминает opts.
+
+    on_attempt вызывается перед отказом - этим подменяется отмена человеком
+    в середине прогона дорог (см. TestHonestAbort).
+    """
 
     created = []
     raises = None
+    on_attempt = None
 
     def __init__(self, opts, **kwargs):
         FakeYDL.created.append(dict(opts))
@@ -30,6 +37,8 @@ class FakeYDL:
         return False
 
     def extract_info(self, url, download=False):
+        if FakeYDL.on_attempt:
+            FakeYDL.on_attempt()
         if FakeYDL.raises:
             raise FakeYDL.raises
         return {"id": "vid00000000", "title": "Клип", "duration": 100}
@@ -86,6 +95,7 @@ class TestFetchVideoErrors(unittest.TestCase):
         self.addCleanup(self._patch.stop)
         FakeYDL.created = []
         FakeYDL.raises = None
+        FakeYDL.on_attempt = None
 
     def test_unavailable_video_reports_unavailable_kind(self):
         FakeYDL.raises = sources.yt_dlp.utils.DownloadError(
@@ -97,9 +107,9 @@ class TestFetchVideoErrors(unittest.TestCase):
 
     def test_blocked_network_reports_blocked_kind(self):
         FakeYDL.raises = sources.yt_dlp.utils.DownloadError(
-            "ERROR: [PornHub] k: Unable to download webpage: HTTP Error 410: Gone")
+            "ERROR: [adult site] k: Unable to download webpage: HTTP Error 410: Gone")
         with self.assertRaises(FetchError) as ctx:
-            sources.fetch_video("https://www.pornhub.com/view_video.php?viewkey=k")
+            sources.fetch_video("https://example.invalid/view_video.php?viewkey=k")
         self.assertEqual(ctx.exception.kind, "blocked")
         self.assertIn("недоступна из вашей сети", str(ctx.exception))
 
@@ -123,6 +133,79 @@ class TestFetchVideoErrors(unittest.TestCase):
         with browser:
             sources.fetch_video("https://www.youtube.com/watch?v=vid00000000")
         self.assertEqual(FakeYDL.created[0]["cookiesfrombrowser"], ("chrome", None))
+
+
+class TestHonestAbort(unittest.TestCase):
+    """Отмена человеком не должна выглядеть как отказ площадки.
+
+    Дорога могла успеть упасть на 403/«не бот» ровно в момент нажатия
+    «Отмена». Если это ветвить по тексту отказа, окно показало бы
+    «подтвердите, что вы не бот» + подсказку про обход вместо честной
+    отмены - и человек стал бы искать причину, которой нет.
+    """
+
+    def setUp(self):
+        self._patch = mock.patch.object(sources.yt_dlp, "YoutubeDL", FakeYDL)
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
+        FakeYDL.created = []
+        FakeYDL.raises = None
+        FakeYDL.on_attempt = None
+
+    def test_stop_during_chain_aborts_single_video(self):
+        stop = threading.Event()
+        FakeYDL.raises = sources.yt_dlp.utils.DownloadError(
+            "ERROR: Please sign in to confirm you're not a bot")
+        FakeYDL.on_attempt = stop.set
+        with self.assertRaises(Aborted):
+            sources.fetch_video("https://www.youtube.com/watch?v=vid00000000",
+                                settings={}, stop=stop)
+
+    def test_stop_during_chain_aborts_snapshot(self):
+        stop = threading.Event()
+        FakeYDL.raises = sources.yt_dlp.utils.DownloadError(
+            "Unable to download webpage: HTTP Error 410: Gone")
+        FakeYDL.on_attempt = stop.set
+        with self.assertRaises(Aborted):
+            sources.fetch_snapshot("https://www.youtube.com/watch?v=vid00000000",
+                                   settings={}, stop=stop)
+
+    def test_stop_before_request_aborts(self):
+        """Отмена до запроса: пустой прогон, но тоже отмена, не отказ площадки."""
+        stop = threading.Event()
+        stop.set()
+        FakeYDL.raises = sources.yt_dlp.utils.DownloadError(
+            "ERROR: [youtube] k: Offline.")
+        with self.assertRaises(Aborted):
+            sources.fetch_video("https://www.youtube.com/watch?v=vid00000000",
+                                settings={}, stop=stop)
+
+    def test_non_platform_exception_with_stop_aborts(self):
+        """Не-сетевой исключение в середине прогона - тоже честная отмена."""
+        stop = threading.Event()
+        FakeYDL.raises = RuntimeError("площадка вернула мусор")
+        FakeYDL.on_attempt = stop.set
+        with self.assertRaises(Aborted):
+            sources.fetch_video("https://www.youtube.com/watch?v=vid00000000",
+                                settings={}, stop=stop)
+
+    def test_without_stop_keeps_the_honest_failure(self):
+        """Без отмены причина остаётся: подсказки про «не бот» нужны человеку."""
+        FakeYDL.raises = sources.yt_dlp.utils.DownloadError(
+            "ERROR: Please sign in to confirm you're not a bot")
+        with self.assertRaises(FetchError) as ctx:
+            sources.fetch_video("https://www.youtube.com/watch?v=vid00000000")
+        self.assertEqual(ctx.exception.kind, "bot")
+        self.assertIn("аккаунт", str(ctx.exception))
+
+    def test_stop_flag_checked_without_breaking_caller(self):
+        """stop мог быть None или объектом без is_set - проверка не валит воркер."""
+        self.assertFalse(stop_requested(None))
+        self.assertFalse(stop_requested(object()))
+        self.assertFalse(stop_requested(threading.Event()))
+        gone = threading.Event()
+        gone.set()
+        self.assertTrue(stop_requested(gone))
 
 
 class TestUnsupportedLink(unittest.TestCase):

@@ -60,6 +60,20 @@ class Aborted(Exception):
     """Пользователь нажал «Отмена» между чанками - БД не тронута."""
 
 
+def stop_requested(stop) -> bool:
+    """Отмена человеком: безопасная проверка флага stop.
+
+    Вызывающий мог передать объект без is_set (мок в тесте) или None: проверка
+    не должна валить воркер — она отвечает только «отменено / не отменено».
+    """
+    if stop is None:
+        return False
+    try:
+        return bool(stop.is_set())
+    except AttributeError:
+        return False
+
+
 def classify_failure(text: str) -> str:
     """Причина отказа площадки по тексту ответа (один путь для всех мест).
 
@@ -224,6 +238,12 @@ def _extract(request_url: str, items: str, settings: dict | None = None,
                                                        clean_text(exc)),
             log=log, stop=stop, retryable=_download_error)
     except yt_dlp.utils.DownloadError as exc:      # не-сетевые исключения
+        if stop_requested(stop):
+            # Отмена человеком в середине цепочки дорог: дорога могла успеть
+            # упасть на 403/«не бот», но это НЕ отказ площадки - иначе окно
+            # показало бы «подтвердите, что вы не бот» + mesh-подсказку
+            # вместо честной отмены.
+            raise Aborted() from exc
         detail = clean_text(exc)
         kind = classify_failure(detail)
         raise FetchError(failure_message(kind, detail), kind=kind) from exc
@@ -285,6 +305,10 @@ def fetch_video(url: str, *, settings: dict | None = None, stop=None,
                                                        clean_text(exc)),
             log=log, stop=stop, retryable=_download_error)
     except Exception as exc:  # noqa: BLE001 - кривой ответ = честный отказ
+        if stop_requested(stop):
+            # Отмена в середине цепочки дорог - честная отмена, а не отказ
+            # площадки (см. fetch_snapshot).
+            raise Aborted() from exc
         text = clean_text(exc)
         kind = classify_failure(text)
         raise FetchError(failure_message(kind, text), kind=kind) from exc
