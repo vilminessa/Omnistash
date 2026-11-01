@@ -14,22 +14,109 @@
    Проверка - в браузере по getComputedStyle, не по атрибуту hidden. */
 [hidden] { display: none !important; }
 
+/* Токены (DESIGN-UI §2): правила читают переменные, а не литералы.
+   Палитра - тот же набор, что реестр app/themes.py (tests/test_themes.py
+   сверяет значения), поэтому ни одно правило не требует исключений по теме.
+   Значения цвета пересчитаны по формуле WCAG относительной яркости (§5.1). */
 :root {
+  /* поверхность */
   --bg: #0c1622;
   --surface: #111d2c;
   --surface-2: #16263a;
   --widget: #1b2f47;
-  --line: #22344a;
+  --hover: #16263a;        /* фон наведённой строки/плитки */
+  --selected: #1b2f47;     /* фон выбранной строки - темнее hover */
+
+  /* границы */
+  --line: #45617f;         /* декоративный разделитель: не подпись, не контрол */
+  --line-strong: #5b799b;  /* граница контрола: 3.76:1 к surface (SC 1.4.11) */
+
+  /* подписи */
   --text: #dcdedd;
-  --muted: #8b97a3;
+  --muted: #96a3b0;        /* 7.08 к bg, 5.29 к widget (прежний --muted: 4.57) */
+  --on-accent: #04140d;    /* подпись на акцентной подложке (кнопка, badge) */
+  --on-scrim: #dcdedd;     /* значок/длительность поверх затемнённой обложки */
+  --on-warn: #241500;      /* подпись на подложке --warn (в светлой - светлая) */
+
+  /* акцент */
   --accent: #628d7c;
-  --accent-2: #7fb3a0;
-  --on-accent: #08150f;   /* подпись на акцентной подложке (кнопка, badge) */
+  --accent-2: #7fb3a0;     /* hover акцентной кнопки */
+  --accent-dim: #33506c;   /* «акцент размытый»: подложка disabled primary */
+
+  /* фокус и состояния */
+  --focus: #ffc766;        /* кольцо фокуса: 11.01:1 к surface (SC 2.4.7) */
   --warn: #ffb454;
-  --ok: #3fbf6b;
-  --err: #e0554f;
-  --info: #5aa9e6;
-  --radius: 8px;
+  --ok: #46c079;
+  --err: #ea6a63;
+  --info: #6bb6e8;
+
+  /* рамки карточек состояния - декоративные, как --line: подпись на них не
+      лежит, цвет состояния несёт текст (SC 1.4.1) */
+  --ok-line: #2f6b4a;
+  --warn-line: #7a5321;
+  --err-line: #7c332e;
+  --info-line: #2b5a7d;
+
+  /* служебные подложки */
+  --log-bg: #070d15;       /* журнал: своя подложка, не --bg окна */
+  --log-text: #a8b6c4;     /* 9.42:1 к --log-bg */
+  --scrim: #040910;        /* solid подложка значков на обложке (14.77 к --text) */
+
+  /* elevation и кольцо фокуса: строки box-shadow (COMPOSITE_VARS в
+      app/themes.py). Здесь нет алиасов вроде --elev-1: var(--shadow-1) -
+      var() подставляется там, где переменная объявлена (:root), поэтому
+      алиас заморозил бы значение тёмной темы и светлая тема получила бы
+      чёрную тень; правила читают --shadow-1/--shadow-2/--shadow прямо. */
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus);
+  --shadow: 0 18px 50px rgba(0, 0, 0, .45);   /* диалог, оверлей */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, .35);   /* всплывающий блок */
+  --shadow-2: 0 2px 8px rgba(0, 0, 0, .35);   /* toast */
+  --veil: rgba(4, 9, 16, .62);                /* фон под диалогом */
+
+  /* шаг отступов 2/4/8/12/16/24/32/48 (Carbon spacing scale). Значения,
+     которых правила пока держат вне шкалы (6, 10, 14, 18px), переезжают на
+     шкалу в шагах 2/3/5 плана (§8) - здесь они остаются литералами, чтобы
+     плотность таблицы и плитки не поехала вместе с токенами. */
+  --s-1: 2px; --s-2: 4px; --s-3: 8px; --s-4: 12px;
+  --s-5: 16px; --s-6: 24px; --s-7: 32px; --s-8: 48px;
+
+  /* радиусы */
+  --r-1: 4px; --r-2: 6px; --r-3: 8px; --r-4: 12px; --r-full: 999px;
+  --radius: var(--r-3);    /* legacy-алиас: 8px - то, что окно держит сейчас */
+
+  /* типографика (§2.5): --fs-cap допустим только на --surface/--surface-2,
+     на --bg мелкий текст поднимается до --fs-sm (замена №19). */
+  --fs-cap: 11.5px;
+  --fs-sm: 12.5px;
+  --fs-body: 13px;
+  --fs-lg: 14px;
+  --fs-title: 15px;
+  --fs-head: 17px;
+  --lh-tight: 1.25;
+  --lh-body: 1.45;
+  --track: .02em;          /* обычный регистр + лёгкий трекинг вместо ALL CAPS */
+
+  /* числа (§2.6): ширины цифр одинаковые, счётчики не «пляшут» */
+  --nums: tabular-nums;
+
+  /* моноширинный стек: тот же, что реестр app/themes.py (font_stack("mono")),
+     сверяет тест; журнал и JSON читаются им независимо от выбранного
+     семейства шрифта окна */
+  --mono: Consolas, "Cascadia Mono", "Segoe UI Mono", monospace;
+
+  /* веяния (§2.7): длительность растёт с размером animate-объекта;
+     непрерывные циклы (пульс статуса, sweep полосы каталога) держат свою
+     длительность литералом - это не переход, а цикл без конца и края. */
+  --dur-fast-01: 70ms;      /* hover/press кнопки, toggle */
+  --dur-fast-02: 110ms;     /* fade, появление значка */
+  --dur-moderate-01: 150ms; /* короткое перемещение, small expansion */
+  --dur-moderate-02: 240ms; /* toast, системное сообщение */
+  --dur-slow-01: 400ms;     /* большое раскрытие */
+  --dur-slow-02: 700ms;     /* затемнение фона под диалогом */
+  --ease-productive: cubic-bezier(.2, 0, .38, .9);  /* UI-работа */
+  --ease-expressive: cubic-bezier(.4, .14, .3, 1);  /* появление панели/диалога */
+  --ease-exit: cubic-bezier(.4, .14, 1, 1);         /* уход (только opacity) */
+
   /* Шрифт окна (M15): значения приходят из настроек (font_size/font_scale/
      font_family), здесь - дефолты те же, что app/themes.py. Скачивания
      шрифтов нет: только системные стек-семейства. */
@@ -41,28 +128,51 @@
      (JS читает computed --row-h), а значения границ/множителя сверяет
      тест с app/themes.py (ROW_MIN/ROW_FACTOR). */
   --row-h: max(34px, calc(var(--font-size, 13px) * 2.6));
-  --shadow: 0 18px 50px rgba(0, 0, 0, .45);
 }
 
-/* Темы (M15): тот же набор переменных, что реестр app/themes.py - значения
+/*
+   Темы (M15): тот же набор переменных, что реестр app/themes.py - значения
    сверяет тест (tests/test_themes.py), чтобы список тем в окне и палитра в
    CSS не могли разойтись незаметно. Читаемость каждой темы проверяется
-   контрастом подписей и подложек (themes.check). */
+   контрастом подписей и подложек (themes.check).
+
+   Блок темы держит ровно переменные реестра: шрифт, отступы и веяния - не
+   цвет, поэтому они живут в :root и по теме не правятся.
+*/
 body[data-theme="light"] {
   --bg: #eef1f5;
   --surface: #ffffff;
   --surface-2: #f6f8fa;
   --widget: #e6ebf1;
-  --line: #d3dae2;
+  --hover: #f6f8fa;
+  --selected: #d8e2ea;
+  --line: #899fb5;
+  --line-strong: #6f869d;  /* 3.77 к surface, 3.14 к widget */
   --text: #1c2430;
-  --muted: #66727f;
-  --accent: #2f7d67;
-  --accent-2: #1f6b58;
+  --muted: #576472;        /* было #66727f: 4.33 к bg - вне AA */
   --on-accent: #ffffff;
-  --warn: #b87400;
-  --ok: #157f47;
-  --err: #c0392f;
-  --info: #1f6fb2;
+  --on-scrim: #ffffff;
+  --on-warn: #ffffff;      /* --warn тёмный, поэтому подпись светлая */
+  --accent: #2f7d67;
+  --accent-2: #24634f;     /* темнее акцента: hover кнопки видим (было = accent) */
+  --accent-dim: #c7ded6;
+  --focus: #8a5a00;        /* 5.93 к surface */
+  --warn: #8a5a00;         /* было #b87400: 3.35 к bg - вне AA */
+  --ok: #0f6b3d;           /* было #157f47: 4.46 к bg - вне AA */
+  --err: #b02e24;
+  --info: #155a94;
+  --ok-line: #9fc7b3;
+  --warn-line: #d3b585;
+  --err-line: #d3a09a;
+  --info-line: #9dc0dd;
+  --log-bg: #141b24;       /* журнал остаётся тёмным терминалом и в светлой теме */
+  --log-text: #c9d4de;
+  --scrim: #040910;
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus);
+  --shadow: 0 18px 50px rgba(28, 36, 48, .22);
+  --shadow-1: 0 1px 2px rgba(28, 36, 48, .12);
+  --shadow-2: 0 2px 8px rgba(28, 36, 48, .14);
+  --veil: rgba(28, 36, 48, .45);
 }
 
 body[data-theme="contrast"] {
@@ -70,16 +180,39 @@ body[data-theme="contrast"] {
   --surface: #0b1017;
   --surface-2: #121a24;
   --widget: #1b2632;
-  --line: #33455a;
+  --hover: #121a24;
+  --selected: #24364a;
+  /* Границы подняты: на почти чёрной подложке прежний --line (#33455a)
+     границу почти не читал, а граница контрола должна быть различима. */
+  --line: #5c7690;
+  --line-strong: #7f9ab5;
   --text: #f6f8fa;
   --muted: #b6c2cd;
+  --on-accent: #0a0603;
+  --on-scrim: #ffffff;
+  --on-warn: #241500;
   --accent: #ffd166;
   --accent-2: #ffe3a3;
-  --on-accent: #0a0603;
+  --accent-dim: #2b2318;
+  /* Фокус отличается от акцента: акцент - золото, кольцо - светлая голубая,
+     иначе «фокус» и «акцентная кнопка» выглядят одним цветом. */
+  --focus: #cfe6ff;
   --warn: #ff9f43;
   --ok: #2fd9a0;
   --err: #ff6b6b;
   --info: #6cb8ff;
+  --ok-line: #4fae7f;
+  --warn-line: #c08a3e;
+  --err-line: #d07070;
+  --info-line: #5f9fd6;
+  --log-bg: #010305;
+  --log-text: #c8d6e2;
+  --scrim: #000000;
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus);
+  --shadow: 0 18px 50px rgba(0, 0, 0, .6);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, .45);
+  --shadow-2: 0 2px 8px rgba(0, 0, 0, .45);
+  --veil: rgba(2, 4, 6, .75);
 }
 
 /* «Своя» тема: палитра правится прямо здесь (тёмное дерево + золото),
@@ -89,16 +222,37 @@ body[data-theme="custom"] {
   --surface: #1c1712;
   --surface-2: #241d16;
   --widget: #2c241c;
-  --line: #3d3226;
+  --hover: #241d16;
+  --selected: #3a2f24;
+  --line: #5d4a36;
+  /* Рамка контрола светлее поля контрола: прежний тон (#3d3226-ish) на
+     --widget давал 2.83:1 - контрол на подложке не различим (SC 1.4.11). */
+  --line-strong: #8d745c;
   --text: #ece6dc;
-  --muted: #a89b8c;
+  --muted: #b4a692;        /* был #a89b8c: на --widget ниже 3.0 */
+  --on-accent: #14100c;
+  --on-scrim: #f6efe4;
+  --on-warn: #241500;
   --accent: #c9a24b;
   --accent-2: #d9b872;
-  --on-accent: #14100c;
+  --accent-dim: #4a3a22;
+  --focus: #f0b35c;
   --warn: #d99a4a;
   --ok: #35b07a;
   --err: #d4573f;
   --info: #6aa9d8;
+  --ok-line: #2e6b52;
+  --warn-line: #74522b;
+  --err-line: #7c3a2b;
+  --info-line: #2b5a7d;
+  --log-bg: #0b0806;
+  --log-text: #c8bda9;
+  --scrim: #0a0705;
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus);
+  --shadow: 0 18px 50px rgba(0, 0, 0, .5);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, .4);
+  --shadow-2: 0 2px 8px rgba(0, 0, 0, .4);
+  --veil: rgba(12, 9, 6, .62);
 }
 
 * { box-sizing: border-box; }
@@ -117,7 +271,7 @@ body {
      множитель уже применён к --font-size на <html> (applyChrome). */
   font-family: var(--font-family);
   font-size: var(--font-size);
-  line-height: 1.45;
+  line-height: var(--lh-body);
   overflow: hidden;
   user-select: none;
 }
@@ -128,11 +282,11 @@ body {
   transform: translateX(-50%);
   z-index: 99;
   background: var(--warn);
-  color: #20160a;
-  font-size: 11px;
+  color: var(--on-warn);
+  font-size: var(--fs-cap);
   font-weight: 600;
   padding: 2px 10px;
-  border-radius: 0 0 6px 6px;
+  border-radius: 0 0 var(--r-2) var(--r-2);
 }
 
 .muted { color: var(--muted); }
@@ -143,20 +297,20 @@ body {
 .head {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: var(--s-5);
   padding: 10px 14px;
   background: linear-gradient(180deg, var(--surface-2), var(--surface));
   border-bottom: 1px solid var(--line);
 }
 
 .brand .logo {
-  font-size: 17px;
+  font-size: var(--fs-head);
   font-weight: 700;
-  letter-spacing: .4px;
+  letter-spacing: var(--track);
 }
 
 .brand .sub {
-  font-size: 11px;
+  font-size: var(--fs-cap);
   color: var(--muted);
 }
 
@@ -164,14 +318,14 @@ body {
   display: flex;
   gap: 14px;
   margin-left: auto;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--muted);
   flex-wrap: wrap;
 }
 
 .head-stats b { color: var(--text); font-weight: 600; }
 
-.head-actions { display: flex; gap: 8px; align-items: center; }
+.head-actions { display: flex; gap: var(--s-3); align-items: center; }
 
 /* ---------------------------- кнопки ---------------------------- */
 
@@ -185,16 +339,21 @@ body {
   font: inherit;
   font-weight: 600;
   cursor: pointer;
-  transition: background .15s, border-color .15s, opacity .15s;
+  transition: background var(--dur-fast-02) var(--ease-productive), border-color var(--dur-fast-02) var(--ease-productive), opacity var(--dur-fast-02) var(--ease-productive);
 }
 
-.btn:hover:not(:disabled) { background: var(--surface-2); border-color: var(--accent); }
+.btn:hover:not(:disabled) { background: var(--hover); border-color: var(--accent); }
 .btn:active:not(:disabled) { transform: translateY(1px); }
 .btn:disabled { opacity: .45; cursor: default; }
 
 .btn.primary { background: var(--accent); border-color: var(--accent);
                color: var(--on-accent); }
 .btn.primary:hover:not(:disabled) { background: var(--accent-2); }
+/* Отключённая акцентная кнопка: opacity .45 одна не читается (SC 1.4.1 -
+   цвет не единственный носитель смысла). Подложка становится «размытым
+   акцентом», подпись - приглушённой: тон и форма меняются вместе. */
+.btn.primary:disabled { background: var(--accent-dim);
+                        border-color: var(--accent-dim); color: var(--muted); }
 .btn.ghost { background: transparent; }
 .btn.danger { border-color: var(--err); color: var(--err); background: transparent; }
 
@@ -204,9 +363,9 @@ body {
   background: transparent;
   color: var(--muted);
   width: 28px; height: 28px;
-  border-radius: 6px;
+  border-radius: var(--r-2);
   cursor: pointer;
-  font-size: 15px;
+  font-size: var(--fs-title);
   line-height: 1;
 }
 .icon-btn:hover { background: var(--widget); color: var(--text); }
@@ -227,7 +386,7 @@ body {
 
 .tabs {
   display: flex;
-  gap: 2px;
+  gap: var(--s-1);
   padding: 0 10px;
   background: var(--surface);
   border-bottom: 1px solid var(--line);
@@ -254,8 +413,8 @@ body {
 .badge {
   background: var(--accent);
   color: var(--on-accent);
-  border-radius: 999px;
-  font-size: 10px;
+  border-radius: var(--r-full);
+  font-size: var(--fs-cap);
   font-weight: 700;
   padding: 1px 6px;
 }
@@ -280,9 +439,9 @@ body {
 }
 
 .tree-group {
-  font-size: 10px;
+  font-size: var(--fs-cap);
   text-transform: uppercase;
-  letter-spacing: .8px;
+  letter-spacing: var(--track);
   color: var(--muted);
   margin: 14px 6px 4px;
 }
@@ -290,28 +449,30 @@ body {
 .tree-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--s-3);
   padding: 6px 8px;
-  border-radius: 6px;
+  border-radius: var(--r-2);
   cursor: pointer;
   color: var(--text);
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
 }
 
-.tree-item:hover { background: var(--surface-2); }
-.tree-item.active { background: var(--widget); box-shadow: inset 2px 0 0 var(--accent); }
+.tree-item:hover { background: var(--hover); }
+/* Активная запись дерева: фон выбранной строки + полоса акцента (не только
+   цвет: состояние видно без цвета, SC 1.4.1). */
+.tree-item.active { background: var(--selected); box-shadow: inset 2px 0 0 var(--accent); }
 .tree-item .name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tree-item .count { color: var(--muted); font-size: 11px; }
+.tree-item .count { color: var(--muted); font-size: var(--fs-cap); }
 .tree-item .ico { width: 14px; text-align: center; }
 
 /* ---------------------------- список ---------------------------- */
 
-.list { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; padding: 10px; gap: 8px; }
+.list { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; padding: 10px; gap: var(--s-3); }
 
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--s-3);
   /* Тулбару тесно при минимальной ширине окна (940): контролы не сжимаются
      мимо воли, поиск растягивается, счётчик не переносится. */
 }
@@ -329,11 +490,11 @@ body {
   white-space: nowrap;
 }
 .schedule-line {
-  font-size: 11.5px;
+  font-size: var(--fs-cap);
   color: var(--muted);
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--r-2);
   padding: 6px 10px;
 }
 .schedule-line b { color: var(--text); font-weight: 600; }
@@ -342,15 +503,15 @@ body {
 
 /* ---------------------- вид библиотеки: список/плитка ---------------- */
 
-.view-toggle { display: inline-flex; gap: 2px; align-items: center; }
+.view-toggle { display: inline-flex; gap: var(--s-1); align-items: center; }
 .view-btn, .size-btn {
-  font-size: 13px;
+  font-size: var(--fs-body);
   line-height: 1;
   padding: 5px 7px;
-  border-radius: 6px;
+  border-radius: var(--r-2);
 }
 .view-btn.active, .size-btn.active {
-  background: var(--widget);
+  background: var(--selected);
   border-color: var(--accent);
   color: var(--text);
 }
@@ -390,7 +551,7 @@ body {
   align-items: center;
   justify-content: center;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--fs-cap);
 }
 .tile-play {
   position: absolute;
@@ -400,18 +561,20 @@ body {
   width: 42px;
   height: 42px;
   border: 0;
-  border-radius: 50%;
-  background: rgba(4, 9, 16, .68);
-  /* Подпись поверх затемнённой подложки: сама подложка фиксированно тёмная,
-     поэтому светлая подпись читается в любой теме (в том числе светлой). */
-  color: #fff;
+  border-radius: var(--r-full);
+  /* Solid подложка --scrim: значок читается на любой обложке и в любой теме
+     (подпись --on-scrim подобрана к ней, 14.77:1 в тёмной теме). */
+  background: var(--scrim);
+  color: var(--on-scrim);
   font-size: 16px;
   cursor: pointer;
   opacity: 0;
-  transition: opacity .12s;
+  transition: opacity var(--dur-fast-02) var(--ease-productive);
   z-index: 2;
 }
-.tile:hover .tile-play { opacity: 1; }
+/* Значок появляется и при фокусе клавиатурой: hover один не показывает
+   доступность для клавиатуры (SC 2.4.7). */
+.tile:hover .tile-play, .tile:focus-within .tile-play { opacity: 1; }
 .tile-play:hover { background: var(--accent); }
 .tile-badges {
   position: absolute;
@@ -431,8 +594,8 @@ body {
 }
 .tile-title {
   padding: 6px 8px 0;
-  font-size: 12.5px;
-  line-height: 1.25;
+  font-size: var(--fs-sm);
+  line-height: var(--lh-tight);
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -440,7 +603,7 @@ body {
 }
 .tile-sub {
   padding: 2px 8px 8px;
-  font-size: 11px;
+  font-size: var(--fs-cap);
   color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
@@ -450,7 +613,7 @@ body {
 .verify-list { margin-top: 6px; flex-basis: 100%; }
 #verify-note { flex-wrap: wrap; align-items: center; }
 
-.toolbar h2 { font-size: 13px; margin: 0; font-weight: 600; }
+.toolbar h2 { font-size: var(--fs-body); margin: 0; font-weight: 600; }
 
 input[type="search"], input[type="text"], select {
   background: var(--surface);
@@ -463,9 +626,30 @@ input[type="search"], input[type="text"], select {
 }
 
 input[type="search"] { flex: 0 1 340px; }
-input:focus, select:focus { outline: none; border-color: var(--accent); }
+/* Фокус (§5.2): двухцветное кольцо - полоса --bg + полоса --focus (техника
+   C40). Кольцо видно и на подложке контрола, и на фоне страницы: оно не
+   зависит от цвета компонента, а суммарная полоса 4 px держит SC 2.4.13.
+   --focus к --surface/--widget даёт 3:1 (§5.1). */
+:where(button, .btn, .tab, .icon-btn, .link-btn, .seg-btn, .view-btn,
+       .size-btn, .tree-item, .mode-item, .check, .storage-default,
+       .grid-body, .grid-head [data-col], .tile, .row, .cat-card,
+       .pick-row, .storage-row, .dedupe-actions label):focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
 
-.scan-bar { display: flex; flex-direction: column; gap: 4px; }
+/* Поле ввода: граница меняется вместе с кольцом - цвет плюс форма, чтобы
+   фокус не был единственными цветом (SC 1.4.1). */
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--line-strong);
+}
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+  border-color: var(--focus);
+  box-shadow: var(--focus-ring);
+}
+
+.scan-bar { display: flex; flex-direction: column; gap: var(--s-2); }
 
 .dl-bar {
   display: flex;
@@ -476,11 +660,11 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
   border-radius: var(--radius);
   padding: 10px 12px;
 }
-.dl-meta { display: flex; gap: 12px; align-items: center; font-size: 12.5px; min-width: 0; }
+.dl-meta { display: flex; gap: var(--s-4); align-items: center; font-size: var(--fs-sm); min-width: 0; }
 .dl-meta b { max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.scan-track { height: 6px; background: var(--widget); border-radius: 999px; overflow: hidden; }
-.scan-fill { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .2s; }
-.scan-text { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scan-track { height: 6px; background: var(--widget); border-radius: var(--r-full); overflow: hidden; }
+.scan-fill { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width var(--dur-moderate-01) var(--ease-productive); }
+.scan-text { font-size: var(--fs-cap); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Шаблон колонок - через переменную: JS (сортировка/скрытие колонок и
    узкий экран) пересчитывает --list-cols на панели, строки наследуют. */
@@ -488,16 +672,16 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
   display: grid;
   grid-template-columns: var(--list-cols,
     26px 116px minmax(180px, 1fr) 190px 72px 100px 92px);
-  gap: 8px;
+  gap: var(--s-3);
   align-items: center;
 }
 
 .grid-head {
-  font-size: 11px;
+  font-size: var(--fs-cap);
   text-transform: uppercase;
-  letter-spacing: .5px;
+  letter-spacing: var(--track);
   color: var(--muted);
-  padding: 4px 8px;
+  padding: var(--s-2) var(--s-3);
   border-bottom: 1px solid var(--line);
   /* Шапка обрезается по ширине панели и ездит вместе с телом списка
      (scrollLeft синхронизируется в bind): заголовки остаются над своими
@@ -526,25 +710,24 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 
 .row {
   height: var(--row-h);
-  padding: 0 8px;
-  border-bottom: 1px solid rgba(255, 255, 255, .04);
+  padding: 0 var(--s-3);
+  /* Граница строки - декоративный --line: он правится по теме, поэтому
+     отдельных правил для светлой/контрастной/своей темы здесь больше нет
+     (прежние rgba(255,255,255,.04) и три исключения по теме). */
+  border-bottom: 1px solid var(--line);
   cursor: pointer;
   overflow: hidden;
 }
 
-body[data-theme="light"] .row { border-bottom-color: rgba(0, 0, 0, .05); }
-/* Контрастной теме границы строки нужны заметные: на почти чёрной подложке
-   rgba(255,255,255,.04) границу почти не видно (проверка контраста в
-   app/themes.py про границы не проверяет - это рамка, не подпись). */
-body[data-theme="contrast"] .row { border-bottom-color: rgba(255, 255, 255, .16); }
-body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); }
-.row:hover { background: var(--surface-2); }
-.row.selected { background: var(--widget); }
+/* hover и selected - разные фоны: наведённая строка и выбранная строка
+   отличаются тоном, а не только цветом (SC 1.4.11 - состояние видно). */
+.row:hover { background: var(--hover); }
+.row.selected { background: var(--selected); }
 
 .cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .c-title { font-weight: 500; }
 .c-channel, .c-date, .c-size, .c-dur, .c-views, .c-likes, .c-comments,
-.c-sync { color: var(--muted); font-size: 12px; }
+.c-sync { color: var(--muted); font-size: var(--fs-sm); }
 .c-dur, .c-size, .c-views, .c-likes, .c-comments { text-align: right; }
 .c-date, .c-sync { text-align: left; }
 
@@ -552,14 +735,14 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 11.5px;
+  font-size: var(--fs-cap);
   color: var(--muted);
 }
 
 .status::before {
   content: "";
   width: 7px; height: 7px;
-  border-radius: 50%;
+  border-radius: var(--r-full);
   background: var(--muted);
   flex: 0 0 auto;
 }
@@ -589,7 +772,7 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
   gap: 6px;
   text-align: center;
   color: var(--muted);
-  padding: 24px;
+  padding: var(--s-6);
   pointer-events: none;
 }
 
@@ -600,16 +783,16 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
 .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); position: relative; }
 .panel > .table-wrap { flex: 0 1 auto; max-height: 42%; }
 
-.table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
 .table th, .table td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); }
-.table th { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); position: sticky; top: 0; background: var(--surface-2); white-space: nowrap; }
-.table tbody tr:hover { background: var(--surface-2); }
-.table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.table th { font-size: var(--fs-cap); text-transform: uppercase; letter-spacing: var(--track); color: var(--muted); position: sticky; top: 0; background: var(--surface-2); white-space: nowrap; }
+.table tbody tr:hover { background: var(--hover); }
+.table .num { text-align: right; font-variant-numeric: var(--nums); }
 
 /* Причина падения строки очереди: видна сразу, без журнала. */
 .row-reason {
   color: var(--err);
-  font-size: 11.5px;
+  font-size: var(--fs-cap);
   margin-top: 2px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -622,14 +805,14 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
 .settings { overflow: auto; display: flex; flex-direction: column; gap: 18px; padding-right: 4px; }
 
 .set-section { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
-.set-section > h3 { margin: 0 0 4px; font-size: 13px; }
-.set-section > .set-note { margin: 0 0 12px; font-size: 11.5px; color: var(--muted); }
+.set-section > h3 { margin: 0 0 4px; font-size: var(--fs-body); }
+.set-section > .set-note { margin: 0 0 12px; font-size: var(--fs-cap); color: var(--muted); }
 
-.field { display: grid; grid-template-columns: 260px 1fr; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); align-items: start; }
+.field { display: grid; grid-template-columns: 260px 1fr; gap: var(--s-4); padding: var(--s-3) 0; border-top: 1px solid var(--line); align-items: start; }
 .field:first-of-type { border-top: 0; }
 .field-label { font-weight: 600; }
-.field-hint { font-size: 11.5px; color: var(--muted); margin-top: 3px; line-height: 1.4; }
-.field-control { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.field-hint { font-size: var(--fs-cap); color: var(--muted); margin-top: 3px; line-height: 1.4; }
+.field-control { display: flex; gap: var(--s-3); align-items: center; flex-wrap: wrap; }
 .field-control input[type="text"], .field-control select { flex: 1 1 220px; }
 .field-control input[type="number"] { width: 110px; }
 
@@ -640,14 +823,14 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
 .root-row {
   display: grid;
   grid-template-columns: 1fr auto auto auto;
-  gap: 8px;
+  gap: var(--s-3);
   align-items: center;
   background: var(--surface-2);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--r-2);
   padding: 6px 8px;
 }
-.root-path { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.root-path { font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .root-row.off { opacity: .5; }
 .root-actions { display: flex; gap: 10px; }
 
@@ -656,18 +839,18 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(4, 9, 16, .62);
+  background: var(--veil);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 40;
-  padding: 24px;
+  padding: var(--s-6);
 }
 
 .card {
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--r-4);
   box-shadow: var(--shadow);
   width: min(720px, 100%);
   max-height: 86vh;
@@ -676,21 +859,21 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
   overflow: hidden;
 }
 
-.card-head { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
-.card-title { font-weight: 700; font-size: 14px; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-head { display: flex; align-items: center; gap: var(--s-4); padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.card-title { font-weight: 700; font-size: var(--fs-lg); flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-body { padding: 14px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
-.card-actions { display: flex; gap: 8px; justify-content: flex-end; padding-top: 6px; }
+.card-actions { display: flex; gap: var(--s-3); justify-content: flex-end; padding-top: 6px; }
 
-.kv { display: grid; grid-template-columns: 170px 1fr; gap: 6px 12px; font-size: 12.5px; }
+.kv { display: grid; grid-template-columns: 170px 1fr; gap: 6px 12px; font-size: var(--fs-sm); }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; word-break: break-word; user-select: text; }
 
 .json {
   background: var(--bg);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--r-2);
   padding: 10px;
-  font: 11.5px/1.5 Consolas, "Cascadia Mono", monospace;
+  font: var(--fs-cap)/1.5 var(--mono);
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 320px;
@@ -701,18 +884,18 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
 
 /* ---------------------------- добавление источника ---------------- */
 
-.add-head { display: flex; flex-direction: column; gap: 2px; font-size: 14px; }
+.add-head { display: flex; flex-direction: column; gap: var(--s-1); font-size: var(--fs-lg); }
 .add-counts td { border-bottom: 1px solid var(--line); padding: 6px 8px; }
 .add-counts td:nth-child(2) { width: 90px; }
-.add-counts td:nth-child(3) { font-size: 11.5px; }
+.add-counts td:nth-child(3) { font-size: var(--fs-cap); }
 
 .notice {
   border: 1px solid var(--line);
   background: var(--surface-2);
   border-left: 3px solid var(--info);
-  border-radius: 6px;
-  padding: 8px 10px;
-  font-size: 12.5px;
+  border-radius: var(--r-2);
+  padding: var(--s-3) 10px;
+  font-size: var(--fs-sm);
 }
 .notice.warn { border-left-color: var(--warn); }
 .notice.err { border-left-color: var(--err); }
@@ -726,16 +909,16 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
   align-items: flex-start;
   background: var(--surface-2);
   border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 8px 10px;
+  border-radius: var(--r-2);
+  padding: var(--s-3) 10px;
   cursor: pointer;
 }
-.mode-item:has(input:checked) { border-color: var(--accent); background: var(--widget); }
+.mode-item:has(input:checked) { border-color: var(--accent); background: var(--selected); }
 .mode-item input { margin-top: 3px; accent-color: var(--accent); }
-.mode-item span { display: flex; flex-direction: column; gap: 2px; }
-.mode-item .muted { font-size: 11.5px; }
+.mode-item span { display: flex; flex-direction: column; gap: var(--s-1); }
+.mode-item .muted { font-size: var(--fs-cap); }
 
-.stages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.stages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-3); }
 
 .stage {
   display: grid;
@@ -744,17 +927,17 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
   align-items: center;
   background: var(--surface-2);
   border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 8px 10px;
-  font-size: 12.5px;
+  border-radius: var(--r-2);
+  padding: var(--s-3) 10px;
+  font-size: var(--fs-sm);
 }
 .stage-ico { font-weight: 700; color: var(--muted); text-align: center; }
 .stage-name { font-weight: 600; }
-.stage-bar { height: 6px; background: var(--widget); border-radius: 999px; overflow: hidden; }
-.stage-fill { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
-.stage-count { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.stage-bar { height: 6px; background: var(--widget); border-radius: var(--r-full); overflow: hidden; }
+.stage-fill { display: block; height: 100%; width: 0; background: var(--accent); transition: width var(--dur-moderate-01) var(--ease-productive); }
+.stage-count { color: var(--muted); font-size: var(--fs-cap); font-variant-numeric: var(--nums); }
 
-.stage.done { border-color: rgba(63, 191, 107, .35); }
+.stage.done { border-color: var(--ok-line); }
 .stage.done .stage-ico { color: var(--ok); }
 .stage.done .stage-fill { width: 100% !important; background: var(--ok); }
 .stage.active { border-color: var(--accent); }
@@ -768,7 +951,7 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
   max-height: 300px;
   overflow: auto;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--r-2);
   background: var(--surface-2);
 }
 .pick-row {
@@ -779,7 +962,7 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
   padding: 6px 10px;
   border-bottom: 1px solid var(--line);
   cursor: pointer;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
 }
 .pick-row:last-child { border-bottom: 0; }
 .pick-row:hover { background: var(--widget); }
@@ -787,7 +970,7 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
 .pick-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 #add-url { width: 100%; }
-#add-body { gap: 12px; }
+#add-body { gap: var(--s-4); }
 
 /* ---------------------------- панель выделения ------------------------ */
 
@@ -798,13 +981,13 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
   background: var(--surface);
   border: 1px solid var(--accent);
   border-radius: var(--radius);
-  padding: 8px 12px;
-  font-size: 12.5px;
+  padding: var(--s-3) var(--s-4);
+  font-size: var(--fs-sm);
 }
 .sel-bar select { max-width: 280px; }
 .c-check { display: flex; align-items: center; justify-content: center; }
 .row input.row-check { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
-.row.picked { background: var(--widget); }
+.row.picked { background: var(--selected); }
 
 /* M17: чекбокс строки в плитке: тот же размер, что в списке, и подложка
    обложки - иначе чекбокс теряется на тёмной картинке. */
@@ -814,20 +997,20 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
   height: 15px;
   cursor: pointer;
   background: var(--widget);
-  border-radius: 3px;
+  border-radius: var(--r-1);
 }
 
 /* M17: панель папки-коллекции целиком (те же операции без мультивыбора) */
 .col-bar { display: flex; align-items: center; gap: 10px; }
 .col-bar select { max-width: 240px; }
-.col-bar .muted { font-size: 11.5px; }
+.col-bar .muted { font-size: var(--fs-cap); }
 
 /* M17: диалог массовых операций над группой/папкой */
-.bulk-grid { display: flex; flex-direction: column; gap: 12px; }
+.bulk-grid { display: flex; flex-direction: column; gap: var(--s-4); }
 .bulk-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .bulk-row > .field-label { min-width: 110px; }
 .bulk-row input[type="text"] { flex: 1 1 240px; }
-.bulk-hint { font-size: 11.5px; color: var(--muted); }
+.bulk-hint { font-size: var(--fs-cap); color: var(--muted); }
 
 /* ---------------------------- хранилища ------------------------------- */
 
@@ -840,42 +1023,42 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
   align-items: center;
   background: var(--surface-2);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--r-2);
   padding: 7px 10px;
 }
 .storage-row.off { opacity: .55; }
 .storage-row.detached { border-style: dashed; border-color: var(--warn); }
-.storage-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+.storage-dot { width: 8px; height: 8px; border-radius: var(--r-full); background: var(--ok); }
 .storage-dot.bad { background: transparent; box-shadow: inset 0 0 0 1.5px var(--err); }
 .storage-dot.off { background: transparent; box-shadow: inset 0 0 0 1.5px var(--muted); }
 .storage-name { display: flex; flex-direction: column; min-width: 0; }
-.storage-name b { font-size: 12.5px; }
-.storage-path { color: var(--muted); font-size: 11px; overflow: hidden;
+.storage-name b { font-size: var(--fs-sm); }
+.storage-path { color: var(--muted); font-size: var(--fs-cap); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
-.storage-free { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.storage-free { font-size: var(--fs-cap); color: var(--muted); font-variant-numeric: var(--nums); }
 .storage-actions { display: flex; gap: 10px; align-items: center; }
 .storage-default { display: inline-flex; gap: 5px; align-items: center;
-  font-size: 11.5px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+  font-size: var(--fs-cap); color: var(--muted); cursor: pointer; white-space: nowrap; }
 .storage-default input { accent-color: var(--accent); }
-.storage-toolbar { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.storage-toolbar { display: flex; gap: var(--s-3); align-items: center; margin-top: 4px; }
 
 /* ---------------------------- перенос -------------------------------- */
 
 .migrate-target { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .migrate-target select { max-width: 320px; }
-.migrate-facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px;
-  font-size: 12.5px; }
+.migrate-facts { display: grid; grid-template-columns: auto 1fr; gap: var(--s-2) 14px;
+  font-size: var(--fs-sm); }
 /* Переименования «было -> станет»: длинные пути, поэтому блоком. */
 .migrate-item.renamed { white-space: normal; word-break: break-all;
   line-height: 1.5; }
 .migrate-item .arrow { color: var(--muted); padding: 0 6px; }
 .migrate-item b { color: var(--text); font-weight: 600; }
 .migrate-facts dt { color: var(--muted); }
-.migrate-facts dd { margin: 0; font-variant-numeric: tabular-nums; }
+.migrate-facts dd { margin: 0; font-variant-numeric: var(--nums); }
 .migrate-list { max-height: 180px; overflow: auto; display: flex;
-  flex-direction: column; gap: 4px; }
-.migrate-item { font-size: 11.5px; color: var(--muted); background: var(--surface-2);
-  border: 1px solid var(--line); border-radius: 4px; padding: 4px 8px;
+  flex-direction: column; gap: var(--s-2); }
+.migrate-item { font-size: var(--fs-cap); color: var(--muted); background: var(--surface-2);
+  border: 1px solid var(--line); border-radius: var(--r-1); padding: var(--s-2) var(--s-3);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .migrate-item.warn { border-color: var(--warn); }
 .migrate-progress { display: flex; flex-direction: column; gap: 6px; }
@@ -886,33 +1069,33 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
 .dedupe-row {
   display: grid;
   grid-template-columns: minmax(160px, 1fr) auto;
-  gap: 8px 12px;
+  gap: var(--s-3) 12px;
   align-items: center;
   background: var(--surface-2);
   border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 8px 10px;
+  border-radius: var(--r-2);
+  padding: var(--s-3) 10px;
 }
 .dedupe-row.gone { border-style: dashed; border-color: var(--warn); }
-.dedupe-title { font-weight: 600; font-size: 12.5px; overflow: hidden;
+.dedupe-title { font-weight: 600; font-size: var(--fs-sm); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 .dedupe-meta { grid-column: 1 / -1; display: flex; flex-direction: column;
-  gap: 2px; font-size: 11.5px; color: var(--muted); }
+  gap: var(--s-1); font-size: var(--fs-cap); color: var(--muted); }
 .dedupe-meta .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dedupe-actions { display: flex; gap: 8px; align-items: center; justify-self: end; }
+.dedupe-actions { display: flex; gap: var(--s-3); align-items: center; justify-self: end; }
 .dedupe-actions label { display: inline-flex; gap: 5px; align-items: center;
-  font-size: 11.5px; color: var(--muted); cursor: pointer; }
+  font-size: var(--fs-cap); color: var(--muted); cursor: pointer; }
 .dedupe-actions input { accent-color: var(--accent); }
 
 /* ---------------------------- пометки и целостность ----------------- */
 
 .star-badge {
   color: var(--warn);
-  font-size: 11px;
+  font-size: var(--fs-cap);
   margin-left: 6px;
 }
 
-.stars { display: flex; gap: 2px; align-items: center; }
+.stars { display: flex; gap: var(--s-1); align-items: center; }
 .star {
   appearance: none;
   border: 0;
@@ -933,13 +1116,13 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
   border-top: 1px solid var(--line);
   padding-top: 10px;
 }
-.detail-edit label { display: flex; flex-direction: column; gap: 4px;
-  font-size: 12px; color: var(--muted); }
+.detail-edit label { display: flex; flex-direction: column; gap: var(--s-2);
+  font-size: var(--fs-sm); color: var(--muted); }
 .detail-edit input[type="text"], .detail-edit textarea {
   background: var(--surface-2);
   border: 1px solid var(--line);
   color: var(--text);
-  border-radius: 6px;
+  border-radius: var(--r-2);
   padding: 6px 8px;
   font: inherit;
 }
@@ -947,22 +1130,22 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
 .detail-thumb {
   align-self: flex-start;
   max-width: 240px;
-  border-radius: 6px;
+  border-radius: var(--r-2);
   overflow: hidden;
   background: var(--surface-2);
   border: 1px solid var(--line);
 }
 .detail-thumb img { display: block; width: 100%; height: auto; }
-.detail-thumb .muted { padding: 8px; font-size: 11.5px; }
+.detail-thumb .muted { padding: var(--s-3); font-size: var(--fs-cap); }
 .detail-tools { display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
-  font-size: 12px; color: var(--muted); }
+  font-size: var(--fs-sm); color: var(--muted); }
 
-.mark-grid { display: flex; flex-direction: column; gap: 12px; }
+.mark-grid { display: flex; flex-direction: column; gap: var(--s-4); }
 .mark-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 
 /* Аккаунты Google: список привязок в настройках */
-.account-list { display: flex; flex-direction: column; gap: 4px; width: 100%; }
-.account-row { display: flex; gap: 8px; align-items: center; font-size: 12px; }
+.account-list { display: flex; flex-direction: column; gap: var(--s-2); width: 100%; }
+.account-row { display: flex; gap: var(--s-3); align-items: center; font-size: var(--fs-sm); }
 .account-row .spacer { flex: 1 1 auto; }
 .mark-row > .field-label { min-width: 78px; }
 
@@ -971,24 +1154,24 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
 .foot {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--s-4);
   padding: 5px 12px;
   background: var(--surface);
   border-top: 1px solid var(--line);
-  font-size: 11.5px;
+  font-size: var(--fs-cap);
   color: var(--muted);
 }
 
 .foot-status { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.foot-version { font-size: 10.5px; }
+.foot-version { font-size: var(--fs-cap); }
 
 .log {
   height: 168px;
   margin: 0;
-  padding: 8px 12px;
-  background: #070d15;
-  color: #9fb0c0;
-  font: 11.5px/1.5 Consolas, "Cascadia Mono", monospace;
+  padding: var(--s-3) var(--s-4);
+  background: var(--log-bg);
+  color: var(--log-text);
+  font: var(--fs-cap)/1.5 var(--mono);
   overflow: auto;
   border-top: 1px solid var(--line);
   user-select: text;
@@ -1007,14 +1190,14 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   z-index: 60;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   max-width: 80vw;
 }
 .toast.err { border-color: var(--err); }
 
 /* Переключатель Библиотека/Каталог */
-.seg { display: flex; gap: 0; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
-.seg-btn { border: none; background: transparent; color: var(--muted); padding: 4px 10px; font-size: 12px; cursor: pointer; }
+.seg { display: flex; gap: 0; border: 1px solid var(--line); border-radius: var(--r-2); overflow: hidden; }
+.seg-btn { border: none; background: transparent; color: var(--muted); padding: 4px 10px; font-size: var(--fs-sm); cursor: pointer; }
 .seg-btn.active { background: var(--surface-2); color: var(--text); }
 .seg-btn:hover { color: var(--text); }
 
@@ -1025,7 +1208,7 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
    страницы площадки итог не называют - тогда полоса без процентов. */
 .cat-progress { display: flex; align-items: center; gap: 10px; padding: 6px 12px 2px; }
 .cat-progress .scan-track { flex: 1 1 auto; }
-.cat-progress .muted { font-size: 12px; white-space: nowrap; }
+.cat-progress .muted { font-size: var(--fs-sm); white-space: nowrap; }
 .scan-fill.indet { width: 100%; background: none;
                    background-image: linear-gradient(90deg, var(--widget) 0%,
                                                      var(--accent) 50%,
@@ -1040,15 +1223,15 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
 }
 /* Что показано и откуда: режим, источник карточек, страницы, ход сортировки -
    «тренды» и «каналы» не должны выглядеть перемешанными. */
-.cat-caption { padding: 2px 12px 8px; font-size: 12px; }
-.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; padding: 8px 0; }
-.cat-card { background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; }
-.cat-thumb { position: relative; width: 100%; padding-top: 56.25%; background: #000; cursor: pointer; }
+.cat-caption { padding: 2px 12px 8px; font-size: var(--fs-sm); }
+.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; padding: var(--s-3) 0; }
+.cat-card { background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-3); overflow: hidden; display: flex; flex-direction: column; }
+.cat-thumb { position: relative; width: 100%; padding-top: 56.25%; background: var(--scrim); cursor: pointer; }
 .cat-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-.cat-dur { position: absolute; right: 6px; bottom: 6px; background: rgba(0,0,0,0.7); color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 11px; }
-.cat-body { padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
-.cat-title { font-size: 12.5px; line-height: 1.4; max-height: 2.8em; overflow: hidden; cursor: pointer; }
-.cat-meta { font-size: 11px; color: var(--muted); }
+.cat-dur { position: absolute; right: 6px; bottom: 6px; background: var(--scrim); color: var(--on-scrim); padding: 2px 6px; border-radius: var(--r-1); font-size: var(--fs-cap); }
+.cat-body { padding: var(--s-3) 10px; display: flex; flex-direction: column; gap: var(--s-2); }
+.cat-title { font-size: var(--fs-sm); line-height: 1.4; max-height: 2.8em; overflow: hidden; cursor: pointer; }
+.cat-meta { font-size: var(--fs-cap); color: var(--muted); }
 .cat-actions { display: flex; justify-content: flex-end; padding: 0 10px 8px; }
 .cat-card.added { opacity: 0.7; }
 /* Карточка, добавляемая прямо с каталога (auto): кнопка заменена ходом
@@ -1065,8 +1248,8 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
 .browser-panel {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 8px 12px 6px;
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-4) 6px;
   border-bottom: 1px solid var(--line);
   background: var(--surface);
 }
@@ -1076,12 +1259,12 @@ body[data-theme="custom"] .row { border-bottom-color: rgba(255, 255, 255, .08); 
   background: var(--surface-2);
   border: 1px solid var(--line);
   border-left: 3px solid var(--info);
-  border-radius: 6px;
+  border-radius: var(--r-2);
   padding: 6px 10px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   overflow-wrap: anywhere;
 }
-.browser-hint { font-size: 11.5px; max-width: 90%; }
+.browser-hint { font-size: var(--fs-cap); max-width: 90%; }
 
 @media (max-width: 900px) {
   .tree { width: 180px; flex-basis: 180px; }

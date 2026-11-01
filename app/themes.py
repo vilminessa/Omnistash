@@ -9,6 +9,10 @@ app.css (block body[data-theme="<id>") - иначе список тем в ок�
 палитра в CSS не могут разойтись незаметно. Подписи тем/шрифтов для
 карточки настроек берутся отсюда же (settings_schema).
 
+Цвета палитры - hex-переменные (PALETTE_VARS), кольцо фокуса и тени -
+строки для box-shadow (COMPOSITE_VARS): их hex-проверка бессмысленна, и
+цвет внутри тени прячется от сверки палитры, поэтому проверка отдельная.
+
 Проверка читаемости - по относительной яркости (WCAG relative luminance):
 тема считается годной, если контраст текста с подложкой, подложек и
 акцентной кнопки выше порогов. «Своя» тема не должна оказаться нечитаемой
@@ -23,30 +27,76 @@ import math
 DEFAULT_THEME = "dark"
 
 # Обязательные переменные палитры: каждая тема обязана держать этот набор,
-# иначе часть окна (кнопки, подложки, полосы хода) потеряет цвет.
+# иначе часть окна (кнопки, подложки, полосы хода, состояния) потеряет цвет.
+# Порядок - как в блоке :root (docs/DESIGN-UI.md §2.2): поверхности, границы,
+# подписи, акцент, фокус, состояния, границы состояний, служебные подложки.
 PALETTE_VARS: tuple = (
-    "--bg", "--surface", "--surface-2", "--widget", "--line",
-    "--text", "--muted", "--accent", "--accent-2", "--on-accent",
+    "--bg", "--surface", "--surface-2", "--widget", "--hover", "--selected",
+    "--line", "--line-strong",
+    "--text", "--muted", "--on-accent", "--on-scrim", "--on-warn",
+    "--accent", "--accent-2", "--accent-dim",
+    "--focus",
     "--warn", "--ok", "--err", "--info",
+    "--ok-line", "--warn-line", "--err-line", "--info-line",
+    "--log-bg", "--log-text", "--scrim",
+)
+
+# Токены, которые НЕ являются цветом: кольцо фокуса и тени (elevation).
+# Значение - строка для box-shadow; она не проходит hex-проверку, поэтому
+# проверяется отдельно: непустая, без hex-литерала (цвет палитры в тени
+# прячется и тема тогда «красивая», но не правится) и с px/rgba внутри.
+COMPOSITE_VARS: tuple = (
+    "--focus-ring", "--shadow", "--shadow-1", "--shadow-2", "--veil",
 )
 
 # Контраст, который обязана выдержать тема (пары «подпись -> подложка»).
 # Пороги - WCAG AA: 4.5 для основного текста, 3.0 для приглушённых подписей
-# и цветных состояний (они не текст, но должны быть различимы).
-# --line здесь НЕ проверяется: это рамка подложки, а не подпись - её
-# низкий контраст сознательный, иначе границы перестали бы быть мягкими.
+# и цветов состояний (они не текст, но должны быть различимы), 3.0 для
+# границы контрола и кольца фокуса (SC 1.4.11 - значимый компонент).
+# --line здесь НЕ проверяется: это декоративный разделитель, а не подпись и
+# не компонент - её низкий контраст сознательный, иначе границы перестали бы
+# быть мягкими. --line-strong проверяется: это рамка input/select/кнопки,
+# без 3:1 контрол на подложке не различим.
 CONTRAST_PAIRS: tuple = (
+    # подписи на подложках окна
     ("--text", "--bg", 4.5),
     ("--text", "--surface", 4.5),
+    ("--text", "--widget", 4.5),
+    ("--text", "--surface-2", 4.5),
+    ("--text", "--hover", 4.5),          # наведённая строка/плитка
+    ("--text", "--selected", 4.5),       # выбранная строка (отличается от hover)
+    ("--text", "--accent-dim", 4.5),     # «акцент размытый» (disabled primary)
+    # приглушённые подписи (хинты, метаданные - порог 3.0)
     ("--muted", "--bg", 3.0),
     ("--muted", "--surface-2", 3.0),
+    ("--muted", "--widget", 3.0),
+    ("--muted", "--selected", 3.0),
+    ("--muted", "--accent-dim", 3.0),
+    # акцент и подписи на акцентных подложках
     ("--accent", "--bg", 3.0),
+    ("--accent", "--surface", 3.0),      # ссылка/граница акцентной кнопки
     ("--accent-2", "--bg", 3.0),
+    ("--accent-2", "--surface", 3.0),
     ("--on-accent", "--accent", 4.5),
+    ("--on-scrim", "--scrim", 4.5),      # значок/длительность поверх обложки
+    ("--on-warn", "--warn", 4.5),        # подпись на предупреждающей подложке
+    # фокус и граница контрола (компонент, не декорация)
+    ("--focus", "--surface", 3.0),
+    ("--focus", "--widget", 3.0),
+    ("--line-strong", "--surface", 3.0),
+    ("--line-strong", "--widget", 3.0),
+    ("--line-strong", "--bg", 3.0),
+    # цвета состояний: и на фоне окна, и на подложке карточки/строки
     ("--warn", "--bg", 3.0),
+    ("--warn", "--surface", 3.0),
     ("--ok", "--bg", 3.0),
+    ("--ok", "--surface", 3.0),
     ("--err", "--bg", 3.0),
+    ("--err", "--surface", 3.0),
     ("--info", "--bg", 3.0),
+    ("--info", "--surface", 3.0),
+    # журнал: своя подложка и своя подпись (не --bg/--text окна)
+    ("--log-text", "--log-bg", 4.5),
 )
 
 THEMES: tuple = (
@@ -55,21 +105,42 @@ THEMES: tuple = (
         "label": "Тёмная",
         "dark": True,
         "hint": "Палитра по умолчанию (тёмное дерево и приглушённый акцент).",
+        # Значения пересчитаны по формуле WCAG (docs/DESIGN-UI.md §2.2):
+        # границы контрола 3:1, приглушённая подпись и состояния AA.
         "vars": {
             "--bg": "#0c1622",
             "--surface": "#111d2c",
             "--surface-2": "#16263a",
             "--widget": "#1b2f47",
-            "--line": "#22344a",
+            "--hover": "#16263a",        # наведённая строка/плитка
+            "--selected": "#1b2f47",     # выбранная строка - темнее hover
+            "--line": "#45617f",         # декоративный разделитель
+            "--line-strong": "#5b799b",  # граница контрола (3.76 к surface)
             "--text": "#dcdedd",
-            "--muted": "#8b97a3",
+            "--muted": "#96a3b0",        # 7.08 к bg, 5.29 к widget
+            "--on-accent": "#04140d",    # подпись на акцентной подложке
+            "--on-scrim": "#dcdedd",     # значок поверх затемнённой обложки
+            "--on-warn": "#241500",      # подпись на подложке --warn
             "--accent": "#628d7c",
-            "--accent-2": "#7fb3a0",
-            "--on-accent": "#08150f",
+            "--accent-2": "#7fb3a0",     # hover акцентной кнопки
+            "--accent-dim": "#33506c",   # «акцент размытый» (disabled)
+            "--focus": "#ffc766",        # кольцо фокуса (11.01 к surface)
             "--warn": "#ffb454",
-            "--ok": "#3fbf6b",
-            "--err": "#e0554f",
-            "--info": "#5aa9e6",
+            "--ok": "#46c079",
+            "--err": "#ea6a63",
+            "--info": "#6bb6e8",
+            "--ok-line": "#2f6b4a",      # рамки карточек состояния (декор)
+            "--warn-line": "#7a5321",
+            "--err-line": "#7c332e",
+            "--info-line": "#2b5a7d",
+            "--log-bg": "#070d15",
+            "--log-text": "#a8b6c4",
+            "--scrim": "#040910",        # solid подложка значков на обложке
+            "--focus-ring": "0 0 0 2px var(--bg), 0 0 0 4px var(--focus)",
+            "--shadow": "0 18px 50px rgba(0, 0, 0, .45)",
+            "--shadow-1": "0 1px 2px rgba(0, 0, 0, .35)",
+            "--shadow-2": "0 2px 8px rgba(0, 0, 0, .35)",
+            "--veil": "rgba(4, 9, 16, .62)",
         },
     },
     {
@@ -77,21 +148,43 @@ THEMES: tuple = (
         "label": "Светлая",
         "dark": False,
         "hint": "Светлая палитра: та же структура подложек и тот же акцент.",
+        # §2.3: --muted, --warn, --ok и --accent-2 пересчитаны - прежде
+        # не выдерживали AA (3.35..4.33), а hover акцентной кнопки был
+        # того же цвета, что акцент (невидимое состояние).
         "vars": {
             "--bg": "#eef1f5",
             "--surface": "#ffffff",
             "--surface-2": "#f6f8fa",
             "--widget": "#e6ebf1",
-            "--line": "#d3dae2",
+            "--hover": "#f6f8fa",
+            "--selected": "#d8e2ea",
+            "--line": "#899fb5",
+            "--line-strong": "#6f869d",  # 3.77 surface, 3.14 widget
             "--text": "#1c2430",
-            "--muted": "#66727f",
-            "--accent": "#2f7d67",
-            "--accent-2": "#1f6b58",
+            "--muted": "#576472",        # 5.34 к bg, 5.05 к widget
             "--on-accent": "#ffffff",
-            "--warn": "#b87400",
-            "--ok": "#157f47",
-            "--err": "#c0392f",
-            "--info": "#1f6fb2",
+            "--on-scrim": "#ffffff",     # значок на тёмной подложке обложки
+            "--on-warn": "#ffffff",      # --warn тёмный: нужна светлая подпись
+            "--accent": "#2f7d67",
+            "--accent-2": "#24634f",     # темнее акцента: hover виден
+            "--accent-dim": "#c7ded6",
+            "--focus": "#8a5a00",        # 5.93 к surface
+            "--warn": "#8a5a00",         # было #b87400 - 3.35 к bg
+            "--ok": "#0f6b3d",           # было #157f47 - 4.46 к bg
+            "--err": "#b02e24",
+            "--info": "#155a94",
+            "--ok-line": "#9fc7b3",
+            "--warn-line": "#d3b585",
+            "--err-line": "#d3a09a",
+            "--info-line": "#9dc0dd",
+            "--log-bg": "#141b24",       # журнал остаётся тёмным терминалом
+            "--log-text": "#c9d4de",
+            "--scrim": "#040910",
+            "--focus-ring": "0 0 0 2px var(--bg), 0 0 0 4px var(--focus)",
+            "--shadow": "0 18px 50px rgba(28, 36, 48, .22)",
+            "--shadow-1": "0 1px 2px rgba(28, 36, 48, .12)",
+            "--shadow-2": "0 2px 8px rgba(28, 36, 48, .14)",
+            "--veil": "rgba(28, 36, 48, .45)",
         },
     },
     {
@@ -100,21 +193,43 @@ THEMES: tuple = (
         "dark": True,
         "hint": "Максимальная разница подписей и подложки: для чтения при "
                 "ярком освещении и для слабого зрения.",
+        # Границы контролов и разделители подняты: на почти чёрной подложке
+        # мягкая граница почти не видна, а фокус должен отличаться от
+        # акцента (акцент - золото, кольцо - светлая голубая).
         "vars": {
             "--bg": "#05070a",
             "--surface": "#0b1017",
             "--surface-2": "#121a24",
             "--widget": "#1b2632",
-            "--line": "#33455a",
+            "--hover": "#121a24",
+            "--selected": "#24364a",
+            "--line": "#5c7690",
+            "--line-strong": "#7f9ab5",
             "--text": "#f6f8fa",
             "--muted": "#b6c2cd",
+            "--on-accent": "#0a0603",
+            "--on-scrim": "#ffffff",
+            "--on-warn": "#241500",
             "--accent": "#ffd166",
             "--accent-2": "#ffe3a3",
-            "--on-accent": "#0a0603",
+            "--accent-dim": "#2b2318",
+            "--focus": "#cfe6ff",        # отличается от золотого акцента
             "--warn": "#ff9f43",
             "--ok": "#2fd9a0",
             "--err": "#ff6b6b",
             "--info": "#6cb8ff",
+            "--ok-line": "#4fae7f",
+            "--warn-line": "#c08a3e",
+            "--err-line": "#d07070",
+            "--info-line": "#5f9fd6",
+            "--log-bg": "#010305",
+            "--log-text": "#c8d6e2",
+            "--scrim": "#000000",
+            "--focus-ring": "0 0 0 2px var(--bg), 0 0 0 4px var(--focus)",
+            "--shadow": "0 18px 50px rgba(0, 0, 0, .6)",
+            "--shadow-1": "0 1px 2px rgba(0, 0, 0, .45)",
+            "--shadow-2": "0 2px 8px rgba(0, 0, 0, .45)",
+            "--veil": "rgba(2, 4, 6, .75)",
         },
     },
     {
@@ -123,21 +238,42 @@ THEMES: tuple = (
         "dark": True,
         "hint": "Тёплая палитра (бурое дерево и золото) - те же переменные, "
                 "которые правятся прямо в ui_src/app.css в этом блоке.",
+        # Тот же набор, что у остальных тем: рамка контрола светлее поля
+        # контрола (иначе 2.83:1 - контрол на подложке не различим).
         "vars": {
             "--bg": "#14100c",
             "--surface": "#1c1712",
             "--surface-2": "#241d16",
             "--widget": "#2c241c",
-            "--line": "#3d3226",
+            "--hover": "#241d16",
+            "--selected": "#3a2f24",
+            "--line": "#5d4a36",
+            "--line-strong": "#8d745c",
             "--text": "#ece6dc",
-            "--muted": "#a89b8c",
+            "--muted": "#b4a692",
+            "--on-accent": "#14100c",
+            "--on-scrim": "#f6efe4",
+            "--on-warn": "#241500",
             "--accent": "#c9a24b",
             "--accent-2": "#d9b872",
-            "--on-accent": "#14100c",
+            "--accent-dim": "#4a3a22",
+            "--focus": "#f0b35c",
             "--warn": "#d99a4a",
             "--ok": "#35b07a",
             "--err": "#d4573f",
             "--info": "#6aa9d8",
+            "--ok-line": "#2e6b52",
+            "--warn-line": "#74522b",
+            "--err-line": "#7c3a2b",
+            "--info-line": "#2b5a7d",
+            "--log-bg": "#0b0806",
+            "--log-text": "#c8bda9",
+            "--scrim": "#0a0705",
+            "--focus-ring": "0 0 0 2px var(--bg), 0 0 0 4px var(--focus)",
+            "--shadow": "0 18px 50px rgba(0, 0, 0, .5)",
+            "--shadow-1": "0 1px 2px rgba(0, 0, 0, .4)",
+            "--shadow-2": "0 2px 8px rgba(0, 0, 0, .4)",
+            "--veil": "rgba(12, 9, 6, .62)",
         },
     },
 )
@@ -279,6 +415,20 @@ def _hex_ok(value) -> bool:
     return all(char in "0123456789abcdefABCDEF" for char in body)
 
 
+def _composite_ok(value) -> bool:
+    """Значение кольца фокуса или тени: непустая строка для box-shadow.
+
+    hex-литерал здесь запрещён: цвет должен идти из hex-переменной палитры
+    (var(--focus), var(--bg)), иначе в тени прячется цвет, которого в теме
+    нет, и сверка палитры с app.css его не ловит.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return False
+    if "#" in value:
+        return False
+    return "px" in value or "rgba(" in value
+
+
 def _rgb(value: str) -> tuple:
     body = value[1:]
     if len(body) == 3:
@@ -307,7 +457,11 @@ def contrast_ratio(fg: str, bg: str) -> float:
 
 
 def vars_problems(theme: dict) -> list[str]:
-    """Битые значения палитры: отсутствие переменной и не hex."""
+    """Битые значения палитры: отсутствие переменной и не hex.
+
+    Кольцо фокуса и тени (--focus-ring/--shadow/--veil) проверяются отдельно:
+    это не цвета, а строки для box-shadow, и hex-проверка для них бессмысленна.
+    """
     problems = []
     vars_ = theme.get("vars") or {}
     for name in PALETTE_VARS:
@@ -316,6 +470,12 @@ def vars_problems(theme: dict) -> list[str]:
             problems.append(f"{name} отсутствует")
         elif not _hex_ok(value):
             problems.append(f"{name} = {value!r} - не hex-значение")
+    for name in COMPOSITE_VARS:
+        value = vars_.get(name)
+        if value is None:
+            problems.append(f"{name} отсутствует")
+        elif not _composite_ok(value):
+            problems.append(f"{name} = {value!r} - не значение для box-shadow")
     return problems
 
 

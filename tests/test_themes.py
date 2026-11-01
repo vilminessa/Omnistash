@@ -4,6 +4,12 @@
   * реестр тем app/themes.py <-> палитра в ui_src/app.css (значения
     CSS-переменных в блоках :root и body[data-theme="<id>") - иначе список
     тем в карточке и цвета в CSS расходятся незаметно для глаза;
+  * набор токенов: цвета (PALETTE_VARS) и токены, которые не цвета -
+    кольцо фокуса и тени (COMPOSITE_VARS) - в каждой теме и в CSS;
+  * вне блоков палитры в CSS не остаётся литералов цвета: правило с hex
+    живёт вне темы и светлая/контрастная темы его не правят;
+  * состояния различимы: hover и selected - разные фоны, кольцо фокуса
+    отличается от акцента, границы контрола и фокус проверены по WCAG;
   * стек-семейства app/themes.py <-> FONT_STACKS в ui_src/app.js (окно
     применяет стек тем же значением, что держит реестр);
   * границы и множитель шрифта <-> поля settings_schema и расчёт --row-h
@@ -56,6 +62,44 @@ class TestThemesRegistry(unittest.TestCase):
             missing = [var for var in themes.PALETTE_VARS
                        if var not in item["vars"]]
             self.assertEqual(missing, [], f"{item['id']}: нет переменных {missing}")
+            missing = [var for var in themes.COMPOSITE_VARS
+                       if var not in item["vars"]]
+            self.assertEqual(missing, [], f"{item['id']}: нет токенов {missing}")
+
+    def test_composite_tokens_are_not_colours(self):
+        """Кольцо фокуса и тени - строки box-shadow, а не hex.
+
+        hex внутри тени прячется от сверки палитры с app.css: тема тогда
+        «проходит» проверку, но цвет в тени не правится по теме.
+        """
+        for item in themes.themes():
+            for var in themes.COMPOSITE_VARS:
+                value = item["vars"][var]
+                self.assertTrue(themes._composite_ok(value),
+                                f"{item['id']}: {var} = {value!r}")
+        broken = {"id": "x", "vars": {**themes.css_vars("dark"),
+                                      "--shadow": "0 2px 8px #000000"}}
+        self.assertIn("--shadow = '0 2px 8px #000000' - не значение для box-shadow",
+                      themes.vars_problems(broken))
+        self.assertIn("--shadow отсутствует",
+                      themes.vars_problems({"id": "x",
+                                            "vars": {k: v for k, v in
+                                                     themes.css_vars("dark").items()
+                                                     if k != "--shadow"}}))
+
+    def test_hover_and_selected_are_different(self):
+        """Наведённая и выбранная строка различаются тоном, а не только именем.
+
+        Один и тот же фон на hover и selected делает «выбранное» неотличимым
+        от «наведённое» (SC 1.4.11 - состояние должно быть различимо).
+        """
+        for item in themes.themes():
+            vars_ = item["vars"]
+            self.assertNotEqual(vars_["--hover"], vars_["--selected"],
+                                f"тема {item['id']}: hover == selected")
+            self.assertNotEqual(vars_["--focus"], vars_["--accent"],
+                                f"тема {item['id']}: кольцо фокуса совпадает "
+                                f"с акцентом - фокус неотличим от кнопки")
 
     def test_all_themes_readable(self):
         for item in themes.themes():
@@ -104,10 +148,27 @@ class TestThemesRegistry(unittest.TestCase):
                         "акцент ниже порога контраста должен быть отмечен")
 
     def test_line_is_not_a_caption_pair(self):
-        # --line - рамка подложки, её низкий контраст сознательный: проверка
-        # читаемости не должна требовать «жирные» границы.
+        # --line - декоративный разделитель: его низкий контраст сознательный,
+        # проверка читаемости не должна требовать «жирные» границы.
         self.assertNotIn("--line", [pair[0] for pair in themes.CONTRAST_PAIRS])
         self.assertNotIn("--line", [pair[1] for pair in themes.CONTRAST_PAIRS])
+
+    def test_line_strength_and_focus_are_checked_as_components(self):
+        """Граница контрола и кольцо фокуса проверяются: это компонент (SC 1.4.11).
+
+        В отличие от --line они несут смысл (граница input/select, индикатор
+        фокуса), поэтому порог 3.0 для них обязателен - иначе контрол на
+        подложке не различим, а фокус не виден.
+        """
+        pairs = {pair for pair in themes.CONTRAST_PAIRS}
+        for var, floor in (("--line-strong", "--surface"), ("--line-strong", "--widget"),
+                           ("--focus", "--surface"), ("--focus", "--widget")):
+            self.assertIn((var, floor, 3.0), pairs,
+                          f"пара ({var}, {floor}) с порогом 3.0 должна проверяться")
+        self.assertIn(("--on-scrim", "--scrim", 4.5), pairs,
+                      "подпись на подложке обложки должна читаться")
+        self.assertIn(("--log-text", "--log-bg", 4.5), pairs,
+                      "подпись журнала на своей подложке должна читаться")
 
 
 class TestFontRegistry(unittest.TestCase):
@@ -180,6 +241,78 @@ class TestCssPaletteMatchesRegistry(unittest.TestCase):
             + r"\)\)",
             "--row-h должен расти по --font-size теми же значениями, что "
             "themes.row_px (ROW_MIN/ROW_FACTOR)")
+
+    def test_mono_stack_from_registry(self):
+        """Журнал и JSON читаются моноширинным стеком из реестра тем.
+
+        Литерал стека в двух правилах - второй источник правды: реестр
+        меняется, а окно остаётся на прежнем шрифте.
+        """
+        root = _css_block(self.css, ":root")
+        self.assertEqual(root.get("--mono"), themes.font_stack("mono"),
+                         "--mono в app.css расходится с реестром стеков")
+        self.assertEqual(len(re.findall(r"var\(--mono\)", _clean(self.css))), 2,
+                         "журнал и JSON должны брать стек из переменной")
+
+    def test_scale_tokens_defined_in_root(self):
+        """Токены отступов/радиуса/типографики/веяния объявлены в :root (§2.4-2.7)."""
+        root = _css_block(self.css, ":root")
+        for var in ("--s-1", "--s-2", "--s-3", "--s-4", "--s-5", "--s-6",
+                    "--s-7", "--s-8", "--r-1", "--r-2", "--r-3", "--r-4",
+                    "--r-full", "--radius", "--fs-cap", "--fs-sm", "--fs-body",
+                    "--fs-lg", "--fs-title", "--fs-head", "--lh-tight",
+                    "--lh-body", "--track", "--nums", "--mono",
+                    "--dur-fast-01", "--dur-fast-02", "--dur-moderate-01",
+                    "--dur-moderate-02", "--dur-slow-01", "--dur-slow-02",
+                    "--ease-productive", "--ease-expressive", "--ease-exit"):
+            self.assertIn(var, root, f":root не объявляет токен {var}")
+
+    def test_no_colour_literals_outside_palette(self):
+        """Вне блоков палитры не остаётся hex и rgba: правила читают токены.
+
+        Литерал цвета вне темы - это цвет, которого в теме нет: светлая и
+        контрастная темы его не правят, и сверка реестра с CSS его не ловит.
+        """
+        clean = _clean(self.css)
+        rest = clean[clean.index("* { box-sizing"):]      # после блоков тем
+        values = ";".join(part.split(":", 1)[1] for part in rest.split(";")
+                          if ":" in part)
+        literals = re.findall(r"#[0-9a-fA-F]{3,6}\b", values) + re.findall(r"rgba\(", values)
+        self.assertEqual(literals, [],
+                         f"литералы цвета вне палитры: {literals[:10]}")
+
+    def test_state_rules_read_state_tokens(self):
+        """hover/selected/фокус/disabled - из токенов состояния, не из подложек.
+
+        var(--widget)/var(--surface-2) вместо --selected/--hover - состояние
+        правится не по теме, а «наведено» и «выбрано» выглядят одинаково.
+        """
+        for selector, token in ((".row:hover", "--hover"),
+                                (".row.selected", "--selected"),
+                                (".row.picked", "--selected"),
+                                (".tree-item:hover", "--hover"),
+                                (".tree-item.active", "--selected"),
+                                (".table tbody tr:hover", "--hover"),
+                                (".btn:hover:not(:disabled)", "--hover"),
+                                (".btn.primary:disabled", "--accent-dim"),
+                                (".mode-item:has(input:checked)", "--selected"),
+                                (".view-btn.active", "--selected")):
+            # селектор может быть в списке через запятую - между ним и {
+            # других скобок быть не должно
+            block = re.search(re.escape(selector) + r"[^{}]*\{([^}]*)\}",
+                              _clean(self.css))
+            self.assertTrue(block, f"нет правила {selector}")
+            self.assertIn(f"var({token})", block.group(1),
+                          f"{selector} должен брать {token}")
+
+    def test_focus_ring_used(self):
+        """Индикатор фокуса есть: кольцо из --focus-ring (две полосы, §5.2)."""
+        clean = _clean(self.css)
+        self.assertRegex(clean, r"focus-visible[^{]*\{[^}]*var\(--focus-ring\)",
+                         "правило :focus-visible должно давать кольцо --focus-ring")
+        self.assertNotRegex(clean, r"input:focus[^{]*\{[^}]*border-color:\s*var\(--accent\)",
+                            "акцент как единственный индикатор фокуса: "
+                            "акцентная кнопка и фокус выглядят одним цветом")
 
     def test_on_accent_used_on_accent_surfaces(self):
         # Подпись на акцентной подложке: кнопка и badge читаемы в любой теме
