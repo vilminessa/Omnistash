@@ -16,12 +16,15 @@
 
 from __future__ import annotations
 
+import atexit
 import ctypes
 import ctypes.wintypes as wintypes
 import http.cookiejar
 import json
 import os
 import tempfile
+import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -322,6 +325,17 @@ def decrypted_cookies_text(account_id: str) -> str | None:
     return decrypt(path.read_bytes()).decode("utf-8")
 
 
+# Временные копии кук этого процесса: их обязан снимать вызывающий
+# (release_temp в finally), но процесс могут убить или он может упасть
+# жёстко - тогда полный открытый jar кук остаётся в %TEMP%. Поэтому:
+#   * свои файлы помним и снимаем на выходе (atexit);
+#   * при старте убираем чужие остатки, которые старше ORPHAN_MAX_AGE_S -
+#     живой файл другого запущенного окна (свежий) не трогается.
+_TEMP_FILES: list[Path] = []
+_TEMP_LOCK = threading.Lock()
+ORPHAN_MAX_AGE_S = 6 * 3600
+
+
 def temporary_cookiefile(account_id: str) -> Path | None:
     """Расшифровать куки аккаунта во временный файл для yt-dlp.
 
@@ -336,15 +350,68 @@ def temporary_cookiefile(account_id: str) -> Path | None:
         suffix=".txt", delete=False)
     handle.write(text)
     handle.close()
-    return Path(handle.name)
+    path = Path(handle.name)
+    with _TEMP_LOCK:
+        _TEMP_FILES.append(path)
+    return path
 
 
 def release_temp(path: Path | None) -> None:
-    if path:
+    if not path:
+        return
+    target = Path(path)
+    with _TEMP_LOCK:
+        # Только этот файл: путь мог быть передан чужой (уже снят ранее).
+        for index, mine in enumerate(_TEMP_FILES):
+            if mine == target:
+                del _TEMP_FILES[index]
+                break
+    try:
+        target.unlink()
+    except OSError:
+        pass
+
+
+def sweep_orphan_cookiefiles(max_age_s: float = ORPHAN_MAX_AGE_S) -> int:
+    """Убрать остатки кук после падения/убивания процесса (не живые копии).
+
+    Только наши собственные файлы с нашим префиксом в temp и только старше
+    max_age_s: файл второго запущенного окна (создан минуты назад) не
+    удаляется, и чужие файлы temp не трогаются.
+    """
+    folder = Path(tempfile.gettempdir())
+    now = time.time()
+    removed = 0
+    try:
+        candidates = list(folder.glob("omnistash-cookies-*.txt"))
+    except OSError:
+        return 0
+    for candidate in candidates:
+        with _TEMP_LOCK:
+            if candidate in _TEMP_FILES:
+                continue                      # живой файл этого процесса
         try:
-            Path(path).unlink()
+            if now - candidate.stat().st_mtime > max_age_s:
+                candidate.unlink()
+                removed += 1
+        except OSError:
+            pass                              # чужой/недоступный - не наш
+    return removed
+
+
+def _release_temps_at_exit() -> None:
+    """Снять копии кук этого процесса на выходе (обычный и аварийный)."""
+    with _TEMP_LOCK:
+        files = list(_TEMP_FILES)
+        _TEMP_FILES.clear()
+    for path in files:
+        try:
+            path.unlink()
         except OSError:
             pass
+
+
+atexit.register(_release_temps_at_exit)
 
 
 def cookies_facts(cookies) -> dict:

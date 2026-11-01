@@ -4,7 +4,9 @@
 http.cookiejar. Проверяем и то, что секреты не утекают в журнал.
 """
 
+import atexit
 import http.cookiejar
+import importlib
 import os
 import tempfile
 import time
@@ -422,6 +424,75 @@ class TestSourceBinding(GuiCase):
         labeled = self.api.poll(0)
         self.assertEqual(labeled["account"]["accounts"][0]["id"],
                          self.account["id"])
+
+
+class TestTemporaryCookieLifecycle(ProfileCase):
+    """Куки на диске живут ровно пока идёт запрос; остатки после падения убираются."""
+
+    def setUp(self):
+        super().setUp()
+        # Temp под свою папку: sweep не должен трогать настоящие файлы %TEMP%.
+        self.temp = Path(tempfile.mkdtemp(prefix="ga-temp_"))
+        patcher = mock.patch("tempfile.gettempdir", return_value=str(self.temp))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        google_auth._TEMP_FILES.clear()
+        self.addCleanup(google_auth._TEMP_FILES.clear)
+        self.account = google_auth.create_account(session_cookies(), label="мой")
+
+    def test_temp_file_is_tracked_and_released(self):
+        temp = google_auth.temporary_cookiefile(self.account["id"])
+        self.assertIn(temp, google_auth._TEMP_FILES,
+                      "живая копия должна помниться процессом")
+        google_auth.release_temp(temp)
+        self.assertFalse(temp.exists())
+        self.assertNotIn(temp, google_auth._TEMP_FILES)
+
+    def test_release_is_idempotent_and_never_unlists_other_files(self):
+        temp = google_auth.temporary_cookiefile(self.account["id"])
+        foreign = self.temp / "omnistash-cookies-chuzhoy.txt"
+        foreign.write_text("не копия этого процесса", encoding="utf-8")
+        google_auth.release_temp(temp)
+        google_auth.release_temp(temp)          # повторный вызов не должен мешать
+        google_auth.release_temp(foreign)       # чужой путь: снимаем файл, не список
+        self.assertEqual(google_auth._TEMP_FILES, [])
+        self.assertFalse(temp.exists())
+
+    def test_sweep_removes_only_stale_own_files(self):
+        stale = self.temp / "omnistash-cookies-old.txt"
+        stale.write_text("куки после убивания процесса", encoding="utf-8")
+        old = time.time() - google_auth.ORPHAN_MAX_AGE_S - 120
+        os.utime(stale, (old, old))
+        fresh = self.temp / "omnistash-cookies-live.txt"   # живая копия другого окна
+        fresh.write_text("куки", encoding="utf-8")
+        foreign = self.temp / "совсем-чужой.txt"
+        foreign.write_text("не наши", encoding="utf-8")
+
+        self.assertEqual(google_auth.sweep_orphan_cookiefiles(), 1)
+        self.assertFalse(stale.exists(), "остаток после падения обязан быть убран")
+        self.assertTrue(fresh.exists(), "свежая копия другого окна не трогается")
+        self.assertTrue(foreign.exists(), "чужие файлы temp не трогаются")
+
+    def test_sweep_keeps_files_of_this_process(self):
+        temp = google_auth.temporary_cookiefile(self.account["id"])
+        old = time.time() - google_auth.ORPHAN_MAX_AGE_S - 120
+        os.utime(temp, (old, old))   # возраст файла не делает живую копию остатком
+        self.assertEqual(google_auth.sweep_orphan_cookiefiles(), 0)
+        self.assertTrue(temp.exists())
+
+    def test_exit_releases_live_copies(self):
+        temp = google_auth.temporary_cookiefile(self.account["id"])
+        google_auth._release_temps_at_exit()
+        self.assertFalse(temp.exists(), "на выходе процесса куки обязаны быть сняты")
+        self.assertEqual(google_auth._TEMP_FILES, [])
+
+    def test_release_is_registered_at_exit(self):
+        """Жёсткое убивание процесса тоже снимает куки - через atexit."""
+        with mock.patch("app.google_auth.atexit.register") as register:
+            importlib.reload(google_auth)
+            self.assertTrue(register.called,
+                            "освобождение временных кук не зарегистрировано на выходе")
+        importlib.reload(google_auth)          # вернуть настоящий atexit
 
 
 if __name__ == "__main__":
