@@ -450,8 +450,42 @@
 
   var signatures = {};
 
+  /* Дешёвая сигнатура снимка вместо JSON.stringify (ревью #10).
+
+     stringify на каждый тик прогонял большие ключи (tree, runs, queue,
+     storages - тысячи строк), хотя нужен только ответ «изменилось ли».
+     Здесь те же поля, что сравниваются целиком: длинные строки хешуются
+     вместо того, чтобы их копировать, структура обходится полностью -
+     пропустить изменение значит оставить панель устаревшей, поэтому
+     ничего не отбрасывается. Хеш двойной (djb2 + FNV): случайное
+     совпадение двух разных значений стоит двух независимых коллизий.
+     */
+  function hashText(text) {
+    var djb = 5381, fnv = 2166136611;
+    for (var i = 0; i < text.length; i++) {
+      var code = text.charCodeAt(i);
+      djb = ((djb * 33) ^ code) >>> 0;
+      fnv = ((fnv ^ code) * 16777619) >>> 0;
+    }
+    return djb.toString(16) + "." + fnv.toString(16);
+  }
+
+  function signature(value) {
+    if (value === null || value === undefined) return "";
+    var type = typeof value;
+    if (type === "number" || type === "boolean") return String(value);
+    if (type === "string") return value.length > 48 ? "#" + hashText(value) : value;
+    if (Array.isArray(value)) {
+      return value.length + "[" + value.map(signature).join(",") + "]";
+    }
+    var keys = Object.keys(value).sort();
+    return "{" + keys.map(function (key) {
+      return key + ":" + signature(value[key]);
+    }).join(",") + "}";
+  }
+
   function changed(key, data) {
-    var sig = JSON.stringify(data);
+    var sig = signature(data);
     if (signatures[key] === sig) return false;
     signatures[key] = sig;
     return true;
@@ -3403,8 +3437,16 @@
     } else if (field.type === "storages") {
       control = storagesHtml();
     } else {
-      control = '<input type="text" data-key="' + field.key + '" value="' +
-        esc(value) + '">';
+      // Секреты backend окну не отдаёт (app/settings.py: as_public): вместо
+      // значения - признак «установлен». Показываем его честно, поле остаётся
+      // для нового значения; пустое поле значит «не установлен».
+      var setFlag = state.settings[field.key + "_set"];
+      var secretNote = setFlag
+        ? '<div class="field-hint">значение сохранено в профиле и скрыто от ' +
+          'окна; впишите новое, чтобы заменить</div>'
+        : "";
+      control = secretNote + '<input type="text" data-key="' + field.key +
+        '" value="' + esc(value) + '">';
     }
     // Подпись поля на текущем языке (app/i18n.py: settings.<key>.label/hint).
     // Поля, которых словарь не покрывает, остаются подписями из схемы.
@@ -6150,13 +6192,18 @@
       mesh_enabled: false, mesh_peers: "", mesh_port: 1000, mesh_upnp: true,
       mesh_encrypt: false, mesh_mdns: true, mesh_strict: false, mesh_nick: "",
       mesh_max_mb: 10, mesh_rate_mbit: 10,
-      dest_dir: "D:\\видео\\downloads",
       output_template: "%(channel)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s",
       quality: "high", subtitles: "none", transcode: "none",
       view_mode: "list", tile_size: "medium",
-      use_google_cookies: true,
+      browser_cookies: "none", cookies_file: "", impersonate: "chrome",
+      bypass_enabled: true, bypass_max_attempts: 4, save_thumb: true,
       delay_ms: 500, retries: 3, resume_queue: true,
       scan_interval_min: 0, sync_interval_min: 30,
+      // M13/G2: ключи выкачки и метаданных API. Значения секретов окну не
+      // показываются - только признаки «установлен» (as_public в app/settings.py).
+      bot_token_enabled: true, bot_token: "", bot_token_set: false,
+      oauth_client_id: "", data_api_key: "", data_api_key_set: false,
+      data_api_enabled: false,
       theme: "dark", app_version: "",
       // M15: шрифт, язык и флаг взрослой вкладки - те же ключи и значения
       // по умолчанию, что в app/settings_schema.py (карточку правок в превью
@@ -6433,6 +6480,17 @@
         choices: [["full", "Полная (лайки, комменты, даты)"],
                   ["fast", "Быстрая (только список)"]],
         default: "full" },
+      { key: "save_thumb", type: "bool", section: "Библиотека",
+        label: "Сохранять обложку рядом с файлом",
+        hint: "URL обложек площадок протухают со временем - локальная копия " +
+              "остаётся вместе с библиотекой.",
+        default: true },
+      { key: "compute_hash", type: "bool", section: "Библиотека",
+        label: "Считать хеш при скане",
+        hint: "Нужен, чтобы находить перемещённые файлы и дубли. Выключите на " +
+              "большой библиотеке - скан станет быстрее, но опознавание " +
+              "перемещений отключится.",
+        default: true },
       { key: "col_views", type: "bool", section: "Библиотека",
         label: "Колонка «Просмотры»",
         hint: "Видимость колонок списка; лишние можно выключить здесь.",
@@ -6534,12 +6592,18 @@
         action: "peer-dialog",
         action_label: "Профиль и поиск участников…",
         transient: true, default: [] },
-      { key: "dest_dir", type: "path", section: "Загрузка",
-        label: "Куда скачивать", hint: "нет - заменено хранилищами",
-        hidden: true, default: "D:\\видео\\downloads" },
+      { key: "output_template", type: "str", section: "Загрузка",
+        label: "Шаблон имени и пути",
+        hint: "Синтаксис yt-dlp (%(title)s, %(id)s, ...). Часть [%(id)s] в " +
+              "имени обязательна: по ID файлы потом узнаются в индексе.",
+        default: "%(channel)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s" },
       { key: "quality", type: "choice", section: "Загрузка", label: "Качество",
         choices: [["best", "Исходное"], ["high", "Высокое"],
                   ["mid", "Среднее"], ["low", "Низкое"]], default: "high" },
+      { key: "subtitles", type: "choice", section: "Загрузка",
+        label: "Субтитры",
+        choices: [["none", "Не качать"], ["ru", "Русские"],
+                  ["en", "Английские"], ["all", "Все"]], default: "none" },
       { key: "_ffmpeg", type: "action", section: "Загрузка", label: "FFmpeg",
         hint: "Склейка, метаданные, субтитры в файл и перекодировка требуют " +
               "ffmpeg. Мы его НЕ вшиваем (GPL) - ставите сами кнопкой.",
@@ -6559,6 +6623,72 @@
         label: "Пауза между запросами, мс",
         hint: "Меньше - быстрее, но площадка может начать резать поток.",
         min: 0, max: 60000, default: 500 },
+      { key: "retries", type: "int", section: "Загрузка",
+        label: "Повторов при сбое",
+        min: 0, max: 20, default: 3 },
+      { key: "resume_queue", type: "bool", section: "Загрузка",
+        label: "Продолжать очередь при запуске",
+        hint: "Открыт окно - и строки, которые стояли в очереди, поехали " +
+              "дальше сами. Выключите, если хотите запускать загрузку только " +
+              "вручную.",
+        default: true },
+      { key: "impersonate", type: "choice", section: "Загрузка",
+        label: "Имитация браузера (TLS-отпечаток)",
+        hint: "Анти-бот проверяет «какой это браузер» по отпечатку TLS. С " +
+              "включённой имитацией площадки отвечают как браузер (лечит " +
+              "403/410 бот-фильтрации). Требует библиотеки curl_cffi - если её " +
+              "нет, будет предупреждение в журнале. «Выкл» - обычный отпечаток " +
+              "Python.",
+        choices: [["chrome", "Chrome"], ["firefox", "Firefox"],
+                  ["edge", "Edge"], ["off", "Выкл"]],
+        default: "chrome" },
+      { key: "cookies_file", type: "str", section: "Загрузка",
+        label: "Куки из файла (cookies.txt)",
+        hint: "Путь к файлу кук в формате Netscape (экспорт из расширения " +
+              "«Get cookies.txt»). Рабочий путь для браузеров с шифрованием " +
+              "куки (Chrome 127+ ABE): откройте площадку в браузере, " +
+              "экспортируйте куки, укажите путь здесь. Пусто - брать куки из " +
+              "настройки «Куки из браузера».",
+        default: "" },
+      { key: "bypass_enabled", type: "bool", section: "Загрузка",
+        label: "Дороги выкачки при отказе площадки",
+        hint: "Площадка отказала (403/410/«подтвердите, что вы не бот») - " +
+              "пробуем конечный набор дорог в фиксированном порядке: куки " +
+              "браузера, куки из файла, имитация браузера, зеркало домена " +
+              "площадки, подтверждение «не бот», HLS-вариант формата, качество " +
+              "ниже. Каждая дорога и её итог видны в журнале; выигравшая " +
+              "дорога запоминается для площадки на сутки и в следующий раз " +
+              "пробуется раньше остальных. Это про запрос к площадке: обход DPI " +
+              "и настройки вашей сети не включаются и не выключаются.",
+        default: true },
+      { key: "bypass_max_attempts", type: "int", section: "Загрузка",
+        label: "Дорог при отказе, максимум",
+        hint: "Страховка от бесконечных повторов: сколько дорог прогоняем на " +
+              "один запрос (1 = только обычный запрос). Итог - первая вышедшая " +
+              "дорога или последняя честная причина отказа.",
+        min: 1, max: 12, default: 4 },
+      // M13: те же ключи и подписи, что в app/settings_schema.py (дороги
+      // выкачки и подтверждение «не бот»). Значение токена backend окну не
+      // отдаёт: вместо него - признак «установлен» (см. fieldHtml).
+      { key: "bot_token_enabled", type: "bool", section: "Загрузка",
+        label: "Подтверждение «не бот» из профиля",
+        hint: "Для площадок, где отказ «bot» означает «нужен токен или " +
+              "подтверждение человека»: сохраняем visitor-info / токен " +
+              "содержимого / подтверждающие cookie в профиле (шифрование " +
+              "DPAPI - то же, что у куки аккаунта) и повторяем выкачку с ним. " +
+              "Если подтверждение не помогло - подсказка «подтвердите, что вы " +
+              "не бот» и варианты «открыть на площадке» / «запросить у " +
+              "участников сети». Обход DPI не используется.",
+        default: true },
+      { key: "bot_token", type: "str", section: "Загрузка",
+        label: "Токен подтверждения (если есть)",
+        hint: "Значение, которое площадка принимает вместо «подтвердите, что " +
+              "вы не бот»: строка «КЛИЕНТ.контекст+токен» (например " +
+              "«web.gvs+…») или сам токен. Пусто - брать сохранённое в " +
+              "профиле; вписанное значение сохраняется в профиле шифрованием " +
+              "DPAPI и переживает перезапуск. Значение не уходит участникам " +
+              "сети и не пишется в журнал.",
+        default: "" },
       { key: "scan_interval_min", type: "int", section: "Расписание",
         label: "Автоскан каждые, мин",
         hint: "0 - выключено. Работает, пока открыто окно.",
@@ -6566,7 +6696,7 @@
       { key: "sync_interval_min", type: "int", section: "Расписание",
         label: "Автосинк каждые, мин",
         hint: "0 - выключено. Новые видео в очередь - только в «Полной».",
-        min: 0, max: 1440, default: 30 },
+        min: 0, max: 1440, default: 0 },
       { key: "view_mode", type: "choice", section: "Библиотека",
         label: "Вид библиотеки",
         hint: "Список - строки; плитка - обложки (превью берутся только из " +
@@ -6579,15 +6709,53 @@
         choices: [["small", "Мелкая"], ["medium", "Средняя"],
                   ["large", "Крупная"]],
         default: "medium" },
-      { key: "use_google_cookies", type: "bool", section: "Аккаунт Google",
-        label: "Использовать аккаунт при загрузках",
-        hint: "Куки аккаунта уходят в качалку: возрастной контент и «подтвердите, " +
-              "что вы не бот». Копия хранится зашифрованной (DPAPI).",
-        default: true },
+      { key: "browser_cookies", type: "choice", section: "Аккаунт Google",
+        label: "Куки из браузера (без копий)",
+        hint: "yt-dlp читает куки вашего браузера напрямую - копий у нас не " +
+              "появляется. Firefox работает; Chrome/Edge v127+ шифруют куки " +
+              "(App-Bound Encryption) и прочитать их нельзя - для них " +
+              "используйте импорт cookies.txt. Привязанный аккаунт имеет " +
+              "приоритет над этим режимом.",
+        choices: [["none", "Не использовать"], ["firefox", "Firefox"],
+                  ["edge", "Edge (не работает в v127+)"],
+                  ["chrome", "Chrome (не работает в v127+)"],
+                  ["brave", "Brave (не работает в v127+)"]],
+        default: "none" },
       { key: "_google_account", type: "account", section: "Аккаунт Google",
         label: "Вход в Google",
         hint: "Вход в окне приложения (куки снимаются сами) или импорт cookies.txt.",
         transient: true, default: [] },
+      // G2: OAuth-вход installed-app (PKCE) и Data API - те же ключи и
+      // подписи, что в app/settings_schema.py. Ключ Data API секретный:
+      // backend отдаёт признак «установлен», значение окну не показывается.
+      { key: "oauth_client_id", type: "str", section: "Аккаунт Google",
+        label: "OAuth client_id (вход без куки-окна)",
+        hint: "Публичный client_id desktop-приложения (installed app) из " +
+              "OAuth-консоли. Подтверждение входа - PKCE: client_secret нигде " +
+              "не хранится и в сборку не вшивается (защита desktop-цикла " +
+              "строится на PKCE и loopback-возврате). В консоли должен быть " +
+              "прописан redirect «http://127.0.0.1:порт/» (случайный порт " +
+              "принимается). Значение не уходит участникам сети и не " +
+              "пишется в журнал. Пусто - вход не настроен.",
+        default: "" },
+      { key: "data_api_key", type: "str", section: "Метаданные API",
+        label: "Ключ Data API (необязателен)",
+        hint: "API-ключ проекта для YouTube Data API v3: videos.list - 1 unit " +
+              "квоты на запрос. С ключом метаданные одиночного видео приходят " +
+              "из официального JSON вместо скрейпа страницы. Пусто - " +
+              "использовать OAuth-вход или скрейп. Значение не уходит " +
+              "участникам сети и не пишется в журнал.",
+        default: "" },
+      { key: "data_api_enabled", type: "bool", section: "Метаданные API",
+        label: "Метаданные через Data API",
+        hint: "Брать метаданные одиночного видео из YouTube Data API v3 " +
+              "(videos.list) по ключу или OAuth-входу. Квота учитывается: при " +
+              "исчерпании и отказе - честный откат на обычный скрейп " +
+              "(«Data API не доступна, использован скрейп» в журнале). " +
+              "RSS-ленты канала (основная опора списка канала) не затрагивает. " +
+              "По умолчанию выключено: лишних запросов без настроенных " +
+              "credentials не появляется.",
+        default: false },
       { key: "theme", type: "choice", section: "Внешний вид", label: "Тема",
         hint: "Палитра окна через CSS-переменные: тёмная (по умолчанию), " +
               "светлая, контрастная и своя.",
