@@ -510,5 +510,134 @@ class TestRepoBulk(unittest.TestCase):
         self.assertEqual(repo.collection_ids(self.conn, cid), [second, first])
 
 
+class TestFolderAboveLimit(BulkCase):
+    """Папка целиком выше лимита репо: операция идёт частями, а не отсекается.
+
+    «Скачать всё» в большой папке - обычная операция, и отказ «разбейте на
+    части» для неё был бы вечным. Лимит остаётся страховкой для явного списка
+    из окна; сводки частей складываются, человек видит всю папку целиком.
+    """
+
+    def big_folder(self, *, extra=7, present_every=None):
+        """Папка с BULK_LIMIT + extra строками (порядок добавления сохранён)."""
+        cid = repo.collection_create(self.conn, "Большая папка")
+        vids = []
+        for i in range(repo.BULK_LIMIT + extra):
+            vid = add_video(self.api, f"h{i}")
+            if present_every and i % present_every == 0:
+                record_file(self.conn, vid, self.file_on_disk(f"h{i}.mp4"))
+            vids.append(vid)
+        repo.collection_add(self.conn, cid, vids)
+        return cid, vids
+
+    def test_limit_is_one_source_of_truth(self):
+        """Лимит окна и репо не расходятся; разбиение - ровно по лимиту."""
+        self.assertEqual(self.api.BULK_LIMIT, repo.BULK_LIMIT)
+        ids = list(range(2 * repo.BULK_LIMIT + 3))
+        self.assertEqual(self.api._bulk_chunks(ids),
+                         [ids[:repo.BULK_LIMIT],
+                          ids[repo.BULK_LIMIT:2 * repo.BULK_LIMIT],
+                          ids[2 * repo.BULK_LIMIT:]])
+        self.assertEqual(self.api._bulk_chunks([1, 2, 3]), [[1, 2, 3]],
+                         "обычная группа - одна часть")
+
+    def test_folder_scope_above_limit_is_allowed_and_ordered(self):
+        cid, vids = self.big_folder(extra=3)
+        ids, error = self.api._bulk_selection({"collection_id": cid})
+        self.assertIsNone(error, "папка выше лимита не отсекается")
+        self.assertGreater(len(ids), repo.BULK_LIMIT)
+        self.assertEqual(ids, vids, "папка берётся в своём порядке, не по id")
+
+    def test_explicit_group_above_limit_still_refused(self):
+        """Тот же состав списком из окна - лимит работает как страховка."""
+        cid, vids = self.big_folder(extra=3)
+        result = self.api.bulk_download({"ids": vids})
+        self.assertIn("слишком большая", result["error"], result)
+        self.assertIn(str(repo.BULK_LIMIT), result["error"])
+        self.assertEqual(status_of(self.conn, vids[0]), "known",
+                         "отсекание до записи: БД не тронута")
+
+    def test_download_folder_above_limit_enqueues_every_row(self):
+        self.fake_download()
+        cid, vids = self.big_folder()
+        result = self.api.bulk_download({"collection_id": cid})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["total"], len(vids))
+        self.assertEqual(result["queued"], len(vids))
+        self.assertEqual(sum(1 for v in vids
+                             if status_of(self.conn, v) == "queued"), len(vids))
+        self.assertIn("Массовая выкачка", "\n".join(self.logs()))
+
+    def test_skips_of_second_chunk_are_merged_into_one_summary(self):
+        """Пропуски второй части видны в той же сводке, а не по первой части."""
+        self.fake_download()
+        cid, vids = self.big_folder(extra=4, present_every=3)
+        result = self.api.bulk_download({"collection_id": cid})
+        present = sum(1 for i, _v in enumerate(vids) if i % 3 == 0)
+        self.assertGreater(present, 0)
+        self.assertEqual(result["skipped"], present)
+        self.assertEqual(result["queued"], len(vids) - present)
+        self.assertEqual(result["reasons"], {"уже скачано": present},
+                         "причины складываются по всей папке")
+
+    def test_tags_and_rating_above_limit_reach_every_row(self):
+        cid, vids = self.big_folder(extra=5)
+        tagged = self.api.bulk_tags({"collection_id": cid, "add": ["большая"]})
+        self.assertTrue(tagged["ok"], tagged)
+        self.assertEqual(tagged["updated"], len(vids))
+        rated = self.api.bulk_rating({"collection_id": cid, "rating": 4})
+        self.assertTrue(rated["ok"], rated)
+        self.assertEqual(rated["updated"], len(vids))
+        self.assertTrue(all(row_of(self.conn, v)["user_tags"] == "большая"
+                            for v in vids), "каждая строка папки обновлена")
+        self.assertTrue(all(row_of(self.conn, v)["user_rating"] == 4
+                            for v in vids))
+
+    def test_clear_folder_above_limit_removes_all_links(self):
+        cid, vids = self.big_folder(extra=2)
+        result = self.api.bulk_collection({"collection_id": cid, "action": "remove"})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["removed"], len(vids))
+        self.assertEqual(repo.collection_ids(self.conn, cid), [])
+        self.assertTrue(all(row_of(self.conn, v) for v in vids),
+                        "ушли только связи папки, строки видео целы")
+
+    def test_remove_rows_above_limit_removes_every_row(self):
+        cid, vids = self.big_folder(extra=6)
+        result = self.api.bulk_remove_rows({"collection_id": cid, "confirm": True})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["removed"], len(vids))
+        self.assertEqual(repo.stats(self.conn)["total"], 0)
+        self.assertEqual(repo.collection_ids(self.conn, cid), [])
+
+    def test_adult_row_in_a_later_chunk_is_still_gated(self):
+        """Взрослая строка за пределами первой части не проскакивает гейт 18+."""
+        cid = repo.collection_create(self.conn, "Большая папка")
+        vids = [add_video(self.api, f"q{i}") for i in range(repo.BULK_LIMIT + 2)]
+        late = add_video(self.api, "q-adult", platform="pornhub")
+        vids.append(late)
+        repo.collection_add(self.conn, cid, vids)
+
+        refused = self.api.bulk_download({"collection_id": cid})
+        self.assertTrue(refused.get("adult_confirm"), refused)
+        self.assertIn("18", refused["error"])
+        self.assertEqual(status_of(self.conn, late), "known",
+                         "отказ до записи: ни одна часть не выполнена")
+
+    def test_failure_of_a_later_chunk_refuses_the_operation(self):
+        """Ошибка второй части - отказ с честной строкой, очередь не стартует."""
+        self.fake_download()
+        cid, vids = self.big_folder(extra=2)
+        first_chunk = {"queued": repo.BULK_LIMIT, "skipped": 0, "gone": 0,
+                       "reasons": {}}
+        with mock.patch.object(repo, "bulk_enqueue",
+                               side_effect=[first_chunk,
+                                            RuntimeError("база закрылась")]):
+            result = self.api.bulk_download({"collection_id": cid})
+        self.assertIn("Не удалось выполнить", result["error"], result)
+        self.assertIn("база закрылась", result["error"])
+        self.assertNotIn("queued", result)
+
+
 if __name__ == "__main__":
     unittest.main()

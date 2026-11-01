@@ -92,13 +92,17 @@ def _log_line(text: str) -> str:
     return f"[{time.strftime('%H:%M:%S')}] {text}"
 
 
-def _sources_with_accounts(conn) -> list[dict]:
+def _sources_with_accounts(conn, labels: dict | None = None) -> list[dict]:
     """Источники + подписи их аккаунтов.
 
     Метки аккаунтов живут в accounts.json (не в БД), поэтому JOIN тут
     невозможен - подмешиваем из реестра, как «куда качать» из хранилищ.
+    labels можно передать: снимок окна считает реестр один раз на тик и
+    отдаёт результат сюда, иначе accounts.json читался и парсился трижды
+    за каждые 500 мс опроса.
     """
-    labels = google_auth.account_labels()
+    if labels is None:
+        labels = google_auth.account_labels()
     out = []
     for source in repo.sources(conn):
         item = dict(source)
@@ -142,6 +146,15 @@ class Api:
         if pruned:
             print(f"[аккаунт] убраны записи без копий кук: "
                   f"{', '.join(pruned)}")
+        # Остатки временных копий кук после жёсткого падения/убивания
+        # процесса (см. google_auth.sweep_orphan_cookiefiles): только наши
+        # файлы и только старые - живая копия другого окна не трогается.
+        try:
+            swept = google_auth.sweep_orphan_cookiefiles()
+        except OSError:
+            swept = 0
+        if swept:
+            print(f"[аккаунт] убраны остатки временных кук: {swept}")
         if self._boot.get("default") and not settings.read_raw().get(
                 "default_storage_id"):
             settings.set_value("default_storage_id", self._boot["default"])
@@ -400,16 +413,23 @@ class Api:
         with self._lock:
             return settings.reload_if_changed(self._settings_cache)
 
-    def _heavy_snapshot(self) -> dict:
-        """Агрегаты для окна, но не чаще HEAVY_TTL секунд."""
+    def _heavy_snapshot(self, *, labels: dict | None = None) -> dict:
+        """Агрегаты для окна, но не чаще HEAVY_TTL секунд.
+
+        stats считается один раз и передаётся в tree (tree пересчитывает
+        агрегаты сам, если pool не передан) — иначе агрегатный проход по
+        библиотеке делался дважды на тик. labels (метки аккаунтов) тоже
+        передаются: реестр читается один раз на снимок, а не трижды.
+        """
         now = time.time()
         with self._lock:
             if self._heavy is None or now - self._heavy_at >= HEAVY_TTL:
                 conn = self.db.conn
+                pool = repo.stats(conn)
                 self._heavy = {
-                    "stats": repo.stats(conn),
-                    "tree": repo.tree(conn),
-                    "sources": _sources_with_accounts(conn),
+                    "stats": pool,
+                    "tree": repo.tree(conn, pool=pool),
+                    "sources": _sources_with_accounts(conn, labels),
                     "runs": repo.runs(conn),
                     "queue": repo.queue_rows(conn),
                     "storages": storages_mod.all_storages(conn,
@@ -501,7 +521,7 @@ class Api:
             if self._login_facts:
                 account_state["visible"] = dict(self._login_facts)
         config = settings.as_public(self._current_settings())
-        heavy = self._heavy_snapshot()
+        heavy = self._heavy_snapshot(labels=account_state["labels"])
         return {
             "log_cursor": cursor,
             "logs": logs,
@@ -612,7 +632,7 @@ class Api:
     #  Массовые операции (M17): выбранная группа ИЛИ папка целиком
     # ------------------------------------------------------------------ #
 
-    BULK_LIMIT = 500  # страховка: одна операция не должна переписать библиотеку
+    BULK_LIMIT = repo.BULK_LIMIT  # один источник истины - лимит окна и репо не расходятся
 
     def _bulk_selection(self, request) -> tuple[list[int], str | None]:
         """(id-шники группы, ошибка). Группа - мультивыбор ИЛИ папка.
@@ -620,10 +640,16 @@ class Api:
         collection_id вместо ids даёт те же эндпоинты без выделения строк
         («Скачать всё» в папке). Дубли и нули убираем: Set из окна уже чист,
         но повторный вызов или кривый запрос не должен удваивать работу.
+
+        Лимит проверяется только для явного списка из окна. Папка целиком
+        может быть больше лимита - её операция выполняется частями
+        (см. _bulk_chunks), иначе «Скачать всё» в папке выше лимита было бы
+        навсегда невозможно.
         """
         request = request or {}
         raw = request.get("ids")
-        if raw is None and request.get("collection_id"):
+        from_collection = raw is None and bool(request.get("collection_id"))
+        if from_collection:
             raw = repo.collection_ids(self.db.conn,
                                       int(request.get("collection_id") or 0))
         try:
@@ -633,10 +659,50 @@ class Api:
         ids = list(dict.fromkeys(v for v in ids if v > 0))
         if not ids:
             return [], "Ничего не выбрано"
-        if len(ids) > self.BULK_LIMIT:
+        if not from_collection and len(ids) > repo.BULK_LIMIT:
             return [], (f"Группа слишком большая: {len(ids)} строк, "
-                        f"лимит {self.BULK_LIMIT} - разбейте на части")
+                        f"лимит {repo.BULK_LIMIT} - разбейте на части")
         return ids, None
+
+    def _bulk_chunks(self, ids: list[int]) -> list[list[int]]:
+        """Разбить группу на части по лимиту репо (одна часть для обычной группы).
+
+        Каждая часть - отдельный вызов репо, сводки сводятся вместе: человек
+        видит «сделано / пропущено с причиной» по всей папке, а не по первой
+        части.
+        """
+        limit = repo.BULK_LIMIT
+        return [ids[start:start + limit] for start in range(0, len(ids), limit)]
+
+    @staticmethod
+    def _merge_summaries(parts: list[dict]) -> dict:
+        """Свести сводки частей одной операции: числа складываются, причины - вместе."""
+        out: dict = {}
+        for part in parts:
+            for key, value in part.items():
+                if key == "reasons":
+                    reasons = out.setdefault("reasons", {})
+                    for why, count in (value or {}).items():
+                        reasons[why] = reasons.get(why, 0) + int(count)
+                elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                    out[key] = out.get(key, 0) + value
+                else:
+                    out.setdefault(key, value)
+        return out
+
+    def _bulk_apply(self, action: str, ids: list[int], work):
+        """Выполнить операцию по частям и сводить сводки (папка выше лимита).
+
+        Ошибка любой части - отказ всей операции с честной строкой (окно
+        увидит причину и сможет повторить мелкой группой).
+        """
+        parts = []
+        for chunk in self._bulk_chunks(ids):
+            part = self._bulk_guard(action, lambda chunk=chunk: work(chunk))
+            if part.get("error"):
+                return part
+            parts.append(part)
+        return self._merge_summaries(parts)
 
     def _refused(self, why: str, ids: list[int] | None = None) -> dict:
         """Отказ до записи: причина в журнале и в ответе окна.
@@ -657,10 +723,13 @@ class Api:
         """
         if legal_mod.state().get("adult_ok"):
             return None
-        if not repo.count_adult(self.db.conn, ids):
+        adult = 0
+        for chunk in self._bulk_chunks(ids):
+            adult += repo.count_adult(self.db.conn, chunk)
+        if not adult:
             return None
         self._log(f"Массовая операция: в группе {len(ids)} строк есть "
-                  "строки взрослой площадки - нужно подтверждение 18+")
+                  f"{adult} строк взрослой площадки - нужно подтверждение 18+")
         return {"adult_confirm": True,
                 "error": "Группа содержит строки взрослой площадки: "
                          "подтвердите, что вам есть 18 лет и вы несёте "
@@ -698,10 +767,10 @@ class Api:
             storage, error = self._storage_or_error(storage_id)
             if error:
                 return self._refused(error, ids)
-        summary = self._bulk_guard(
-            "Массовая выкачка",
-            lambda: repo.bulk_enqueue(self.db.conn, ids,
-                                      storage_id=storage_id))
+        summary = self._bulk_apply(
+            "Массовая выкачка", ids,
+            lambda chunk: repo.bulk_enqueue(self.db.conn, chunk,
+                                            storage_id=storage_id))
         if summary.get("error"):
             return summary
         self._touch()
@@ -734,9 +803,10 @@ class Api:
         remove = request.get("remove") or []
         if not repo.tag_names(add) and not repo.tag_names(remove):
             return self._refused("Нужны теги: «добавить» или «убрать»", ids)
-        summary = self._bulk_guard(
-            "Массовые теги",
-            lambda: repo.bulk_tags(self.db.conn, ids, add=add, remove=remove))
+        summary = self._bulk_apply(
+            "Массовые теги", ids,
+            lambda chunk: repo.bulk_tags(self.db.conn, chunk,
+                                         add=add, remove=remove))
         if summary.get("error"):
             return summary
         self._touch()
@@ -764,9 +834,9 @@ class Api:
                                  ids)
         if not 0 <= rating <= 5:
             return self._refused(f"Рейтинг вне диапазона 0..5: {rating}", ids)
-        summary = self._bulk_guard(
-            "Массовый рейтинг",
-            lambda: repo.bulk_rating(self.db.conn, ids, rating))
+        summary = self._bulk_apply(
+            "Массовый рейтинг", ids,
+            lambda chunk: repo.bulk_rating(self.db.conn, chunk, rating))
         if summary.get("error"):
             return summary
         self._touch()
@@ -795,9 +865,9 @@ class Api:
         if not self.db.conn.execute(
                 "SELECT id FROM collections WHERE id=?", (cid,)).fetchone():
             return self._refused("Коллекция не найдена", ids)
-        summary = self._bulk_guard(
-            "Массовая коллекция",
-            lambda: repo.bulk_collection(self.db.conn, ids, cid, action))
+        summary = self._bulk_apply(
+            "Массовая коллекция", ids,
+            lambda chunk: repo.bulk_collection(self.db.conn, chunk, cid, action))
         if summary.get("error"):
             return summary
         self._touch()
@@ -824,9 +894,9 @@ class Api:
         gate = self._bulk_adult(ids)
         if gate:
             return gate
-        summary = self._bulk_guard(
-            "Массовое удаление строк",
-            lambda: repo.bulk_delete_rows(self.db.conn, ids))
+        summary = self._bulk_apply(
+            "Массовое удаление строк", ids,
+            lambda chunk: repo.bulk_delete_rows(self.db.conn, chunk))
         if summary.get("error"):
             return summary
         self._touch()
