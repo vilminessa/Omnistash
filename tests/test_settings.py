@@ -118,5 +118,70 @@ class TestPersistence(unittest.TestCase):
             self.assertTrue(spec.get("label"), spec["key"])
 
 
+class TestSecretsNeverReachUi(unittest.TestCase):
+    """Секреты человек пишет один раз, но в снимок окна они не уходят."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        patcher = mock.patch("app.settings.settings_path",
+                             return_value=self.dir / "settings.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_secret_keys_are_declared(self):
+        self.assertEqual(settings.SECRET_KEYS, frozenset({"bot_token",
+                                                          "data_api_key"}))
+        self.assertTrue(settings.is_secret("bot_token"))
+        self.assertTrue(settings.is_secret("data_api_key"))
+        self.assertFalse(settings.is_secret("quality"))
+        self.assertFalse(settings.is_secret(None))
+
+    def test_as_public_blanks_values_and_reports_flags(self):
+        data = settings.load()
+        data["bot_token"] = "123456:со-секретный-токен"
+        data["data_api_key"] = "AIza-секретный-ключ"
+        public = settings.as_public(data)
+        self.assertEqual(public["bot_token"], "")
+        self.assertEqual(public["data_api_key"], "")
+        self.assertIs(public["bot_token_set"], True)
+        self.assertIs(public["data_api_key_set"], True)
+        blob = json.dumps(public, ensure_ascii=False)
+        self.assertNotIn("со-секретный-токен", blob,
+                         "значение токена не должно уйти окну")
+        self.assertNotIn("AIza-секретный-ключ", blob,
+                         "значение API-ключа не должно уйти окну")
+
+    def test_flags_false_when_nothing_set(self):
+        public = settings.as_public(settings.load())
+        self.assertIs(public["bot_token_set"], False)
+        self.assertIs(public["data_api_key_set"], False)
+        self.assertEqual(public["bot_token"], "")
+
+    def test_whitespace_is_not_a_set_value(self):
+        self.assertIs(settings.secret_status({"bot_token": "   \n"})["bot_token_set"],
+                      False)
+
+    def test_internal_keys_stay_excluded(self):
+        public = settings.as_public({"_mtime": 12345, "quality": "low"})
+        self.assertNotIn("_mtime", public)
+        self.assertEqual(public["quality"], "low")
+
+    def test_clear_secret_removes_open_copy(self):
+        """Значение уже лежит в профиле шифрованием - открытой копии быть не должно."""
+        settings.set_value("bot_token", "123456:со-секретный-токен")
+        self.assertTrue(settings.clear_secret("bot_token"))
+        self.assertEqual(settings.load()["bot_token"], "")
+        raw = (self.dir / "settings.json").read_text(encoding="utf-8")
+        self.assertNotIn("со-секретный-токен", raw)
+
+    def test_clear_secret_ignores_non_secret_and_empty(self):
+        self.assertFalse(settings.clear_secret("quality"))
+        settings.set_value("data_api_key", "")
+        self.assertFalse(settings.clear_secret("data_api_key"))
+        self.assertEqual(settings.load()["data_api_key"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

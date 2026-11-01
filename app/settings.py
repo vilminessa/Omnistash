@@ -19,6 +19,11 @@ from .paths import settings_path
 # пользователя, а не затирает его.
 MIGRATIONS: tuple = ()
 
+# Секреты: значение нужно программе (загрузчик, Data API, дороги выкачки), но
+# наружу — в снимок окна, журнал и сеть — оно не уходит. Единственный
+# признак для окна: «установлен / не установлен» (secret_status).
+SECRET_KEYS: frozenset = frozenset({"bot_token", "data_api_key"})
+
 
 def load() -> dict:
     """Дефолты из схемы + пользовательские значения поверх.
@@ -133,8 +138,46 @@ def reload_if_changed(cache: dict) -> dict:
 
 
 def as_public(settings: dict) -> dict:
-    """Настройки для окна: без служебного _mtime."""
-    return {k: v for k, v in settings.items() if not k.startswith("_")}
+    """Настройки для окна: без служебного _mtime и без значений секретов.
+
+    Секретные ключи человек вписывает один раз (значение нужно загрузчику,
+    Data API и дорогам выкачки), но в снимок окна, в журнал и в сеть оно не
+    уходит: вместо значения — признак «установлен / не установлен». Иначе
+    токен и Data API-ключ оказались бы в каждом опросе окна (и в том, что
+    снимает экран).
+    """
+    out = {k: v for k, v in settings.items() if not k.startswith("_")}
+    for key in SECRET_KEYS:
+        if key in out:
+            out[key] = ""
+    out.update(secret_status(settings))
+    return out
+
+
+def secret_status(settings: dict) -> dict:
+    """Признаки «значение установлено» для секретных ключей (значения — нет)."""
+    return {f"{key}_set": bool(str(settings.get(key) or "").strip())
+            for key in sorted(SECRET_KEYS)}
+
+
+def is_secret(key) -> bool:
+    return str(key) in SECRET_KEYS
+
+
+def clear_secret(key: str) -> bool:
+    """Снять открытую копию секрета из settings.json.
+
+    Используется, когда значение уже лежит в профиле шифрованием (PO-токен):
+    второй копии открытым текстом в файле быть не должно.
+    """
+    if not is_secret(key):
+        return False
+    settings = load()
+    if not str(settings.get(key) or "").strip():
+        return False
+    settings[key] = ""
+    save(settings)
+    return True
 
 
 def path_of(settings: dict, key: str) -> Path:

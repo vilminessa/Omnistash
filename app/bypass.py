@@ -53,7 +53,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
-from . import google_auth, platforms, settings_schema
+from . import google_auth, platforms, settings as settings_mod, settings_schema
 from .paths import bypass_cache_path, platform_tokens_path
 from .util import clean_text, now_iso
 
@@ -527,8 +527,11 @@ def _po_token(ctx, kind, text) -> dict | None:
         return None          # повтор с тем же токеном бессмыслен
     if not record.get("po_token"):
         # Токен вписан в настройку - сохраняем его в профиль (encrypted),
-        # чтобы следующая выкачка шла с ним без участия человека.
+        # чтобы следующая выкачка шла с ним без участия человека. Открытая
+        # копия в settings.json после этого не нужна: без неё токен не
+        # лежит в файле и не попадает в снимок окна (см. settings.SECRET_KEYS).
         save_token(platform, po_token=token)
+        settings_mod.clear_secret("bot_token")
     return overlay
 
 
