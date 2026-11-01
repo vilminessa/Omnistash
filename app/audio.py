@@ -188,6 +188,22 @@ def _sync_safe(data: bytes) -> int:
     return value
 
 
+ID3_HEADER_BYTES = 10   # 'ID3' + версия + флаги + 4 байта sync-safe размера
+
+
+def _id3_block_size(header: bytes) -> int | None:
+    """Размер блока ID3v2 по заголовку (None - заголовка нет или он неполный).
+
+    Только разбор заголовка: содержимое блока читается отдельно и ровно в
+    том объёме, который заявлен (см. _read_id3).
+    """
+    if len(header) < ID3_HEADER_BYTES or header[:3] != b"ID3":
+        return None
+    if header[3] not in (2, 3, 4):
+        return None
+    return _sync_safe(header[6:ID3_HEADER_BYTES])
+
+
 def _unsync(data: bytes) -> bytes:
     """Снять «unsynchronisation» ID3v2: 0xFF 0x00 -> 0xFF."""
     return data.replace(b"\xff\x00", b"\xff")
@@ -619,14 +635,25 @@ def read_tags(path: str | Path) -> dict | None:
 
 
 def _read_id3(path: str | Path) -> dict | None:
-    """mp3: ID3v2 в начале, ID3v1 в хвосте (v1 - запасной путь для старых файлов)."""
+    """mp3: ID3v2 в начале, ID3v1 в хвосте (v1 - запасной путь для старых файлов).
+
+    Размер блока ID3v2 лежит в 4 байтах заголовка (sync-safe), поэтому
+    сначала читаются 10 байт заголовка, а затем ровно столько, сколько
+    занимает блок - с потолком TAG_BLOCK_MAX_BYTES. Прежний приём читал 1 МиБ
+    на каждый mp3: теги полнее от этого не становились, а библиотека из
+    тысяч аудио читала лишние гигабайты.
+    """
     try:
         with open(path, "rb") as handle:
-            head = handle.read(TAG_BLOCK_MAX_BYTES)
-            found = _id3v2(head)
-            if found:
-                found["tags"] = "id3v2"
-                return found
+            header = handle.read(ID3_HEADER_BYTES)
+            size = _id3_block_size(header)
+            if size is not None:
+                budget = TAG_BLOCK_MAX_BYTES - ID3_HEADER_BYTES
+                block = header + handle.read(min(size, budget))
+                found = _id3v2(block)
+                if found:
+                    found["tags"] = "id3v2"
+                    return found
             tail = _id3v1_tail(handle)
     except OSError:
         return None

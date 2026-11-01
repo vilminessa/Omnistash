@@ -25,12 +25,8 @@ from app.util import now_iso
 
 
 def sync_safe(size: int) -> bytes:
-    """ID3-размер: 4 байта по 7 значимых бит (как в app.audio)."""
-    out = bytearray()
-    for _ in range(4):
-        out.append(size & 0x7F)
-        size >>= 7
-    return bytes(out)
+    """ID3-размер: 4 байта по 7 значимых бит, старший - в первом байте."""
+    return bytes(((size >> (21 - 7 * index)) & 0x7F) for index in range(4))
 
 
 def text_frame(text: str) -> bytes:
@@ -616,3 +612,129 @@ class TestGuiOpenAndQueue(GuiAudioCase):
             # Файл уже на диске - перекачки «само» нет: enqueue не трогает.
             again = api.enqueue({"ids": [vid_audio], "storage_id": storage["id"]})
             self.assertEqual(again["queued"], 0)
+
+
+class CountingReader:
+    """Файл, который запоминает, сколько его просили прочитать."""
+
+    def __init__(self, real):
+        self.real = real
+        self.requested: list[int] = []
+
+    def read(self, n=-1):
+        self.requested.append(-1 if n is None else int(n))
+        return self.real.read(n)
+
+    def seek(self, *args):
+        return self.real.seek(*args)
+
+    def tell(self):
+        return self.real.tell()
+
+    def __enter__(self):
+        self.real.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self.real.__exit__(*exc)
+
+
+class TestMp3TagReadSizing(unittest.TestCase):
+    """mp3 читается по размеру блока ID3, а не «1 МиБ на каждый файл» (ревью #18).
+
+    Размер блока лежит в 4 байтах заголовка, поэтому чтение должно быть
+    ровно таким же, как сам блок: на библиотеке из тысяч аудио прежний
+    приём читал лишние гигабайты, и полнее теги от этого не становились.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+
+    def write(self, name: str, payload: bytes) -> Path:
+        path = self.dir / name
+        path.write_bytes(payload)
+        return path
+
+    def read_tags_counted(self, path: Path):
+        """read_tags по файлу + список «сколько просили прочитать»."""
+        real_open = open
+        readers: list[CountingReader] = []
+
+        def patched(target, mode="rb", **kwargs):
+            handle = real_open(target, mode, **kwargs)
+            if mode != "rb":      # запись обложек и прочее не считаем
+                return handle
+            reader = CountingReader(handle)
+            readers.append(reader)
+            return reader
+
+        with mock.patch("builtins.open", patched):
+            found = audio_mod.read_tags(path)
+        requested = [size for reader in readers for size in reader.requested]
+        return found, requested
+
+    def test_small_tag_does_not_read_a_megabyte(self):
+        tag = id3v2([("TIT2", text_frame("Джазовый мик")),
+                     ("APIC", apic_frame(b"\xff\xd8\xff" + b"jpeg" * 20))])
+        path = self.write("мик.mp3", tag + b"\xff\xfb\x90\x00" * 300_000)
+        found, requested = self.read_tags_counted(path)
+        self.assertEqual(found["title"], "Джазовый мик")
+        self.assertEqual(found["tags"], "id3v2")
+        self.assertLess(max(requested), audio_mod.TAG_BLOCK_MAX_BYTES,
+                        "теги не обязаны читать мегабайт дорожки")
+        self.assertLessEqual(max(requested), len(tag))
+
+    def test_giant_declared_block_is_capped(self):
+        """Заявленный блок больше потолка - читаем потолок, теги всё равно читаются."""
+        body = b"TIT2" + len(text_frame("Гигант")).to_bytes(4, "big") \
+            + b"\x00\x00" + text_frame("Гигант")
+        header = b"ID3" + b"\x03\x00\x00" + sync_safe(2 * 1024 * 1024)
+        path = self.write("гигант.mp3", header + body + b"\xff\xfb\x90\x00" * 1000)
+        found, requested = self.read_tags_counted(path)
+        self.assertEqual(found["title"], "Гигант")
+        self.assertEqual(max(requested),
+                         audio_mod.TAG_BLOCK_MAX_BYTES - audio_mod.ID3_HEADER_BYTES)
+
+    def test_declared_block_larger_than_the_file_still_parses(self):
+        """Блок заявлен длиннее файла: разбор идёт по фактическим байтам."""
+        body = b"TIT2" + len(text_frame("Хвост")).to_bytes(4, "big") \
+            + b"\x00\x00" + text_frame("Хвост")
+        header = b"ID3" + b"\x03\x00\x00" + sync_safe(64 * 1024)
+        path = self.write("неполный.mp3", header + body)
+        found, _requested = self.read_tags_counted(path)
+        self.assertEqual(found["title"], "Хвост")
+        self.assertEqual(found["tags"], "id3v2")
+
+    def test_padding_inside_the_block_is_read_by_size(self):
+        """Padding внутри блока (многие теггеры) читается и не мешает разбору."""
+        body = b""
+        for key, payload in [("TIT2", text_frame("С запасом")),
+                             ("TPE1", text_frame("Квинтет"))]:
+            body += key.encode("latin-1") + len(payload).to_bytes(4, "big") \
+                + b"\x00\x00" + payload
+        padding = b"\x00" * 100_000
+        header = b"ID3" + b"\x03\x00\x00" + sync_safe(len(body) + len(padding))
+        path = self.write("запас.mp3", header + body + padding
+                          + b"\xff\xfb\x90\x00" * 5000)
+        found, requested = self.read_tags_counted(path)
+        self.assertEqual(found["title"], "С запасом")
+        self.assertEqual(found["artist"], "Квинтет")
+        self.assertLessEqual(max(requested), len(header) + len(body) + len(padding))
+
+    def test_no_id3v2_falls_back_to_id3v1(self):
+        tail = (b"TAG" + b"Mix".ljust(30, b" ") + b"Artist".ljust(30, b" ")
+                + b"Album".ljust(30, b" ") + b"2024" + b" ".ljust(28, b" ")
+                + b"\x00" + b"\x05" + b"\x0c")
+        self.assertEqual(len(tail), 128)
+        path = self.write("старый.mp3", b"\xff\xfb\x90\x00" * 500 + tail)
+        found, requested = self.read_tags_counted(path)
+        self.assertEqual(found["tags"], "id3v1")
+        self.assertEqual(found["title"], "Mix")
+        self.assertLess(max(requested), audio_mod.TAG_BLOCK_MAX_BYTES)
+
+    def test_tiny_file_is_not_a_tag(self):
+        path = self.write("малыш.mp3", b"ID3")
+        found, _requested = self.read_tags_counted(path)
+        self.assertIsNone(found)
