@@ -788,6 +788,15 @@ def _apply_audio_duration(conn, video_id: int, meta: dict | None) -> None:
         " AND duration_s IS NULL", (int(duration), video_id))
 
 
+_MISSING_CHUNK = 400   # меньше лимита SQLite на ?-параметры, с запасом
+
+
+def _chunks(seq: list, size: int = _MISSING_CHUNK):
+    """Часть списка по одному чанку (для IN (...) вместо запроса на файл)."""
+    for start in range(0, len(seq), size):
+        yield seq[start:start + size]
+
+
 def _mark_missing(conn, root_path: Path, seen: set[str],
                   storage_id: str | None = None) -> int:
     """Файлы этого корня, не встреченные в прогоне, пометить пропавшими.
@@ -796,6 +805,11 @@ def _mark_missing(conn, root_path: Path, seen: set[str],
     запасным путём для вызовов, где хранилище неизвестно. Вызывается только
     для доступных и включённых корней - недоступный носитель не должен
     разом пометить тысячи файлов потерянными.
+
+    Пачками: UPDATE на каждый пропавший файл и COUNT на каждое видео -
+    это тысячи отдельных запросов на большой библиотеке. Вместо них один
+    UPDATE на чанк путей и одно условие для строк видео: запись уходит в
+    «пропало» только когда у неё не осталось ни одного целого видео-файла.
     """
     if storage_id:
         rows = conn.execute(
@@ -808,21 +822,34 @@ def _mark_missing(conn, root_path: Path, seen: set[str],
             """SELECT f.path, f.video_id FROM files f
                 WHERE f.kind='video' AND f.missing=0 AND f.path LIKE ?""",
             (prefix + "%",)).fetchall()
-    lost = 0
-    for row in rows:
-        if row["path"] in seen:
-            continue
-        conn.execute("UPDATE files SET missing=1 WHERE path=?", (row["path"],))
-        # Запись живёт, пока есть хоть один существующий файл этого видео.
-        left = conn.execute(
-            "SELECT COUNT(*) n FROM files WHERE video_id=? AND kind='video' "
-            "AND missing=0", (row["video_id"],)).fetchone()["n"]
-        if not left:
-            conn.execute(
-                "UPDATE videos SET status='missing', updated_at=? WHERE id=? "
-                "AND status='downloaded'", (now_iso(), row["video_id"]))
-        lost += 1
-    return lost
+    lost = [row["path"] for row in rows if row["path"] not in seen]
+    if not lost:
+        return 0
+    lost_paths = set(lost)
+    touched = sorted({row["video_id"] for row in rows
+                      if row["path"] in lost_paths})
+
+    for chunk in _chunks(lost):
+        marks = ",".join("?" * len(chunk))
+        conn.execute(f"UPDATE files SET missing=1 WHERE path IN ({marks})", chunk)
+
+    # Одно условие на чанк videos вместо COUNT+UPDATE на каждое видео.
+    gone: list[int] = []
+    for chunk in _chunks(touched):
+        marks = ",".join("?" * len(chunk))
+        gone += [row["video_id"] for row in conn.execute(
+            f"""SELECT video_id FROM files
+                WHERE kind='video' AND video_id IN ({marks})
+                GROUP BY video_id
+                HAVING SUM(CASE WHEN missing=0 THEN 1 ELSE 0 END) = 0""", chunk)]
+    stamp = now_iso()
+    for chunk in _chunks(gone):
+        marks = ",".join("?" * len(chunk))
+        conn.execute(
+            f"UPDATE videos SET status='missing', updated_at=? "
+            f"WHERE status='downloaded' AND id IN ({marks})",
+            [stamp, *chunk])
+    return len(lost)
 
 
 def headless_scan() -> int:

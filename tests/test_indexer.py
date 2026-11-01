@@ -8,7 +8,7 @@ from pathlib import Path
 
 from app import aggregate, repo
 from app.db import Database
-from app.indexer import SIDECAR_SUFFIX, file_hash, scan
+from app.indexer import _MISSING_CHUNK, _mark_missing, SIDECAR_SUFFIX, file_hash, scan
 from app.metadata import normalize_video
 
 
@@ -324,6 +324,88 @@ class TestSelfHealEmbed(ScanCase):
         self.assertFalse((self.root / aggregate.FILENAME).exists())
         self.assertTrue((self.root / ("Клип [dQw4w9WgXcQ]"
                                       + SIDECAR_SUFFIX)).exists())
+
+
+class TestMissingMarking(ScanCase):
+    """Пропажи помечаются пачками: один UPDATE на чанк, а не запрос на файл.
+
+    Строки файлов создаются напрямую (без скана) - важно проверить ровно то,
+    что «пропало» ставится только там, где у видео не осталось целых копий,
+    и что библиотека больше одного чанка обрабатывается частями.
+    """
+
+    def video(self, remote_id: str) -> int:
+        vid, _created = repo.upsert_video(self.conn, normalize_video(
+            {"id": remote_id, "title": "Клип " + remote_id}))
+        repo.set_status(self.conn, [vid], "downloaded")
+        return vid
+
+    def file(self, video_id: int, name: str) -> Path:
+        path = self.root / name
+        path.write_bytes(b"payload")
+        repo.record_file(self.conn, video_id, str(path), "video",
+                         size=path.stat().st_size, mtime=path.stat().st_mtime)
+        return path
+
+    def status(self, video_id: int) -> str:
+        return self.conn.execute("SELECT status FROM videos WHERE id=?",
+                                 (video_id,)).fetchone()["status"]
+
+    def missing_count(self) -> int:
+        return self.conn.execute(
+            "SELECT COUNT(*) n FROM files WHERE missing=1").fetchone()["n"]
+
+    def test_partial_copies_keep_the_row_alive(self):
+        """У видео две копии: пропала одна - запись остаётся «скачана»."""
+        one = self.video("aaa000000001")
+        two = self.video("bbb000000002")
+        keep = self.file(one, "копия цела.mp4")
+        self.file(one, "копия пропала.mp4")
+        self.file(two, "единственная.mp4")
+
+        self.assertEqual(_mark_missing(self.conn, self.root, {str(keep)}), 2)
+        self.assertEqual(self.missing_count(), 2)
+        self.assertEqual(self.status(one), "downloaded")
+        self.assertEqual(self.status(two), "missing")
+
+    def test_only_download_rows_switch_status(self):
+        """«В очереди» не превращается в «пропало»: статус меняется только у «скачанных»."""
+        queued = self.video("ccc000000003")
+        self.file(queued, "из очереди.mp4")        # копия на диске есть
+        repo.set_status(self.conn, [queued], "queued")   # после постановки в очередь
+        self.assertEqual(_mark_missing(self.conn, self.root, set()), 1)
+        self.assertEqual(self.status(queued), "queued",
+                         "пропажа не меняет статус строки, которая не «скачана»")
+
+    def test_more_than_one_chunk_is_handled(self):
+        """Библиотека больше чанка: пути и строки обрабатываются частями."""
+        count = _MISSING_CHUNK + 40
+        vids = [self.video(f"v{i:06d}") for i in range(count)]
+        for vid, i in zip(vids, range(count)):
+            self.file(vid, f"пропало {i}.mp4")
+        self.assertEqual(_mark_missing(self.conn, self.root, set()), count)
+        self.assertEqual(self.missing_count(), count)
+        self.assertTrue(all(self.status(vid) == "missing" for vid in vids),
+                        "все строки выше лимита чанка помечены")
+
+    def test_nothing_lost_changes_nothing(self):
+        vid = self.video("ddd000000004")
+        path = self.file(vid, "живой.mp4")
+        self.assertEqual(_mark_missing(self.conn, self.root, {str(path)}), 0)
+        self.assertEqual(self.missing_count(), 0)
+        self.assertEqual(self.status(vid), "downloaded")
+
+    def test_scan_marks_many_losses_in_one_pass(self):
+        """Скан над несколькими пропавшими файлами - честный отчёт по всем."""
+        paths = [self.write(f"пропало {i}.mp4", f"п-{i}".encode())
+                 for i in range(6)]
+        self.run_scan()
+        for path in paths:
+            path.unlink()
+        report = self.run_scan()
+        self.assertEqual(report["missing"], 6)
+        self.assertTrue(all(row["status"] == "missing" for row in self.rows()),
+                        "все шесть строк помечены пропавшими")
 
 
 if __name__ == "__main__":
