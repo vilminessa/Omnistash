@@ -1,4 +1,4 @@
 """Версия и метаданные пакета Omnistash."""
 
-__version__ = "0.1.4"
+__version__ = "0.1.11"
 APP_NAME = "Omnistash"

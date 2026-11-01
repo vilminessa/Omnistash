@@ -12,6 +12,11 @@ from PyInstaller.utils.hooks import collect_all
 sys.path.insert(0, SPECPATH)
 from version import __version__  # noqa: E402
 
+# Иконка exe - собственный asset, собирается tools/make_icon.py из палитры
+# тёмной темы (app/themes.py). Файла нет (например, частичный checkout) - exe
+# собирается без иконки: это честный случай, а не ошибка сборки.
+_icon = os.path.join(SPECPATH, "assets", "omnistash.ico")
+
 _v = [int(x) for x in __version__.split(".")]
 _v4 = tuple(_v[:4]) + (0,) * (4 - len(_v))
 _version_file = os.path.join(tempfile.gettempdir(), "omnistash-version-info.txt")
@@ -98,5 +103,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=_icon if os.path.exists(_icon) else None,
     version=_version_file,
 )

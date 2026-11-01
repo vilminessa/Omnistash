@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 
 import stamp_version  # noqa: E402 - путь добавлен выше
+from app import __version__  # noqa: E402 - версия программы
 
 
 class TestStamp(unittest.TestCase):
@@ -46,6 +47,28 @@ class TestStamp(unittest.TestCase):
             path.write_text("нет такого поля\n", encoding="utf-8")
             self.assertFalse(stamp_version._replace(
                 path, rb'__version__\s*=\s*"[^"]*"', b'__version__ = "1.0.0"'))
+
+    def test_current_version_is_stampable(self):
+        """Значение в исходнике - той же формы, что даёт стампер.
+
+        Стампер меняет только строку __version__ и берёт версию из тега;
+        значение в git - линия бета-сборок, оно должно парситься тем же
+        регулярным выражением, иначе spec и CI получают нечитаемую версию.
+        """
+        self.assertRegex(__version__, r"^\d+\.\d+\.\d+$")
+        self.assertEqual(stamp_version.stamp(f"b{__version__}"), __version__)
+        self.assertEqual(stamp_version.stamp(f"v{__version__}"), __version__)
+
+    def test_version_has_one_source(self):
+        """version.py переэкспортирует app.__version__ - второго числа нет."""
+        sys.path.insert(0, str(stamp_version.ROOT))
+        import version
+        self.assertEqual(version.__version__, __version__)
+
+    def test_spec_reads_version_from_version_py(self):
+        spec = (stamp_version.ROOT / "Omnistash.spec").read_text(encoding="utf-8")
+        self.assertIn("from version import __version__", spec,
+                      "специка не читает версию из version.py")
 
 
 if __name__ == "__main__":
