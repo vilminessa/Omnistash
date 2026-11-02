@@ -439,8 +439,8 @@ body {
 }
 
 .tree-group {
-  font-size: var(--fs-cap);
-  text-transform: uppercase;
+  /* Обычный регистр (§2.5): ALL CAPS мелким кегнем читается хуже. */
+  font-size: var(--fs-sm);
   letter-spacing: var(--track);
   color: var(--muted);
   margin: 14px 6px 4px;
@@ -676,11 +676,15 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   align-items: center;
 }
 
+/* Шапка колонок: обычный регистр (§2.5, замена №9) - ALL CAPS мелким
+   --fs-cap читается хуже; трекинг лёгкий. Шапка лежит ВНЕ скроллера
+   тела, поэтому она видела всегда (sticky внутри тела не нужен); тон
+   --surface-2 отличает её от панели, как у sticky-шапок малых таблиц. */
 .grid-head {
-  font-size: var(--fs-cap);
-  text-transform: uppercase;
+  font-size: var(--fs-sm);
   letter-spacing: var(--track);
-  color: var(--muted);
+  color: var(--muted);           /* несортируемые заголовки */
+  background: var(--surface-2);
   padding: var(--s-2) var(--s-3);
   border-bottom: 1px solid var(--line);
   /* Шапка обрезается по ширине панели и ездит вместе с телом списка
@@ -689,15 +693,18 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   overflow: hidden;
 }
 /* Заголовки колонок не должны переноситься - «СТАТУ С» выглядит поломкой.
-   Сортируемые - кликабельны (курсор и активное состояние). */
+   Сортируемые - кликабельны (курсор и активное состояние): подпись --text,
+   hover --accent-2 (различим на --surface-2 в каждой теме), активная
+   колонка - 2 px полоса --accent вместе с aria-sort (SC 1.4.1: состояние
+   не только цветом). */
 .grid-head > span {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.grid-head [data-col] { cursor: pointer; user-select: none; }
-.grid-head [data-col]:hover { color: var(--text); }
-.grid-head [data-col][aria-sort] { color: var(--text); }
+.grid-head [data-col] { cursor: pointer; user-select: none; color: var(--text); }
+.grid-head [data-col]:hover { color: var(--accent-2); }
+.grid-head [data-col][aria-sort] { box-shadow: inset 0 -2px 0 var(--accent); }
 
 .grid-body { position: relative; flex: 1 1 auto; overflow: auto; outline: none; }
 .grid-spacer { width: 1px; }
@@ -717,6 +724,12 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   border-bottom: 1px solid var(--line);
   cursor: pointer;
   overflow: hidden;
+  /* Виртуализация рисует только окно прокрутки, но ряды вне экрана
+     дополнительно не отрисовываются: content-visibility:auto пропускает
+     их paint, а contain-intrinsic-size держит высоту ряда (34 px) и
+     оставляет строку в accessibility tree (проверено на MDN/web.dev). */
+  content-visibility: auto;
+  contain-intrinsic-size: auto var(--row-h);
 }
 
 /* hover и selected - разные фоны: наведённая строка и выбранная строка
@@ -730,6 +743,12 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .c-sync { color: var(--muted); font-size: var(--fs-sm); }
 .c-dur, .c-size, .c-views, .c-likes, .c-comments { text-align: right; }
 .c-date, .c-sync { text-align: left; }
+
+/* Числа (§2.6): ширины цифр одинаковые - счётчики, даты и размеры не
+   «пляшут» при прокрутке и сортировке. */
+.row .c-dur, .row .c-date, .row .c-size, .row .c-views, .row .c-likes,
+.row .c-comments, .row .c-sync, .tile-badges, .head-stats b, .scan-text,
+.cat-progress .muted, .cat-meta, #sel-count { font-variant-numeric: var(--nums); }
 
 .status {
   display: inline-flex;
@@ -785,7 +804,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 
 .table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
 .table th, .table td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); }
-.table th { font-size: var(--fs-cap); text-transform: uppercase; letter-spacing: var(--track); color: var(--muted); position: sticky; top: 0; background: var(--surface-2); white-space: nowrap; }
+.table th { font-size: var(--fs-cap); letter-spacing: var(--track); color: var(--muted); position: sticky; top: 0; background: var(--surface-2); white-space: nowrap; }
 .table tbody tr:hover { background: var(--hover); }
 .table .num { text-align: right; font-variant-numeric: var(--nums); }
 
@@ -987,7 +1006,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .sel-bar select { max-width: 280px; }
 .c-check { display: flex; align-items: center; justify-content: center; }
 .row input.row-check { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
-.row.picked { background: var(--selected); }
+/* Выбранная строка: тон --selected + левая полоса 3 px --accent - состояние
+   видно без цвета (SC 1.4.1), aria-selected ставит JS. */
+.row.picked { background: var(--selected); box-shadow: inset 3px 0 0 var(--accent); }
 
 /* M17: чекбокс строки в плитке: тот же размер, что в списке, и подложка
    обложки - иначе чекбокс теряется на тёмной картинке. */

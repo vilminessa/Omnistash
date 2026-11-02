@@ -133,14 +133,25 @@
                     FONT_STACKS[s.font_family] || FONT_STACKS.system);
     // --row-h считает CSS по --font-size (растёт вместе с текстом), поэтому
     // сюда не дублируем: высота строк - один источник в app.css.
+    rowHeight._px = 0;      // шрифт изменился - меряем --row-h заново
   }
 
   function rowHeight() {
     // Виртуализация считает по той же переменной, что и CSS: при larger
     // размере шрифта строки списка не должны лезть на следующий ряд.
-    var value = getComputedStyle(document.body).getPropertyValue("--row-h");
-    var px = parseFloat(value);
-    return isFinite(px) && px > 0 ? px : ROW_H;
+    // getComputedStyle для custom property отдаёт подстановку var(), а не
+    // вычисленный результат: --row-h это max(34px, calc(--font-size * 2.6)),
+    // parseFloat здесь всегда дал бы NaN. Поэтому px меряем пробником с тем
+    // же var() (border-box: пробник без границы = точный бокс строки).
+    if (!rowHeight._px) {
+      var probe = document.createElement("div");
+      probe.style.height = "var(--row-h)";
+      document.body.appendChild(probe);
+      var px = probe.offsetHeight;
+      probe.remove();
+      rowHeight._px = px > 0 ? px : ROW_H;
+    }
+    return rowHeight._px;
   }
 
   /* Переключение языка: подписи из словаря заменяют русские строки
@@ -2404,7 +2415,11 @@
   function toggleSelected(id, on, node) {
     if (on) state.selected.add(id);
     else state.selected.delete(id);
-    if (node) node.classList.toggle("picked", on);
+    if (node) {
+      node.classList.toggle("picked", on);
+      // Состояние выбора читается AT: тон и полоса - для глаз, aria - для AT.
+      node.setAttribute("aria-selected", on ? "true" : "false");
+    }
     renderSelBar();
   }
 
@@ -2496,14 +2511,16 @@
     var sort = state.sort || { col: "", dir: "desc" };
     head.innerHTML = visibleCols().map(function (col) {
       if (col.key === "check") {
-        return '<span class="c-check"><input type="checkbox" id="sel-all" ' +
+        return '<span class="c-check" role="columnheader"><input type="checkbox" id="sel-all" ' +
           'title="Выбрать всё на странице" aria-label="Выбрать всё"></span>';
       }
       var active = col.sortable && sort.col === col.sortable;
       var ind = active ? (sort.dir === "asc" ? " ▲" : " ▼") : "";
-      return '<span class="c-' + col.key + '"' +
+      // role="columnheader": aria-sort на самой ячейке-заголовке (§5.5),
+      // не на вложенной кнопке - AT читает состояние сортировки колонки.
+      return '<span class="c-' + col.key + '" role="columnheader"' +
         (col.sortable
-          ? ' data-col="' + col.sortable + '" role="button" tabindex="0"' +
+          ? ' data-col="' + col.sortable + '" tabindex="0"' +
             (active ? ' aria-sort="' + (sort.dir === "asc" ? "ascending" : "descending") + '"' : "")
           : "") +
         ' title="' + esc(col.label) + '">' + esc(col.label) + ind + "</span>";
@@ -2622,6 +2639,12 @@
     ensureRange(firstItem, lastItem, function () {
       var html = [];
       var index;
+      // Перерисовка окна заменяет ряды целиком: если фокус был на строке,
+      // её индекс нужно вернуть после замены - иначе клавиатурный обход
+      // (§5.3) обрывается на каждом скролле.
+      var act = document.activeElement;
+      var keep = act && rows.contains(act) && act.dataset.i !== undefined
+        ? Number(act.dataset.i) : null;
       if (grid) {
         // Колонки фиксированной ширины из настройки (М/С/К), а не 1fr:
         // плитка должна быть ровно cfg.w, иначе смена размера ничего не
@@ -2643,6 +2666,10 @@
       rows.style.transform = "translateY(" + (start * rowH) + "px)";
       rows.innerHTML = html.join("");
       bindGridItems();
+      if (keep !== null) {
+        var back = rows.querySelector('.row[data-i="' + keep + '"]');
+        if (back) back.focus();   // фокус того же ряда переживает перерисовку
+      }
       if (grid) requestThumbsForWindow();
     });
   }
@@ -2706,39 +2733,44 @@
     var stars = starBadge(row);
     var watched = watchBadge(row);
     var cells = {
-      check: '<span class="c-check"><input type="checkbox" class="row-check" data-id="' +
+      check: '<span class="c-check" role="gridcell"><input type="checkbox" class="row-check" data-id="' +
         row.id + '"' + (picked ? " checked" : "") +
         ' aria-label="Выбрать строку"></span>',
-      status: '<span class="cell status" data-s="' + esc(row.status) + '">' +
+      status: '<span class="cell status" role="gridcell" data-s="' + esc(row.status) + '">' +
         esc(row.status_label || statusLabel(row.status)) + "</span>",
       // E0: тип дорожки из строки выборки (media_label от бэка); фолбэк
       // для моков и старых выборок - по media_kind.
-      media: '<span class="cell c-media">' +
+      media: '<span class="cell c-media" role="gridcell">' +
         esc(row.media_label || (row.media_kind === "audio" ? "аудио" : "видео")) +
         "</span>",
-      title: '<span class="cell c-title" title="' + esc(row.title) + '">' +
+      title: '<span class="cell c-title" role="gridcell" title="' + esc(row.title) + '">' +
         esc(row.title || "—") + stars + watched + "</span>",
-      channel: '<span class="cell c-channel" title="' + esc(row.channel) + '">' +
+      channel: '<span class="cell c-channel" role="gridcell" title="' + esc(row.channel) + '">' +
         esc(row.channel || "—") + "</span>",
-      duration: '<span class="cell c-dur">' + humanDuration(row.duration_s) + "</span>",
-      date: '<span class="cell c-date">' + shortDate(row.uploaded_at) + "</span>",
-      size: '<span class="cell c-size">' +
+      duration: '<span class="cell c-dur" role="gridcell">' + humanDuration(row.duration_s) + "</span>",
+      date: '<span class="cell c-date" role="gridcell">' + shortDate(row.uploaded_at) + "</span>",
+      size: '<span class="cell c-size" role="gridcell">' +
         (row.size ? humanSize(row.size) : "—") + "</span>",
       // Счётчики площадки «на момент синка»: прочерк честнее пустого нуля.
-      views: '<span class="cell c-views">' + bigCount(row.view_count) + "</span>",
-      likes: '<span class="cell c-likes">' + bigCount(row.like_count) + "</span>",
-      comments: '<span class="cell c-comments">' + bigCount(row.comment_count) + "</span>",
-      sync: '<span class="cell c-sync">' + shortDate(row.synced_at) + "</span>",
+      views: '<span class="cell c-views" role="gridcell">' + bigCount(row.view_count) + "</span>",
+      likes: '<span class="cell c-likes" role="gridcell">' + bigCount(row.like_count) + "</span>",
+      comments: '<span class="cell c-comments" role="gridcell">' + bigCount(row.comment_count) + "</span>",
+      sync: '<span class="cell c-sync" role="gridcell">' + shortDate(row.synced_at) + "</span>",
       // Теги ПЛОЩАДКИ (PH4): жанры строки; локальные пометки - в карточке.
-      tags: '<span class="cell c-tags" title="' +
+      tags: '<span class="cell c-tags" role="gridcell" title="' +
         esc((row.platform_tags || []).join(", ")) + '">' +
         esc((row.platform_tags || []).slice(0, 3).join(", ") ||
             ((row.platform_tags || []).length ? "…" : "—")) + "</span>"
     };
     // Состав строк должен совпадать со шапкой: скрытая колонка не
     // рисуется ни там, ни здесь, и сетка не рассыпается.
+    // role="row" + tabindex="-1": строки обходятся стрелками (§5.3),
+    // контейнер остаётся единственной точкой Tab; aria-posinset/setsize
+    // держат размер списка даже при виртуализации (§5.5).
     return '<div class="row' + (picked ? " picked" : "") + '" data-id="' +
-      row.id + '" data-i="' + index + '">' +
+      row.id + '" data-i="' + index + '" role="row" tabindex="-1"' +
+      ' aria-selected="' + (picked ? "true" : "false") + '"' +
+      ' aria-posinset="' + (index + 1) + '" aria-setsize="' + state.total + '">' +
       visibleCols().map(function (col) { return cells[col.key] || ""; }).join("") +
       "</div>";
   }
@@ -5552,6 +5584,64 @@
           paintGrid._raf = 0;
           paintGrid();
         });
+      }
+    });
+
+    // Клавиатура строк списка (§5.3): строки tabindex="-1" - обходятся
+    // стрелками, контейнер остаётся единственной точкой Tab. Enter -
+    // карточка, Ctrl+Enter - плеер, Space - выбор (не прокрутка).
+    // Home/End - края окна прокрутки: виртуализация рисует только окно.
+    $("grid-body").addEventListener("keydown", function (event) {
+      if (event.target && event.target.closest &&
+          event.target.closest(".row-check, input")) return;  // чекбокс: Space/Enter нативные
+      var rows = $("grid-rows");
+      var list = Array.prototype.slice.call(rows.querySelectorAll(".row"));
+      if (!list.length) return;
+      var row = event.target && event.target.closest
+        ? event.target.closest(".row") : null;
+      var body = $("grid-body");
+
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        var step = event.key === "ArrowDown" ? 1 : -1;
+        if (row) {
+          var next = rows.querySelector('.row[data-i="' +
+            (Number(row.dataset.i) + step) + '"]');
+          if (next) {
+            next.focus();
+            next.scrollIntoView({ block: "nearest" });
+          } else {
+            // Край окна: сдвигаем скролл, перерисовка добавит следующий ряд.
+            body.scrollTop += step * rowHeight();
+          }
+        } else {
+          var edge = event.key === "ArrowDown" ? list[0] : list[list.length - 1];
+          edge.focus();
+          edge.scrollIntoView({ block: "nearest" });
+        }
+        return;
+      }
+      if (event.key === "Home" || event.key === "End") {
+        event.preventDefault();
+        var side = event.key === "Home" ? list[0] : list[list.length - 1];
+        side.focus();
+        side.scrollIntoView({ block: "nearest" });
+        return;
+      }
+      if (!row) return;
+      var id = Number(row.dataset.id);
+      if (event.key === "Enter") {
+        event.preventDefault();
+        if (event.ctrlKey || event.metaKey) playVideo(id);
+        else openDetail(id);
+      } else if (event.key === " ") {
+        // Space по строке - выбор, прокрутка не идёт (preventDefault выше
+        // не стоит: default для Space на не-фокусируемом контейнере - скролл).
+        event.preventDefault();
+        var on = !state.selected.has(id);
+        toggleSelected(id, on, row);
+        var box = row.querySelector(".row-check");
+        if (box) box.checked = on;
       }
     });
 

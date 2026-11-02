@@ -158,20 +158,21 @@
                 title="Убрать все связи этой папки (строки видео остаются)">Убрать из папки</button>
       </div>
 
-      <div class="grid-head" id="grid-head">
-        <span class="c-check"><input type="checkbox" id="sel-all"
+      <div class="grid-head" id="grid-head" role="row">
+        <span class="c-check" role="columnheader"><input type="checkbox" id="sel-all"
             title="Выбрать всё на странице" aria-label="Выбрать всё"></span>
-        <span class="c-status" data-l="col.status">Статус</span>
-        <span class="c-title" data-l="col.title">Название</span>
-        <span class="c-channel" data-l="col.channel">Канал</span>
-        <span class="c-dur" data-l="col.dur">Время</span>
-        <span class="c-date" data-l="col.date">Дата</span>
-        <span class="c-size" data-l="col.size">Размер</span>
+        <span class="c-status" role="columnheader" data-l="col.status">Статус</span>
+        <span class="c-title" role="columnheader" data-l="col.title">Название</span>
+        <span class="c-channel" role="columnheader" data-l="col.channel">Канал</span>
+        <span class="c-dur" role="columnheader" data-l="col.dur">Время</span>
+        <span class="c-date" role="columnheader" data-l="col.date">Дата</span>
+        <span class="c-size" role="columnheader" data-l="col.size">Размер</span>
       </div>
 
-      <div class="grid-body" id="grid-body" tabindex="0">
+      <div class="grid-body" id="grid-body" tabindex="0"
+           role="grid" aria-label="Список библиотеки">
         <div class="grid-spacer" id="grid-spacer"></div>
-        <div class="grid-rows" id="grid-rows"></div>
+        <div class="grid-rows" id="grid-rows" role="rowgroup"></div>
         <div class="empty" id="grid-empty" hidden></div>
       </div>
     </section>

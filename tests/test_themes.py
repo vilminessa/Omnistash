@@ -361,7 +361,11 @@ class TestJsChromeMatchesRegistry(unittest.TestCase):
         self.assertRegex(self.js, r'setProperty\("--font-size"')
         self.assertRegex(self.js, r'setProperty\("--font-family"')
         # Высота строк берётся из той же переменной, что CSS (один источник).
-        self.assertRegex(self.js, r'getPropertyValue\("--row-h"\)')
+        # getComputedStyle для custom property отдаёт подстановку var(), а не
+        # вычисление max()/calc(), поэтому px меряем пробником с тем же
+        # var(--row-h); мерка сбрасывается при смене шрифта в applyChrome.
+        self.assertRegex(self.js, r'style\.height\s*=\s*"var\(--row-h\)"')
+        self.assertRegex(self.js, r"rowHeight\._px\s*=\s*0")
         self.assertRegex(self.js, r"rowH\s*=\s*grid\s*\?\s*cfg\.row\s*:\s*rowHeight\(\)")
 
 

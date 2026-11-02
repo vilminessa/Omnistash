@@ -337,7 +337,7 @@ toolbar: поиск · статус · рейтинг · тип · вид ☰/�
 chips:   теги (активный chip = --selected + подпись «фильтр: …»)
 notice:  заметка (info/warn/err — иконка + текст, не только цвет)
 scan:    полоса (determinate/indeterminate) + подпись «N из M · X%»
-table:   шапка колонок (sticky) → виртуальное окно прокрутки → строки
+table:   шапка колонок (вне скроллера) → виртуальное окно прокрутки → строки
 meta:    «показано N из M · сортировка: дата ↓ · колонки: 7 из 11»
 foot:    статусы (tabular) · версия · журнал
 ```
@@ -346,19 +346,19 @@ foot:    статусы (tabular) · версия · журнал
 
 | Что | Значение | Комментарий |
 |---|---|---|
-| высота строки | `--row-h: 34px` (compact), `--row-h-lg: 44px` (comfortable) | JS читает `getComputedStyle(document.documentElement).getPropertyValue('--row-h')` вместо собственной константы (замена №23) |
+| высота строки | `--row-h` из токена (`max(34px, calc(--font-size * 2.6))`), `--row-h-lg` — шаг 4/5 | JS меряет `--row-h` пробником с `var(--row-h)`: getComputedStyle для custom property отдаёт подстановку, а не вычисление `max()/calc` (замена №23); мерка сбрасывается в `applyChrome` при смене шрифта |
 | чекбокс-колонка | 32 px; сама цель строки — `--target` через `padding` строки | 26 px сейчас (`app.css:431`) — ширина чекбокса-колонки ниже 24 px |
 | название | `--fs-body`, 1 строка, `title` + `aria-label` с полным текстом | сейчас `title` есть (`app.js:2492`) |
 | статус | dot + текст (`text` не `muted`), `data-s` задаёт цвет dot и текста | замена №14: цвет дублируется текстом |
 | числа | `var(--nums)` | §2.6 |
-| шапка колонок | `--fs-sm`, обычный регистр, `letter-spacing: var(--track)`, `position: sticky; top: 0`, `z-index: 1`, фон `--surface-2` | малые таблицы уже sticky (`app.css:541`); шапка библиотеки — нет (замена №15) |
-| сортируемый заголовок | `aria-sort` на самой ячейке-заголовке (`role="columnheader"`), индикатор ▲▼ + текст «↑ по дате ↑» для AT, hover → `--text`, active → 2 px underline `--accent` | сейчас `aria-sort` на inner-кнопке (`app.js:2279-2282`) |
+| шапка колонок | `--fs-sm`, обычный регистр, `letter-spacing: var(--track)`, фон `--surface-2`, `border-bottom: var(--line)` | лежит ВНЕ скроллера тела — видима всегда, `position: sticky` внутри тела не нужен (замена №15); малые таблицы остаются sticky (`app.css:541`) |
+| сортируемый заголовок | `aria-sort` на самой ячейке-заголовке (`role="columnheader"`), индикатор ▲▼ (состояние читается AT через `aria-sort` — отдельный текст не нужен), подпись `--text`, hover → `--accent-2`, active → `box-shadow: inset 0 -2px 0 var(--accent)` вместе с `aria-sort` (SC 1.4.1 — состояние не только цветом) | раньше `aria-sort` висел на inner-«кнопке» (замена №15) |
 | строка hover | фон `--hover`, граница строки `--line` | сейчас `rgba(255,255,255,.04)` + отдельное светлое правило (замена №10) |
 | строка selected | фон `--selected` + левая полоса 3 px `--accent` + `aria-selected="true"` | сейчас только чекбокс |
-| строка focused | `--focus-ring` + `tabindex="0"`, `role="option"`/`gridcell` | сейчас нефокусируемо (замена №3) |
+| строка focused | `--focus-ring`, `role="row"` + `tabindex="-1"` (roving tabindex: обход стрелками, контейнер — единственная точка Tab), `role="gridcell"` на ячейках | раньше строки были нефокусируемы (замена №3); `tabindex="0"` на каждой строке дал бы 120+ точек Tab на окно |
 | ширина колонок | один шаблон `--list-cols` + JS-пересчёт (`app.js:2236-2264`) | оставить механику, токенизировать ширины |
 | горизонтальный скролл | шапка и тело синхронны (`app.js:5043`) | оставить |
-| виртуальное окно прокрутки | `PAGE = 120`, overscan 4 ряда, `content-visibility: auto` + `contain-intrinsic-size: var(--row-h) 100%` на `.grid-rows` при списке | MDN/web.dev: `auto` пропускает отрисовку вне экрана и оставляет контент в accessibility tree при `contain-intrinsic-size` |
+| виртуальное окно прокрутки | `PAGE = 120`, overscan 4 ряда, `content-visibility: auto` + `contain-intrinsic-size: auto var(--row-h)` на `.row` | MDN/web.dev: `auto` пропускает отрисовку вне экрана и оставляет контент в accessibility tree при `contain-intrinsic-size`; containment на ряду, не на `.grid-rows` — на контейнере весь список схлопнулся бы под `contain` в один блок |
 
 Колонки настраиваются (`app/settings_schema.py:138-171`, `ui_src/app.js:2206-2264`)
 — это остаётся; доступ к настройке колонок — кнопка «Колонки» в toolbar
@@ -714,10 +714,15 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 | полоса/очередь | Enter на строке — .details; Delete — отменить задачу с подтверждением |
 | global | `Esc` закрывает диалог; `Ctrl+F` фокус на поиск библиотеки; `Ctrl+.` — снять выделение |
 
-Область библиотеки сохраняет `tabindex="0"` на `#grid-body`
-(`index.html:165`) как «контейнер окна прокрутки», но каждая строка/плитка
-получает `tabindex="0"` (замена №3); `aria-setsize`/`aria-posinset` на строках
-виртуального окна прокрутки (виртуализация не должна скрывать размер списка).
+Область библиотеки сохраняет `tabindex="0"` на `#grid-body` как единственный
+фокусируемый контейнер окна прокрутки; строки списка получают `tabindex="-1"` и
+обходятся стрелками (roving tabindex — замена №3; `tabindex="0"` на каждой
+строке дал бы 120+ точек Tab на окно прокрутки). `aria-setsize`/`aria-posinset`
+на строках виртуального окна прокрутки (виртуализация не должна скрывать размер
+списка); `aria-selected` строки дублирует чекбокс. Перерисовка окна возвращает
+фокус того же ряда (иначе обход стрелками обрывается на каждом скролле).
+Плитки пока остаются мыши-мишенями: их разметка шагом 2 не изменена, фокус и
+обход придут вместе с её правкой (§6 таблица взаимодействий).
 
 ### 5.4 Цели и подписи иконок
 
@@ -739,7 +744,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 | сегмент Библиотека/Каталог | `role="radiogroup"`, кнопки `role="radio" aria-checked` |
 | переключатель вида/размера | `role="group"` + `aria-label` (есть, `index.html:55-63`) + `aria-pressed` на кнопках |
 | шапка колонок | `role="table"/"row"/"columnheader"/"gridcell"`, `aria-sort` на columnheader (замена №15) |
-| строка/плитка | `role="option"`/`gridcell`, `aria-selected`, `aria-posinset`/`aria-setsize` |
+| строка/плитка | список: строка `role="row"` с `aria-selected` + `aria-posinset`/`aria-setsize`, ячейки `role="gridcell"` (контейнер `role="grid"`, `rowgroup`); плитка — те же состояния на шаге, меняющем её разметку (§6 таблица взаимодействий) |
 | полоса прогресса | `role="progressbar"`, `aria-valuenow/min/max`, `aria-label`, `aria-valuetext` («получено 214 карточек, итог неизвестен» для indet) |
 | диалоги | `role="dialog"`, `aria-modal="true"`, `aria-labelledby` (замена №6) |
 | тост и статус-строка | `aria-live="polite"`, `role="status"`; ошибки `role="alert"` (замена №17) |
@@ -772,7 +777,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 ```
 nav 264px (Библиотека · Источники · Очередь · Коллекции · Площадки · Настройки)
 content: toolbar (поиск/фильтры/вид/колонки) → chips → notice → scan
-         sticky header → виртуальное окно прокрутки → meta → sel-bar (sticky)
+         шапка колонок (вне скроллера) → виртуальное окно прокрутки → meta → sel-bar (sticky)
 foot: счётчики · журнал (collapse)
 ```
 Плюсы: 6 равноправных секций как secondary navigation (Carbon порог «больше
@@ -896,7 +901,7 @@ Escape, hover/keyboard, узкий экран.
 | Шаг | Что меняется | Файлы | Проверка |
 |---|---|---|---|
 | 1 | **Токен-система**: новые токены цвета/отступов/радиуса/elevation/типографики/веяний; `--line-strong`, `--focus`, `--on-accent`, `--hover`, `--selected`, `--scrim`, `--log-*`; литералы в правилах заменены токенами | `ui_src/app.css` | `build_preview.py`: обе темы, контраст §5.1; `python -m unittest discover -s tests` без регрессий; гварды §7 intact |
-| 2 | **Плотность таблицы**: `--row-h` из токена, JS читает CSS-значение (`app.js:11` → `getComputedStyle`); hover/selected/focus состояния; `tabular-nums` на числовые ячейки; шапка sticky и обычный регистр; `aria-sort` на columnheader + табовая семантика; `content-visibility: auto` + `contain-intrinsic-size` | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py` (100k mock): прокрутка, сортировка, selection; `test_grid_view.py`, `test_ui_hidden.py` |
+| 2 | **Плотность таблицы**: `--row-h` из токена, JS меряет его пробником (`getComputedStyle` не вычисляет `max()/calc` для custom property); hover/selected/focus состояния; `tabular-nums` на числовые ячейки; шапка вне скроллера и обычный регистр; `aria-sort` на columnheader + грид-семантика (`role="grid"/"rowgroup"/"row"/"gridcell"`, roving `tabindex="-1"`); `content-visibility: auto` + `contain-intrinsic-size` на `.row`; клавиатура строк (↑↓/Home/End, Enter — карточка, Ctrl+Enter — плеер, Space — выбор) и возврат фокуса при перерисовке окна | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py` (100k mock): прокрутка, сортировка, selection; `test_grid_view.py`, `test_ui_hidden.py`, `test_ui_grid.py` |
 | 3 | **Карточки каталога**: токены вместо `#000`/`rgba()`, solid-подложки ярлыков, состояния через подпись + границу (без `opacity` для текста), фокус на карточке, `role="progressbar"` + `aria-valuetext`, placeholder без `{площадка}` | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py --first` (каталог), `python -m unittest discover -s tests` |
 | 4 | **Панель выделения**: sticky `sel-bar` с `--shadow-2`, счётчик `aria-live`, `--target` и `--gap-cta` на кнопках, destructive последним + диалог подтверждения с N | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py`: мультивыбор на 120 строк; `test_bulk_ops.py` |
 | 5 | **Карточка видео/аудио + диалог details/legal**: `aria-labelledby`, ловушка фокуса, Escape, возврат фокуса; action-ряд с `--ctl-h`; meta grid tabular; §3.8 дефолт отказа | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py`: открытие карточки с клавиатуры, Escape, Tab по кругу; `test_gui.py` |
