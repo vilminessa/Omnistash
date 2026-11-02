@@ -199,8 +199,9 @@ body[data-theme="light"] {
   --r-1: 4px; --r-2: 6px; --r-3: 8px; --r-4: 12px; --r-full: 999px;
   --radius: var(--r-3);          /* legacy-алиас: 8px — то, что окно держит сейчас */
 
-  /* цели и контролы: эти токены объявляются шагами 2/4/5 (§8) - шаг 1
-     вносит только шкалу отступов/радиуса/типографики/веяний */
+  /* цели и контролы: --ctl-h и --tile-min объявлены шагом 3 (§8);
+     --target, --gap-cta и --ctl-h-lg добавятся шагами 4/5 — шаг 1
+      вносил только шкалу отступов/радиуса/типографики/веяний */
   --target:   44px;  /* комфортная цель (WCAG 2.5.8 требует 24 min) */
   --target-min: 24px;
   --ctl-h:    32px;  /* input/select/кнопка в компактном режиме */
@@ -375,7 +376,7 @@ tile: обложка 16/9 → подпись (--fs-sm, 2 строки) → ка�
       → badges: ★ рейтинг, ● статус (dot + текст), длительность (solid --scrim bar)
 ```
 
-Изменения к текущему (`app.css:306-355`, `app.js:2537-2566`):
+Изменения (шаг 3 внедряет; `app.css:529-611`, `app.js:2796-2824`):
 
 - `--tile-min` из токена; presets М/С/К из `TILE` в JS (`app.js:15-19`) остаются
   источником row-height для виртуального окна прокрутки, но читают токены.
@@ -387,8 +388,13 @@ tile: обложка 16/9 → подпись (--fs-sm, 2 строки) → ка�
 - Состояния карточки: `added`/`adding`/`failed` — подпись + граница
   `--ok-line`/`--info-line`/`--err-line`, `opacity` только для `failed`-обложки
   (не для текста) (замена №18).
-- Карточка фокусируема целиком (`tabindex="0"`), action-кнопки — отдельные
-  цели `--target` с `--gap-cta`.
+- Карточка каталога (§3.3) фокусируема целиком (`tabindex="0"`): Enter —
+  страница видео на площадке, Space — добавление, отказ отвечает той же
+  подписью, что клик (текст в одном месте). Плитки обходятся через свои
+  внутренние цели (play-кнопка и чекбокс в Tab-обходе): roving-обход
+  плиток стрелками отложен вместе с action-кнопками `--target`/`--gap-cta`
+  (шаги 4/5) — плитки ряды виртуального окна, лишние точки Tab на окно
+  были бы регрессией навигации.
 
 ### 3.3 Каталог площадки
 
@@ -403,11 +409,16 @@ empty: заменяет сетку (не overlay)
 - Placeholder без литерала `{площадка}`: значение подставляется до показа
   панели; если имя ещё не пришло — текст «Поиск по площадке…» (замена №20,
   и правило «не выдумываем подписи» из §7).
-- Сегмент Библиотека/Каталог: `role="radiogroup"` с `aria-checked`, активный
-  фон `--surface-2` + underline `--accent` (2 индикатора, NN/g); высота
-  контролов `--ctl-h`.
+- Сегмент Библиотека/Каталог: `role="radiogroup"` с `aria-checked` (ставит JS
+  вместе с `.active`), стрелки перемещают и выбирают цель (APG radiogroup),
+  активный фон `--surface-2` + underline `--accent` (2 индикатора, NN/g);
+  высота контролов `--ctl-h`.
 - `.cat-card`: фон `--surface-2`, граница `--line`, `--r-3`, `--shadow-1`;
   hover — `--hover` + граница `--line-strong`; фокус — `--focus-ring`.
+  Состояния `added`/`adding`/`failed` — граница `--ok-line`/`--info-line`/
+  `--err-line` + подпись; `opacity` только на отказной обложке (замена №18).
+- Карточка фокусируема целиком (`tabindex="0"`): Enter — страница видео на
+  площадке, Space — «Добавить»; вложенные кнопки/инпуты не перехватываются.
 - Прогресс: `role="progressbar"` + `aria-valuenow/min/max` + `aria-label`;
   недетерминированная полоса без `aria-valuenow` и со счётчиком карточек
   (см. §4.4).
@@ -894,15 +905,16 @@ fallback на широком экране (<1200 px — A с nav, >1400 px — B
 
 Проверка после каждого шага: `python tools/build_preview.py` (офлайн-страница;
 `--first` — первая панель, если нужна конкретная), затем
-`python -m unittest discover -s tests` (1138 тестов, OK skipped=17;
-`python tools/build_preview.py` перед этим и `node --check ui_src/app.js` для правок JS). Плюс ручной офлайн чек: контраст, фокус,
+`python -m unittest discover -s tests` (весь набор без регрессий,
+OK с skipped=17; перед ним `python tools/build_preview.py`, а для правок JS —
+`node --check ui_src/app.js`). Плюс ручной офлайн чек: контраст, фокус,
 Escape, hover/keyboard, узкий экран.
 
 | Шаг | Что меняется | Файлы | Проверка |
 |---|---|---|---|
 | 1 | **Токен-система**: новые токены цвета/отступов/радиуса/elevation/типографики/веяний; `--line-strong`, `--focus`, `--on-accent`, `--hover`, `--selected`, `--scrim`, `--log-*`; литералы в правилах заменены токенами | `ui_src/app.css` | `build_preview.py`: обе темы, контраст §5.1; `python -m unittest discover -s tests` без регрессий; гварды §7 intact |
 | 2 | **Плотность таблицы**: `--row-h` из токена, JS меряет его пробником (`getComputedStyle` не вычисляет `max()/calc` для custom property); hover/selected/focus состояния; `tabular-nums` на числовые ячейки; шапка вне скроллера и обычный регистр; `aria-sort` на columnheader + грид-семантика (`role="grid"/"rowgroup"/"row"/"gridcell"`, roving `tabindex="-1"`); `content-visibility: auto` + `contain-intrinsic-size` на `.row`; клавиатура строк (↑↓/Home/End, Enter — карточка, Ctrl+Enter — плеер, Space — выбор) и возврат фокуса при перерисовке окна | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py` (100k mock): прокрутка, сортировка, selection; `test_grid_view.py`, `test_ui_hidden.py`, `test_ui_grid.py` |
-| 3 | **Карточки каталога**: токены вместо `#000`/`rgba()`, solid-подложки ярлыков, состояния через подпись + границу (без `opacity` для текста), фокус на карточке, `role="progressbar"` + `aria-valuetext`, placeholder без `{площадка}` | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py --first` (каталог), `python -m unittest discover -s tests` |
+| 3 | **Карточки каталога и плитки**: состояния через подпись + границу `--ok-line`/`--info-line`/`--err-line` (без `opacity` для текста, гасится только отказная обложка — замена №18); hover карточки и плитки через `--line-strong` + `--shadow-1`; play-кнопка плитки всегда видима 44×44 (замена №4); `role="radiogroup"` + `aria-checked` + underline на сегменте Библиотека/Каталог; `role="progressbar"` + `aria-valuenow/min/max` + `aria-valuetext` на полосе каталога (indet — без `valuenow`); карточка фокусируема (`tabindex="0"`, Enter — страница видео, Space — добавить); placeholder поиска без литерала имени площадки (замена №20); токены `--ctl-h`/`--tile-min` и контролы каталога на общей высоте | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py --first` (каталог): фокус карточки, Enter/Space, полоса с `aria-valuenow`, сегмент с `aria-checked`; `test_ui_catalog.py`, `test_ui_hidden.py`, `python -m unittest discover -s tests` |
 | 4 | **Панель выделения**: sticky `sel-bar` с `--shadow-2`, счётчик `aria-live`, `--target` и `--gap-cta` на кнопках, destructive последним + диалог подтверждения с N | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py`: мультивыбор на 120 строк; `test_bulk_ops.py` |
 | 5 | **Карточка видео/аудио + диалог details/legal**: `aria-labelledby`, ловушка фокуса, Escape, возврат фокуса; action-ряд с `--ctl-h`; meta grid tabular; §3.8 дефолт отказа | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py`: открытие карточки с клавиатуры, Escape, Tab по кругу; `test_gui.py` |
 | 6 | **Настройки**: секции-карточки, `minmax()` вместо 260 px, хинты `--fs-sm` на `--surface`, `role="switch"`, числовые поля с `aria-describedby`, progressive disclosure для «Дополнительно», нейтральный текст хинтов колонок | `ui_src/app.css`, `ui_src/app.js` (+ правка текста хинта в `app/settings_schema.py` — только текст, не ключи) | `build_preview.py`: обе темы, RU/EN расширение; `test_settings_schema.py` |

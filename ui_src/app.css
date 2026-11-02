@@ -84,6 +84,12 @@
   --r-1: 4px; --r-2: 6px; --r-3: 8px; --r-4: 12px; --r-full: 999px;
   --radius: var(--r-3);    /* legacy-алиас: 8px - то, что окно держит сейчас */
 
+  /* цели и контролы (§2.4): --ctl-h и --tile-min объявлены шагом 3 (§8) -
+     компактные контролы тулбара каталога и минимальная ширина карточки;
+     --target, --gap-cta и --ctl-h-lg добавятся шагами 4/5 */
+  --ctl-h: 32px;           /* input/select/сегмент в компактном режиме */
+  --tile-min: 240px;       /* карточка каталога в сетке auto-fill (§3.3) */
+
   /* типографика (§2.5): --fs-cap допустим только на --surface/--surface-2,
      на --bg мелкий текст поднимается до --fs-sm (замена №19). */
   --fs-cap: 11.5px;
@@ -536,7 +542,9 @@ body {
   overflow: hidden;
   cursor: pointer;
 }
-.tile:hover { border-color: var(--accent); }
+/* Плитка: hover - граница контрола + тень-1 (§4.2); выбранная остаётся
+   --accent с outline (состояние выбора отличается от наведения). */
+.tile:hover { border-color: var(--line-strong); box-shadow: var(--shadow-1); }
 .tile.picked { border-color: var(--accent); outline: 1px solid var(--accent); }
 .tile-thumb {
   display: block;
@@ -558,8 +566,8 @@ body {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: 42px;
-  height: 42px;
+  width: 44px;
+  height: 44px;
   border: 0;
   border-radius: var(--r-full);
   /* Solid подложка --scrim: значок читается на любой обложке и в любой теме
@@ -568,14 +576,13 @@ body {
   color: var(--on-scrim);
   font-size: 16px;
   cursor: pointer;
-  opacity: 0;
-  transition: opacity var(--dur-fast-02) var(--ease-productive);
+  /* Значок всегда видим (замена №4): hover-only opacity скрывал действие от
+     клавиатуры и touch; кнопка сама в Tab-обходе, кольцо --focus-ring по
+     focus-visible (§4.2 - «play-кнопка всегда видима»). */
+  transition: background var(--dur-fast-01) var(--ease-productive);
   z-index: 2;
 }
-/* Значок появляется и при фокусе клавиатурой: hover один не показывает
-   доступность для клавиатуры (SC 2.4.7). */
-.tile:hover .tile-play, .tile:focus-within .tile-play { opacity: 1; }
-.tile-play:hover { background: var(--accent); }
+.tile-play:hover { background: var(--accent); }   /* hover только меняет фон (замена №12) */
 .tile-badges {
   position: absolute;
   top: 6px;
@@ -1217,17 +1224,24 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .toast.err { border-color: var(--err); }
 
 /* Переключатель Библиотека/Каталог */
+/* Сегмент Библиотека/Каталог - радио-группа (§3.3): активный различим
+   двумя индикаторами - тон --surface-2 + underline --accent (NN/g:
+   состояние не только цветом; AT читает его через aria-checked). */
 .seg { display: flex; gap: 0; border: 1px solid var(--line); border-radius: var(--r-2); overflow: hidden; }
-.seg-btn { border: none; background: transparent; color: var(--muted); padding: 4px 10px; font-size: var(--fs-sm); cursor: pointer; }
-.seg-btn.active { background: var(--surface-2); color: var(--text); }
+.seg-btn { border: none; background: transparent; color: var(--muted); padding: 4px 10px; font-size: var(--fs-sm); cursor: pointer; height: var(--ctl-h); }
+.seg-btn.active { background: var(--surface-2); color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
 .seg-btn:hover { color: var(--text); }
+/* Контролы каталога держат общую высоту --ctl-h: сегмент, режим, сортировка
+   и поиск - одна линия тулбара (§3.3). */
+#cat-mode, #cat-sort, #cat-search { height: var(--ctl-h); }
 
 /* Каталог: карточки */
 #cat-wrap { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
 .cat-scroll { flex: 1 1 auto; overflow: auto; min-height: 0; }
 /* Прогресс прогона карточек (CAT-4): ход по каналам известен заранее,
-   страницы площадки итог не называют - тогда полоса без процентов. */
-.cat-progress { display: flex; align-items: center; gap: 10px; padding: 6px 12px 2px; }
+   страницы площадки итог не называют - тогда полоса без процентов.
+   AT читает её как progressbar (атрибуты ставит catBar: §3.3). */
+.cat-progress { display: flex; align-items: center; gap: var(--s-3); padding: var(--s-2) var(--s-4) var(--s-1); }
 .cat-progress .scan-track { flex: 1 1 auto; }
 .cat-progress .muted { font-size: var(--fs-sm); white-space: nowrap; }
 .scan-fill.indet { width: 100%; background: none;
@@ -1245,8 +1259,13 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 /* Что показано и откуда: режим, источник карточек, страницы, ход сортировки -
    «тренды» и «каналы» не должны выглядеть перемешанными. */
 .cat-caption { padding: 2px 12px 8px; font-size: var(--fs-sm); }
-.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; padding: var(--s-3) 0; }
-.cat-card { background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-3); overflow: hidden; display: flex; flex-direction: column; }
+/* Сетка карточек: auto-fill по --tile-min, gap по шкале (--s-4: прежние
+   14px переезжают на шкалу, §2.4). */
+.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--tile-min), 1fr)); gap: var(--s-4); padding: var(--s-3) 0; }
+.cat-card { background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-3); box-shadow: var(--shadow-1); overflow: hidden; display: flex; flex-direction: column; transition: background var(--dur-fast-02) var(--ease-productive), border-color var(--dur-fast-02) var(--ease-productive); }
+.cat-card:hover { background: var(--hover); border-color: var(--line-strong); }
+/* Карточка фокусируема целиком (tabindex="0" из JS, §3.3): кольцо
+   --focus-ring уже в списке :where, Enter/Space обрабатывает app.js. */
 .cat-thumb { position: relative; width: 100%; padding-top: 56.25%; background: var(--scrim); cursor: pointer; }
 .cat-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .cat-dur { position: absolute; right: 6px; bottom: 6px; background: var(--scrim); color: var(--on-scrim); padding: 2px 6px; border-radius: var(--r-1); font-size: var(--fs-cap); }
@@ -1254,13 +1273,18 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .cat-title { font-size: var(--fs-sm); line-height: 1.4; max-height: 2.8em; overflow: hidden; cursor: pointer; }
 .cat-meta { font-size: var(--fs-cap); color: var(--muted); }
 .cat-actions { display: flex; justify-content: flex-end; padding: 0 10px 8px; }
-.cat-card.added { opacity: 0.7; }
+/* Состояния карточки (замена №18): граница по рамке состояния + подпись
+   («В библиотеке», «Добавляю…», «недоступно на площадке») - текст не
+   гасится целиком; opacity только на отказной обложке. */
+.cat-card.added { border-color: var(--ok-line); }
 /* Карточка, добавляемая прямо с каталога (auto): кнопка заменена ходом
    записи, повторный клик не плодит запрос к площадке. */
-.cat-card.adding { opacity: 0.85; }
-/* Карточка, отказавшая как «недоступна на площадке»: гасится до
-   перезагрузки каталога (повтор по той же ссылке ничего не даст). */
-.cat-card.failed { opacity: 0.45; }
+.cat-card.adding { border-color: var(--info-line); }
+/* Карточка, отказавшая как «недоступна на площадке»: обложка гасится до
+   перезагрузки каталога (повтор по той же ссылке ничего не даст),
+   подпись отказа читается как текст. */
+.cat-card.failed { border-color: var(--err-line); }
+.cat-card.failed .cat-thumb img { opacity: 0.45; }
 .cat-card.failed .cat-thumb, .cat-card.failed .cat-title { cursor: default; }
 
 /* Панель площадки (этап D): окно рядом с приложением, захваченный адрес.

@@ -4417,8 +4417,12 @@
       // Площадка без каталога (не поддерживается) - переключатель скрыт,
       // вкладка остаётся библиотекой.
       pfv.hidden = !hasCatalog;
+      // Сброс сегмента на «Библиотеку» вместе с aria-checked: радио-группа
+      // без checked-цели AT не читает (§3.3).
       pfv.querySelectorAll(".seg-btn").forEach(function (x) {
-        x.classList.toggle("active", x.dataset.view === "library");
+        var on = x.dataset.view === "library";
+        x.classList.toggle("active", on);
+        x.setAttribute("aria-checked", on ? "true" : "false");
       });
     }
     catalogState.view = "library";
@@ -4742,6 +4746,7 @@
     var p = catalogState.progress || { done: 0, total: 0, cards: 0 };
     var fill = $("cat-progress-fill");
     var text = $("cat-progress-text");
+    var track = $("cat-progress-track");
     bar.hidden = false;
     // total > 0 - итог известен (каналы, кэш): проценты. total = 0 -
     // площадка итог не назвала: анимированная полоса + счётчик карточек.
@@ -4750,9 +4755,24 @@
     fill.style.width = known
       ? Math.max(6, Math.min(100, Math.round(p.done * 100 / p.total))) + "%"
       : "100%";
-    text.textContent = label
-      + (known ? " · " + p.done + " из " + p.total : "")
-      + (p.cards ? " · карточек " + p.cards : "");
+    var cards = p.cards ? " · карточек " + p.cards : "";
+    text.textContent = label + (known ? " · " + p.done + " из " + p.total : "") + cards;
+    if (track) {
+      // AT читает полосу как progressbar: детерминированная - valuenow и
+      // valuemax с подписью «получено X из Y»; недетерминированная без
+      // valuenow (итог не назван), ход передаёт valuetext со счётчиком
+      // карточек (§3.3, §4.4: честных процентов нет).
+      if (known) {
+        track.setAttribute("aria-valuemax", String(p.total));
+        track.setAttribute("aria-valuenow", String(p.done));
+        track.setAttribute("aria-valuetext",
+          label + " · получено " + p.done + " из " + p.total + cards);
+      } else {
+        track.removeAttribute("aria-valuemax");
+        track.removeAttribute("aria-valuenow");
+        track.setAttribute("aria-valuetext", label + cards + " · итог неизвестен");
+      }
+    }
   }
 
   function catCaption() {
@@ -5087,8 +5107,12 @@
               (catAdd.phase === "committing" ? "Записываю…" : "Добавляю…") +
               "</span>"
             : '<button class="btn small cat-add" data-i="' + i + '">+ Добавить</button>';
+      // Карточка фокусируема целиком (§3.3): Enter - страница видео на
+      // площадке, Space - добавление; обработчик ниже, вложенные контролы
+      // не перехватывает.
       return '<div class="cat-card' + (it.added ? " added" : "") +
-        (it.failed ? " failed" : "") + (pending ? " adding" : "") + '" data-i="' + i + '">' +
+        (it.failed ? " failed" : "") + (pending ? " adding" : "") +
+        '" data-i="' + i + '" tabindex="0">' +
         '<div class="cat-thumb" data-i="' + i + '"' +
         ' title="' + esc(it.title) + '">' +
         (it.thumb ? '<img src="' + esc(it.thumb) + '" loading="lazy" ' +
@@ -5366,8 +5390,12 @@
     if (pfView) {
       pfView.querySelectorAll(".seg-btn").forEach(function (b) {
         b.addEventListener("click", function () {
-          pfView.querySelectorAll(".seg-btn").forEach(function (x) { x.classList.remove("active"); });
+          pfView.querySelectorAll(".seg-btn").forEach(function (x) {
+            x.classList.remove("active");
+            x.setAttribute("aria-checked", "false");
+          });
           b.classList.add("active");
+          b.setAttribute("aria-checked", "true");
           var v = b.dataset.view;
           catalogState.view = v;
           $("ph-library-wrap").hidden = (v !== "library");
@@ -5400,6 +5428,20 @@
             });
           }
         });
+      });
+      // Радио-группа (APG radiogroup): стрелки перемещают и выбирают цель;
+      // Enter/Space кнопка обрабатывает нативно - click выбирает сегмент.
+      pfView.addEventListener("keydown", function (ev) {
+        var dir = (ev.key === "ArrowRight" || ev.key === "ArrowDown") ? 1
+          : (ev.key === "ArrowLeft" || ev.key === "ArrowUp") ? -1 : 0;
+        if (!dir) return;
+        var btns = Array.prototype.slice.call(pfView.querySelectorAll(".seg-btn"));
+        var cur = btns.indexOf(document.activeElement);
+        var next = btns[Math.max(0, Math.min(btns.length - 1, (cur < 0 ? 0 : cur) + dir))];
+        if (!next || next === document.activeElement) return;
+        next.focus();
+        next.click();
+        ev.preventDefault();
       });
     }
     var catSearch = $("cat-search");
@@ -5482,6 +5524,14 @@
       // опрос статуса рисует собранное и объясняет, что лист остановлен.
       call("site_catalog_cancel");
     });
+    // Каталог: отказ «недоступна на площадке» - одна подпись на клик,
+    // клавиатуру и catAddItem (текст в одном месте).
+    function catUnavailable(item) {
+      if (!item || !item.failed) return false;
+      toast("Это видео недоступно на площадке (удалено, приватное или "
+            + "geo-ограничение): повтор не поможет", true);
+      return true;
+    }
     $("cat-grid").addEventListener("click", function (ev) {
       if (!ev.target.closest) return;
       var add = ev.target.closest(".cat-add");
@@ -5490,14 +5540,29 @@
       if (!node) return;
       var item = catalogState.items[Number(node.dataset.i)];
       if (!item) return;
-      if (item.failed) {
-        toast("Это видео недоступно на площадке (удалено, приватное или "
-              + "geo-ограничение): повтор не поможет", true);
-        return;
-      }
+      if (catUnavailable(item)) return;
       if (add) { catAddItem(item); return; }   // + Добавить: видео пишется сразу
       // Обложка/название - как на сайте: страница видео на площадке.
       if (item.url) call("open_url", item.url);
+    });
+    // Клавиатура карточки (tabindex="0", §3.3): Enter - страница видео,
+    // Space - «+ Добавить». Вложенные кнопки/инпуты не перехватываются -
+    // для них Enter/Space нативные.
+    $("cat-grid").addEventListener("keydown", function (ev) {
+      if (ev.key !== "Enter" && ev.key !== " ") return;
+      if (!ev.target.closest) return;
+      if (ev.target.closest("button, input, select, a")) return;
+      var card = ev.target.closest(".cat-card");
+      if (!card) return;
+      var item = catalogState.items[Number(card.dataset.i)];
+      if (!item) return;
+      ev.preventDefault();
+      if (catUnavailable(item)) return;
+      if (ev.key === "Enter") {
+        if (item.url) call("open_url", item.url);
+        return;
+      }
+      catAddItem(item);   // Space: added/failed внутри catAddItem
     });
     // P3: фильтр по тегу в общей библиотеке (чипсы перерисовывает poll).
     $("lib-tags").addEventListener("click", function (ev) {

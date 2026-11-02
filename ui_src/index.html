@@ -296,9 +296,14 @@
   <section class="panel" id="panel-platform" hidden>
     <div class="toolbar">
       <b id="pf-title">Площадка</b>
-      <div class="seg" id="pf-view" title="Режим просмотра">
-        <button class="seg-btn active" data-view="library">Библиотека</button>
-        <button class="seg-btn" data-view="catalog">Каталог</button>
+      <!-- Сегмент режима внутри панели (не боковая навигация): радио-группа
+          из двух целей - состояние читается AT через aria-checked (§3.3). -->
+      <div class="seg" id="pf-view" title="Режим просмотра"
+           role="radiogroup" aria-label="Режим просмотра площадки">
+        <button class="seg-btn active" data-view="library"
+                role="radio" aria-checked="true">Библиотека</button>
+        <button class="seg-btn" data-view="catalog"
+                role="radio" aria-checked="false">Каталог</button>
       </div>
       <input type="search" id="ph-search"
              placeholder="Поиск по названию и описанию…" autocomplete="off">
@@ -311,7 +316,10 @@
         <option value="views:desc">по просмотрам</option>
         <option value="title:asc">по названию</option>
       </select>
-      <input type="search" id="cat-search" placeholder="Поиск по {площадка}..." autocomplete="off" hidden>
+      <!-- Placeholder написан без имени площадки: applyPlatform подставляет
+          имя до показа панели, а пока его нет - нейтральный текст
+          (замена №20). -->
+      <input type="search" id="cat-search" placeholder="Поиск по площадке…" autocomplete="off" hidden>
       <select id="ph-sort" title="Сортировка">
         <option value="date:desc">по дате (новые)</option>
         <option value="date:asc">по дате (старые)</option>
@@ -382,7 +390,10 @@
          («канал 3 из 10»), страницы площадки итог не называют - тогда полоса
          анимированная без процентов, но со счётчиком карточек. -->
     <div class="cat-progress" id="cat-progress" hidden>
-      <div class="scan-track"><div class="scan-fill" id="cat-progress-fill"></div></div>
+      <div class="scan-track" id="cat-progress-track" role="progressbar"
+           aria-label="Прогресс загрузки карточек каталога" aria-valuemin="0">
+        <div class="scan-fill" id="cat-progress-fill"></div>
+      </div>
       <span class="muted" id="cat-progress-text"></span>
     </div>
     <div class="cat-caption muted" id="cat-caption"></div>
