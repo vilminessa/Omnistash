@@ -317,6 +317,30 @@ _TEXTS: dict = {
                       "en": "remux of this video is already running - wait"},
     "http.hls_segment": {"ru": "плейлист или сегмент не найдены в кеше",
                          "en": "playlist or segment not found in the cache"},
+    # Страница воспроизведения клиента (S4) и её подписи: отказ называет
+    # состояние строки, а не пустой плеер.
+    "http.watch_missing": {"ru": "страница воспроизведения не собрана "
+                                  "(нет ui_src/watch.html)",
+                           "en": "the playback page is not built "
+                                 "(ui_src/watch.html is missing)"},
+    "watch.back": {"ru": "← Библиотека", "en": "← Library"},
+    "watch.title": {"ru": "Воспроизведение", "en": "Playback"},
+    "watch.loading": {"ru": "загрузка…", "en": "loading…"},
+    "watch.audio": {"ru": "аудио", "en": "audio"},
+    "watch.no_track": {"ru": "дорожка не скачана", "en": "track not downloaded"},
+    "watch.browser_hls": {"ru": "браузер не играет HLS - нужен hls.js или Safari",
+                          "en": "the browser cannot play HLS - hls.js or Safari is needed"},
+    "watch.failed": {"ru": "воспроизведение не получилось", "en": "playback failed"},
+    "watch.subs_show": {"ru": "Показать субтитры", "en": "Show captions"},
+    "watch.subs_hide": {"ru": "Скрыть субтитры", "en": "Hide captions"},
+    "watch.captions": {"ru": "Субтитры", "en": "Captions"},
+    "watch.bytes": {"ru": "байты файла", "en": "file bytes"},
+    "watch.thumb": {"ru": "обложка", "en": "thumbnail"},
+    "watch.files_head": {"ru": "Файлы этого видео", "en": "Files of this video"},
+    "watch.files_none": {"ru": "файлы не найдены", "en": "no files found"},
+    "watch.hash": {"ru": "хеш выдан", "en": "hash granted"},
+    "watch.hash_none": {"ru": "хеш не вычислен", "en": "hash not computed"},
+    "watch.gone": {"ru": "файл пропал с диска", "en": "file gone from disk"},
 }
 
 _BY_KEY = dict(_TEXTS)

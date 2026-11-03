@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Omnistash — воспроизведение</title>
+<link rel="stylesheet" href="/app.css">
+<style>
+  /* Компоновка страницы плеера (S4): цвета, размеры, радиусы и интервалы -
+     только из токенов §2.7 DESIGN-UI. Ни одного перехода и ни одного нового
+     правила анимации: §7 требует честный статус текстом, а не движением;
+     reduced motion в app.css гасит анимации остальных компонентов. */
+  .watch-main { display: grid; gap: var(--s-4); padding: var(--s-4) var(--s-6);
+                max-width: 1100px; }
+  .watch-head { display: flex; align-items: baseline; gap: var(--s-3);
+                flex-wrap: wrap; }
+  .watch-title { font-size: var(--fs-title); line-height: var(--lh-tight);
+                 margin: 0; font-weight: 600; }
+  .watch-status { color: var(--muted); font-size: var(--fs-sm); margin: 0; }
+  .watch-error { border-left: 3px solid var(--err-line); color: var(--err);
+                 padding: var(--s-2) var(--s-3); background: var(--surface-2);
+                 border-radius: var(--r-2); font-size: var(--fs-sm); }
+  .watch-video { width: 100%; max-height: 72vh; background: var(--bg);
+                 border: 1px solid var(--line); border-radius: var(--r-2); }
+  .watch-audio { width: 100%; }
+  .watch-side { display: flex; gap: var(--s-3); align-items: center;
+                flex-wrap: wrap; margin: 0; }
+  .watch-files { font-size: var(--fs-sm); color: var(--muted);
+                 display: grid; gap: var(--s-2); }
+  .watch-file { display: flex; gap: var(--s-3); align-items: baseline;
+                flex-wrap: wrap; }
+  /* Узкий экран (M6): плеер и подписи - во всю ширину, отступы меньше. */
+  @media (max-width: 640px) {
+    .watch-main { padding: var(--s-3); }
+    .watch-video { max-height: 56vh; }
+  }
+</style>
+</head>
+<body>
+<noscript><p class="notice">Страница воспроизведения работает с JavaScript:
+  плеер собирает байты с этого же сервера; без него ничего не открывается.</p>
+</noscript>
+<main class="watch-main">
+  <header class="watch-head">
+    <a class="link-btn" href="/" data-l="watch.back">← Библиотека</a>
+    <h1 class="watch-title" id="watch-title" data-l="watch.title">Воспроизведение</h1>
+  </header>
+  <p class="watch-status" id="watch-status" role="status" aria-live="polite"></p>
+  <video class="watch-video" id="watch-video" controls preload="metadata"></video>
+  <audio class="watch-audio" id="watch-audio" controls hidden></audio>
+  <p class="watch-side">
+    <button class="btn" type="button" id="watch-captions" hidden
+            aria-pressed="false" data-l="watch.subs_show">Показать субтитры</button>
+    <span class="watch-status" id="watch-subs-note"></span>
+  </p>
+  <section class="watch-files" id="watch-files" aria-label="Файлы этого видео"></section>
+</main>
+<script src="/vendor/hls.js"></script>
+<script src="/watch.js"></script>
+</body>
+</html>

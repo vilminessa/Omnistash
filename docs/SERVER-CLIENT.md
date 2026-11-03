@@ -20,9 +20,11 @@
 | **честная подпись** | «не найден», «не получен», «не выдан», «доступен только на сервере» — как есть. Ни выдуманных 0→100 %, ни серой кнопки вместо объяснения (тот же принцип, что `docs/DESIGN-UI.md` §4.4 и §5.6). |
 
 Ограничения проекта, которые задают раздел: лицензия PolyForm Noncommercial
-(нельзя GPL/AGPL-зависимости; `hls.js` — MIT, проходит), ничего не
-скачивается в рантайме интерфейсом (весь плеер вшивается в `ui_src/vendor/`),
-страница окна не делает внешних запросов (`tests/test_gui.py`), TLS всегда и
+(нельзя GPL/AGPL-зависимости; `hls.js` — Apache-2.0 по метадате пакета
+`registry.npmjs.org/hls.js` v1.7.4, проходит), ничего не скачивается в
+рантайме интерфейсом (плеер лежит в `ui_src/vendor/`, грузится со своего
+адреса), страница окна и страницы клиента не делают внешних запросов
+(`tests/test_gui.py`, `tests/test_ui_watch.py`), TLS всегда и
 порт вне зоны перехвата DPI (тот же приём, что `mesh_port`, `app/settings_schema.py:502`),
 взрослый гейт решается на сервере и не обходится клиентом
 (`docs/PLAN-15H.md:11-14`, `app/legal.py`), русский по умолчанию и английский
@@ -108,6 +110,15 @@
 - `GET /hls/<video_id>/index.m3u8` и `seg<N>.ts` — из кеша (§6); путь кеша
   строится по id строки, чужое имя и `../` — честный 404 по подписи
   (право `watch`);
+
+Страницы и файлы клиента (S4, GET и HEAD; сама страница — не данные, право
+решает токен внутри неё):
+- `GET /watch/<video_id>` — страница воспроизведения с меткой сервера
+  (`Cache-Control: no-store`); если `ui_src/watch.html` не в источнике, 404
+  называет причину («страница воспроизведения не собрана»), не молчит;
+- `GET /app.css`, `/watch.js`, `/vendor/hls.js` — файлы клиента по одной
+  карте (traversal по чужому пути — 404), `ETag` по sha256 и 304; вендор
+  закреплён по sha256 в `ui_src/vendor/hls.js.meta.json`.
 
 Никаких чужих хостов: HTTP включается только по метке сервера
 (`window.OMNISTASH_HTTP`), которую ставит `--serve` — страница окна живёт
@@ -206,8 +217,10 @@ pairing (§5) и правится в настройках сервера. Пуб
    сессию плеера (видео + адрес, TTL активности) — сегменты не плодят
    зрителей, отказ по кодексу или инструменту слот не занимает. Сверх
    лимита — 429 с честной подписью.
-7. `hls.js` (MIT) лежит в `ui_src/vendor/hls.js` и вшивается в страницу
-   `/watch`: рантайм ничего не скачивает. Пункт в
+7. `hls.js` (Apache-2.0 по метадате пакета, v1.7.4 закреплён в
+   `ui_src/vendor/hls.js.meta.json` по sha256) грузится со своего адреса
+   `/vendor/hls.js` на страницу `/watch/<video_id>`: рантайм ничего не
+   скачивает из сети. Пункт в
    `THIRD_PARTY_NOTICES.md` и `docs/LEGAL-REVIEW.md`.
 
 ---
@@ -260,7 +273,7 @@ pairing (§5) и правится в настройках сервера. Пуб
 | **S1** | `omnistash.py --serve` + `app/http/`: `ThreadingHTTPServer` с TLS для браузера из `app/http/tls.py` (эфемерный ECDSA с SAN; Ed25519 остаётся для mesh), обход `getfqdn`, токены в профиле (DPAPI-путь), скоупы, `/api/*` под гейтом, аудит; новые поля `serve_enabled`, `serve_bind`, `serve_port`, `serve_rate_mbit`, `serve_hls_transcode`, `serve_watchers_max` в схеме и подписи в i18n | `omnistash.py`, `app/http/*.py`, `app/settings_schema.py`, `app/i18n.py`, `tests/test_serve.py` | `feat(serve): HTTP-сервер рядом с окном …` |
 | **S2** | Байты: `/thumb/<video_id>` (ETag вместо data-URI), `/media/<file_id>` с `Range`/206/416/413 и честным 404 по `files.missing`, `/subs/<file_id>` (VTT) | `app/http/media.py`, `tests/test_serve_media.py` | `feat(serve): раздача обложек, байтов и субтитров …` |
 | **S3** | HLS-конвейер: ffprobe-проба кодекса, `-c copy` в `profile/hls_cache/` (ffmpeg пишет `index.m3u8` + `seg<N>.ts`), кеш по сигнатуре файла и замок на видео, инвалидация хуками по repack/migrate/rebind/удалению строки, `serve_rate_mbit`, `serve_watchers_max` (слоты раздачи и сессии плеера — одним лимитом), откат по кодексу и `serve_hls_transcode` | `app/http/hls.py`, `tests/test_serve_hls.py` | `feat(serve): HLS на лету …` |
-| **S4** | `ui_src/watch.html` + `ui_src/watch.js` + `ui_src/vendor/hls.js`: HLS, субтитры, список файлов; доступность и узкий экран по §7 DESIGN-UI | `ui_src/watch.html`, `ui_src/watch.js`, `ui_src/vendor/hls.js`, `tests/test_ui_watch.py` | `feat(ui): страница воспроизведения клиента …` |
+| **S4** | `ui_src/watch.html` + `ui_src/watch.js` + `ui_src/vendor/hls.js` (Apache-2.0 по метадате пакета, pin по sha256 в `ui_src/vendor/hls.js.meta.json`): HLS, субтитры, список файлов; доступность и узкий экран по §7 DESIGN-UI | `ui_src/watch.html`, `ui_src/watch.js`, `ui_src/vendor/hls.js`, `tests/test_ui_watch.py` | `feat(ui): страница воспроизведения клиента …` |
 | **S5** | Полная UI по HTTP: скоупы `queue`, `mark`, `sources`, `mesh`, `accounts`, `server_config`; локальные тема/язык; поле пути вместо `pick_folder`; честные подписи недоступных целей; DESIGN-UI №5 и №25; M13 `queue_retry(attempt_chain=True)` | `ui_src/app.js`, `ui_src/index.html`, `ui_src/app.css`, `tests/test_ui_http_scopes.py` | `feat(ui): клиентская UI по HTTP с скоупами …` |
 | **S6** | Экспозиция: `serve_bind` (loopback / LAN / Tailscale / 0.0.0.0+allowlist), диалог согласия «что уходит наружу», предупреждение zapret/DPI и зоны портов, pairing-код, тормоз перебора, лимиты | `app/http/pair.py`, `app/http/bind.py`, `app/gui.py`, `app/settings_schema.py`, `tests/test_serve_exposure.py` | `feat(serve): режимы экспозиции и привязка …` |
 | **S7** | Сборка и документы: режим сервера в exe и планировщике, строка дорожной карты **SV-C** в `README.md`, `THIRD_PARTY_NOTICES.md` + `docs/LEGAL-REVIEW.md` для `hls.js`, **и правка CI-workflow** (`.github/workflows/*.yml`, `.github/workflows/release.yml`) — шаг сборки клиентского бандла (`ui_src` + `vendor/hls.js` + `watch.*`) после проверочных шагов набора, с линтом пинов | `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `tools/build_client.py`, `README.md`, `THIRD_PARTY_NOTICES.md`, `docs/LEGAL-REVIEW.md`, `Omnistash.spec` | `build(ci): сборка клиентского решения …` |

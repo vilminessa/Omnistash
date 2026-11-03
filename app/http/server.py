@@ -23,15 +23,16 @@ TLS 1.3 минимум), отказ handshake не валит сервер, от
 from __future__ import annotations
 
 import json
+import hashlib
 import socket
 import ssl
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .. import i18n
+from .. import ui
 from ..mesh import channel as channel_mod
 from ..mesh import pacing
-from ..ui import build_page
 from . import hls
 from . import media
 from . import scopes
@@ -68,6 +69,20 @@ def byte_route(path: str) -> tuple[str, str]:
     if len(parts) == 2 and parts[0] in BYTE_ROUTES:
         return parts[0], parts[1]
     return "", path
+
+
+# Статические файлы клиента (S4): рантайм грузит только свой адрес, поэтому
+# карта одна и traversal по ней не проходит - чужой путь = 404 с подписью.
+CLIENT_ASSETS = {
+    "/app.css": ("app.css", "text/css; charset=utf-8"),
+    "/watch.js": ("watch.js", "application/javascript; charset=utf-8"),
+    "/vendor/hls.js": ("vendor/hls.js", "application/javascript; charset=utf-8"),
+}
+
+
+def asset_etag(body: bytes) -> str:
+    """ETag файла интерфейса: sha256 от байтов (клиент подтверждает 304)."""
+    return f'"{hashlib.sha256(body).hexdigest()[:32]}"'
 
 
 class ServeError(Exception):
@@ -151,6 +166,8 @@ class _Handler(BaseHTTPRequestHandler):
     tokens = None             # http.tokens.TokenStore
     audit = None              # http.audit.Audit
     page = b""                # страница с меткой сервера (строится при старте)
+    watch_page = None         # страница воспроизведения (S4) или None - не собрана
+    assets = None             # статические файлы клиента: путь -> (байты, mime, etag)
     rate_bps = 0              # 0 = без ограничения отдачи
     viewers = None            # http.media.Viewers (зрители и сессии HLS, S2/S3)
     hls_builder = None        # http.hls.HlsBuilder (кеш HLS, S3)
@@ -290,6 +307,53 @@ class _Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    # -- страница воспроизведения и файлы клиента (S4) ------------------------
+
+    def _serve_watch(self, target: str) -> None:
+        """GET/HEAD /watch/<video_id>: страница плеера клиента.
+
+        id страницы не «данные»: плеер по ней ничего не отдаёт наружу, и
+        доступ к байтам решает токен со скоупами внутри страницы.
+        """
+        if not target.isdigit():
+            self._answer(404, {"error": self.text("http.missing"),
+                               "code": "missing", "target": target},
+                         name=f"watch {target}")
+            return
+        if self.watch_page is None:
+            # ui_src/watch.html не в этом источнике (например, exe собран без
+            # данных) - отказ называет причину, а не пустая страница.
+            self._answer(404, {"error": self.text("http.watch_missing"),
+                               "code": "missing"}, name=f"watch {target}")
+            return
+        self._record(f"watch {target}", 200, note=f"{len(self.watch_page)} байт")
+        if self._head_only:
+            self._headers(200, "text/html; charset=utf-8", len(self.watch_page),
+                          {"Cache-Control": "no-store"})
+            return
+        self._write(200, self.watch_page, "text/html; charset=utf-8",
+                    {"Cache-Control": "no-store"})
+
+    def _serve_asset(self, path: str, asset: tuple) -> None:
+        """Файл интерфейса клиента: ETag и 304, без чужих путей (карта одна)."""
+        ctype, body, etag = asset
+        extra = {"ETag": etag, "Cache-Control": "public, max-age=3600"}
+        if self.headers.get("If-None-Match") == etag:
+            self._record(path, 304)
+            if self._head_only:
+                self._headers(304, ctype, 0, extra)
+                return
+            self.send_response(304)
+            for name, value in extra.items():
+                self.send_header(name, value)
+            self.end_headers()
+            return
+        self._record(path, 200, note=f"{len(body)} байт")
+        if self._head_only:
+            self._headers(200, ctype, len(body), extra)
+            return
+        self._write(200, body, ctype, extra)
+
     # -- маршруты ------------------------------------------------------------
 
     def _answer(self, code: int, payload, name: str = "", scope: str = "",
@@ -324,6 +388,15 @@ class _Handler(BaseHTTPRequestHandler):
                 # Тот же контракт, что окну: вызов метода - POST.
                 self._answer(405, {"error": self.text("http.post_only"),
                                    "code": "http"}, name=path[len("/api/"):])
+                return
+            if path.startswith("/watch/"):
+                # Страница воспроизведения клиента (S4): сама она не данные,
+                # данные плеер спрашивает по скоупам ключа.
+                self._serve_watch(path[len("/watch/"):])
+                return
+            asset = (self.assets or {}).get(path)
+            if asset:
+                self._serve_asset(path, asset)
                 return
             route, target = byte_route(path)
             if route:
@@ -539,9 +612,28 @@ class ServeServer:
         if self.running:
             return self.port
         try:
-            page = build_page(marker=self._marker).encode("utf-8")
+            page = ui.build_page(marker=self._marker).encode("utf-8")
         except Exception as exc:  # noqa: BLE001 - нет ui_src - сервер не поднимется
             raise ServeError(str(exc)) from exc
+
+        # Страница воспроизведения и файлы клиента (S4): читаются один раз при
+        # старте. Если watch.html не в этом источнике (exe собран без
+        # ui_src/watch.html), маршрут называет причину при запросе - пустой
+        # страницы или молчания нет.
+        watch_page = None
+        if ui.watch_page_available():
+            try:
+                watch_page = ui.build_watch_page(marker=self._marker).encode("utf-8")
+            except Exception as exc:  # noqa: BLE001 - страница не собрана
+                self._log(f"Страница воспроизведения не собрана: {exc}")
+        assets: dict[str, tuple] = {}
+        for route, (name, ctype) in CLIENT_ASSETS.items():
+            try:
+                body = ui.asset(name)
+            except Exception as exc:  # noqa: BLE001 - файл не в источнике
+                self._log(f"Файл клиента не найден ({name}): {exc}")
+                continue
+            assets[route] = (ctype, body, asset_etag(body))
 
         # Права читаются до подъёма: поднимать слушатель с неизвестными
         # скоупами - это «доступ есть, но какой - непонятно».
@@ -556,6 +648,8 @@ class ServeServer:
             "tokens": self._tokens,
             "audit": self._audit,
             "page": page,
+            "watch_page": watch_page,
+            "assets": assets,
             "rate_bps": self._rate_bps,
             # Зрители и строитель кеша живут вместе с сервером: обработчики
             # новых соединений не получают своих (иначе лимит зрителей
@@ -583,6 +677,14 @@ class ServeServer:
 
         self._audit.rotate()
         self._httpd = httpd
+        # Что человек может открыть: главная страница и плеер по id строки
+        # (порт уже известен: base_url читает фактический адрес слушателя).
+        if watch_page is not None:
+            self._log(f"Страница воспроизведения: {self.base_url()}/watch/<video_id> "
+                      f"(HLS и байты - по праву watch на ключе)")
+        else:
+            self._log("Страница воспроизведения не собрана: ui_src/watch.html "
+                      "не найден - /watch/<video_id> ответит причиной")
         self._thread = threading.Thread(target=httpd.serve_forever,
                                         daemon=True, name="omnistash-serve")
         self._thread.start()

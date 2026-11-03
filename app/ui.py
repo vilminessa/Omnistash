@@ -49,3 +49,31 @@ def build_page(marker: dict | None = None) -> str:
     if marker is not None:
         page = _with_marker(page, marker)
     return page
+
+
+WATCH_PAGE = "watch.html"
+
+
+def watch_page_available() -> bool:
+    """Есть ли ui_src/watch.html (в заморозке exe его может не быть)."""
+    from .paths import ui_dir
+    return (ui_dir() / WATCH_PAGE).is_file()
+
+
+def build_watch_page(marker: dict | None = None) -> str:
+    """Страница воспроизведения клиента (docs/SERVER-CLIENT.md §7, S4).
+
+    В отличие от главного окна, страница НЕ вшивается одной строкой: клиент
+    открыт в браузере, и его скрипты лежат на сервере отдельно
+    (`/watch.js`, `/vendor/hls.js`, `/app.css`) - рантайм грузит только свой
+    адрес. Метка сервера та же, что на главной странице.
+    """
+    page = _read(WATCH_PAGE)
+    if marker is not None:
+        page = _with_marker(page, marker)
+    return page
+
+
+def asset(name: str) -> bytes:
+    """Файл интерфейса как байты для раздачи клиенту (ui_src/...)."""
+    return _read(name).encode("utf-8")

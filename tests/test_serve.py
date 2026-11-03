@@ -44,7 +44,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import Encoding
 from cryptography.x509 import IPAddress, SubjectAlternativeName
 
-from app import i18n, settings_schema
+from app import i18n, settings_schema, ui as serve_ui
 from app.gui import Api
 from app.http import audit as serve_audit
 from app.http import media as serve_media
@@ -169,21 +169,21 @@ class ServeCase(unittest.TestCase):
 
     # -- помощь ------------------------------------------------------------
 
-    def request(self, method, path, body=None, token=None, raw=None):
+    def request(self, method, path, body=None, token=None, raw=None, headers=None):
         """Запрос к слушателю (TLS, без проверки цепочки: сертификат эфемерный).
 
         Возвращает (код, тело-JSON или None, текст тела, заголовки) - текст
-        нужен для страницы, а не только для /api/*.
+        нужен для страницы и файлов, а не только для /api/*.
         """
         conn = http.client.HTTPSConnection("127.0.0.1", self.port, timeout=10,
                                           context=self.ctx)
         try:
-            headers = {}
+            sent = dict(headers or {})
             if token is not None:
-                headers["Authorization"] = "Bearer " + token
+                sent["Authorization"] = "Bearer " + token
             data = raw if raw is not None else (
                 "{}" if body is None else json.dumps(body, ensure_ascii=False))
-            conn.request(method, path, body=data.encode("utf-8"), headers=headers)
+            conn.request(method, path, body=data.encode("utf-8"), headers=sent)
             response = conn.getresponse()
             text = response.read().decode("utf-8")
             try:
@@ -231,6 +231,87 @@ class ServeCase(unittest.TestCase):
                          "ключ доступа вшит в страницу - читает любой, кто её получил")
         self.assertEqual(headers.get("Cache-Control"), "no-store",
                          "страница кешится: метка не обновляется после привязки")
+
+    # -- страница воспроизведения и файлы клиента (S4) ------------------------
+
+    def test_watch_page_carries_the_marker_and_its_assets(self):
+        status, payload, text, headers = self.get("/watch/5")
+        self.assertEqual(status, 200, payload or text[:80])
+        self.assertIn("window.OMNISTASH_HTTP", text)
+        self.assertIn('src="/vendor/hls.js"', text,
+                      "страница без вендора loading будет грузить hls.js из сети")
+        self.assertIn('src="/watch.js"', text)
+        self.assertIn('href="/app.css"', text)
+        self.assertNotIn(self.read_token.value, text,
+                         "ключ вшит в страницу плеера - читает любой, кто её получил")
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
+        blob = "\n".join(self.journal.tail())
+        self.assertIn("watch 5", blob, "обращение к странице плеера не видно в журнале")
+
+    def test_watch_page_id_must_be_digits(self):
+        status, payload, _, _ = self.get("/watch/abc")
+        self.assertEqual(status, 404)
+        self.assertEqual(payload.get("code"), "missing")
+        self.assertEqual(payload.get("target"), "abc",
+                         "отказ должен называть, какой id не читается")
+
+    def test_assets_serve_with_etag_and_304(self):
+        status, payload, text, headers = self.get("/watch.js")
+        self.assertEqual(status, 200, text[:80])
+        self.assertEqual(headers.get("Content-Type"),
+                         "application/javascript; charset=utf-8")
+        tag = headers.get("ETag")
+        self.assertTrue(tag, "файл клиента без ETag - плеер перечитывает его каждый раз")
+        status, _, text, _ = self.request("GET", "/watch.js",
+                                          headers={"If-None-Match": tag})
+        self.assertEqual(status, 304, "повторный запрос не подтверждён 304")
+        self.assertEqual(text, "", "304 с телом - кеш читает это как данные")
+
+        status, payload, vendor, headers = self.get("/vendor/hls.js")
+        self.assertEqual(status, 200)
+        self.assertGreater(len(vendor), 100_000,
+                           "hls.js не тот файл: вендор должен быть полным dist")
+        self.assertEqual(headers.get("Content-Type"),
+                         "application/javascript; charset=utf-8")
+        status, payload, text, headers = self.request("HEAD", "/vendor/hls.js")
+        self.assertEqual(status, 200)
+        self.assertEqual(text, "", "HEAD с телом - это не HEAD")
+        self.assertTrue(headers.get("Content-Length"))
+
+        status, _, css, headers = self.get("/app.css")
+        self.assertEqual(status, 200, css[:80])
+        self.assertEqual(headers.get("Content-Type"), "text/css; charset=utf-8")
+        self.assertIn("--accent", css, "токены DESIGN-UI не дошли до страницы плеера")
+
+    def test_asset_map_closes_paths_not_in_it(self):
+        """Чужой путь по статике не читается: карта одна, traversal нет."""
+        for path in ("/vendor/app.js", "/vendor/../watch.js", "/watch.js/x",
+                    "/vendor/hls.min.js"):
+            status, payload, text, _ = self.get(path)
+            self.assertEqual(status, 404, f"{path}: чужой путь прочитан")
+            self.assertEqual(payload.get("code"), "missing")
+            self.assertNotIn("omnistash.token", text,
+                             f"{path}: файл клиента отдан под чужым путём")
+
+    def test_watch_page_absence_is_named_not_blank(self):
+        """ui_src/watch.html не в источнике: /watch называет причину (exe без данных)."""
+        with mock.patch.object(serve_ui, "watch_page_available", lambda: False):
+            server = serve_http.ServeServer(FakeApi(), bind="127.0.0.1", port=0,
+                                            tokens=self.store, audit=self.journal)
+            port = server.start()
+            try:
+                conn = http.client.HTTPSConnection("127.0.0.1", port, timeout=10,
+                                                  context=self.ctx)
+                conn.request("GET", "/watch/7")
+                response = conn.getresponse()
+                body = json.loads(response.read().decode("utf-8"))
+                conn.close()
+                self.assertEqual(response.status, 404)
+                self.assertEqual(body.get("error"),
+                                 i18n.t("http.watch_missing", "ru"),
+                                 "непостроенная страница обязана назвать причину")
+            finally:
+                server.stop()
 
     def test_index_html_alias_is_the_same_page(self):
         status, _, text, _ = self.get("/index.html")

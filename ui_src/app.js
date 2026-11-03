@@ -2990,6 +2990,13 @@
   }
 
   function playVideo(id) {
+    if (httpMode()) {
+      // Клиент не имеет файлов на диске: воспроизведение - страница сервера
+      // /watch/<id> (байты по HTTPS, плеер браузера, HLS при надобности).
+      // Системный плеер (open_file) остаётся нативной целью окна.
+      location.href = httpBaseUrl() + "/watch/" + id;
+      return;
+    }
     // Системный плеер по умолчанию: файл открывает Windows, не окно.
     call("open_file", { id: id }).then(function (res) {
       if (res && res.error) toast(res.error, true);

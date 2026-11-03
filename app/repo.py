@@ -1455,7 +1455,7 @@ def video_detail(conn: sqlite3.Connection, video_id: int) -> dict | None:
     data = dict(row)
     data["status_label"] = STATUS_LABELS.get(data["status"], data["status"])
     data["files"] = [dict(f) for f in conn.execute(
-        "SELECT kind, path, size, hash, mtime, missing, format_json "
+        "SELECT id, kind, path, size, hash, mtime, missing, format_json "
         "FROM files WHERE video_id=? ORDER BY kind", (video_id,))]
     data["playlists"] = [dict(p) for p in conn.execute(
         """SELECT p.id, p.title, p.kind, pi.position, pi.removed_at

@@ -28,6 +28,8 @@ REPO_FILES = [
     "ui_src/app.js",
     "ui_src/app.css",
     "ui_src/index.html",
+    "ui_src/watch.html",
+    "ui_src/watch.js",
     "README.md",
     "docs/ACCEPTABLE_USE.md",
     "docs/LEGAL_FAQ.md",
