@@ -60,6 +60,8 @@ _TEXTS: dict = {
     "sec.metadata": {"ru": "Метаданные API", "en": "Metadata API"},
     "sec.appearance": {"ru": "Внешний вид", "en": "Appearance"},
     "sec.other": {"ru": "Прочее", "en": "Other"},
+    # §3.5 шаг 6: вторичный слой редких полей (mesh, обход, PO-токены).
+    "sec.extra": {"ru": "Дополнительно", "en": "Advanced"},
 
     # ---- новые поля темы/шрифта/языка --------
     "settings.theme.label": {"ru": "Тема", "en": "Theme"},

@@ -645,7 +645,7 @@ input[type="search"] { flex: 0 1 340px; }
 :where(button, .btn, .tab, .icon-btn, .link-btn, .seg-btn, .view-btn,
        .size-btn, .tree-item, .mode-item, .check, .storage-default,
        .grid-body, .grid-head [data-col], .tile, .row, .cat-card,
-       .pick-row, .storage-row, .dedupe-actions label):focus-visible {
+       .pick-row, .storage-row, .dedupe-actions label, .switch input, .set-extra summary):focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
 }
@@ -833,21 +833,48 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 
 /* ---------------------------- настройки ---------------------------- */
 
-.settings { overflow: auto; display: flex; flex-direction: column; gap: 18px; padding-right: 4px; }
+.settings { overflow: auto; display: flex; flex-direction: column; gap: var(--s-5); padding-right: var(--s-1); }
 
-.set-section { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
-.set-section > h3 { margin: 0 0 4px; font-size: var(--fs-body); }
-.set-section > .set-note { margin: 0 0 12px; font-size: var(--fs-cap); color: var(--muted); }
+/* §3.5 (шаг 6): секции-карточки - подложка surface, граница line,
+   elevation shadow-1, заголовок --fs-title; отступы на шкале --s-*. */
+.set-section { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-3); padding: var(--s-5); box-shadow: var(--shadow-1); }
+.set-section > h3 { margin: 0 0 var(--s-1); font-size: var(--fs-title); }
+.set-section > .set-note { margin: 0 0 var(--s-4); font-size: var(--fs-sm); color: var(--muted); }
 
-.field { display: grid; grid-template-columns: 260px 1fr; gap: var(--s-4); padding: var(--s-3) 0; border-top: 1px solid var(--line); align-items: start; }
+/* Поля: две колонки на minmax() вместо жёстких 260 px (§3.5: русский
+   расширяется на 10-20 %, подпись не обрезается, контрол не сжимается). */
+.field { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(240px, 1fr); gap: var(--s-4); padding: var(--s-3) 0; border-top: 1px solid var(--line); align-items: start; }
 .field:first-of-type { border-top: 0; }
 .field-label { font-weight: 600; }
-.field-hint { font-size: var(--fs-cap); color: var(--muted); margin-top: 3px; line-height: 1.4; }
+/* Хинт на --surface читается с --fs-sm (§2.5: --fs-cap допустим только на
+   surface-2; здесь текст лежит на surface и на --fs-sm держит AA). */
+.field-hint { font-size: var(--fs-sm); color: var(--muted); margin-top: var(--s-1); line-height: var(--lh-body); }
 .field-control { display: flex; gap: var(--s-3); align-items: center; flex-wrap: wrap; }
-.field-control input[type="text"], .field-control select { flex: 1 1 220px; }
-.field-control input[type="number"] { width: 110px; }
+/* Контролы настроек - крупные цели (--ctl-h-lg), не компактный тулбар. */
+.field-control input[type="text"], .field-control select { flex: 1 1 220px; min-height: var(--ctl-h-lg); }
+.field-control input[type="number"] { width: 110px; min-height: var(--ctl-h-lg); }
+.field-control .btn { min-height: var(--ctl-h-lg); }
 
-.check { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
+/* «Дополнительно» (§3.5, progressive disclosure): native <details> -
+   раскрытие клавиатурное (Enter/Space на summary), ring на цели фокуса. */
+.set-extra summary { font-size: var(--fs-title); font-weight: 600; cursor: pointer; }
+.set-extra summary:hover { color: var(--text); }
+
+/* §3.5 шаг 6: переключатель (APG Switch) - track + knob на токенах;
+   состояние читается дважды: position knob + aria-checked (не только цвет). */
+.switch { display: inline-flex; align-items: center; gap: var(--s-3); cursor: pointer; }
+.switch input { appearance: none; width: 34px; height: 20px; flex: none;
+  border: 1px solid var(--line-strong); border-radius: var(--r-full);
+  background: var(--widget); position: relative; cursor: pointer; }
+.switch input::after { content: ""; position: absolute; top: 2px; left: 2px;
+  width: 14px; height: 14px; border-radius: var(--r-full); background: var(--text);
+  transition: transform var(--dur-fast-01) var(--ease-productive),
+              background var(--dur-fast-01) var(--ease-productive); }
+.switch input:checked { background: var(--accent); border-color: var(--accent); }
+.switch input:checked::after { transform: translateX(14px); background: var(--on-accent); }
+.switch span { font-size: var(--fs-sm); color: var(--muted); }
+/* Checkbox в диалогах остаётся галкой (.check) - это выбор, не переключатель. */
+.check { display: inline-flex; align-items: center; gap: var(--s-3); cursor: pointer; }
 .check input { accent-color: var(--accent); width: 15px; height: 15px; }
 
 .roots { display: flex; flex-direction: column; gap: 6px; width: 100%; }

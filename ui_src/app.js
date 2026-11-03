@@ -46,6 +46,7 @@
     ratingMin: "",
     media: "",            // E0: фильтр по типу дорожки ('audio'|'video'|'')
     query: "",
+    stats: null,            // снимок stats из poll: честный признак «был отказ выкачки»
     pages: {},            // номер страницы -> строки
     total: 0,
     since: 0,
@@ -504,6 +505,9 @@
 
   function renderStats(stats) {
     if (!stats) return;
+    // §3.5 шаг 6: «Дополнительно» раскрывается по факту отказа выкачки,
+    // а не выдумывается: failed считаем из того же снимка, что и счётчики.
+    state.stats = stats;
     $("head-stats").innerHTML =
       "<span>Всего <b>" + stats.total.toLocaleString("ru-RU") + "</b></span>" +
       "<span>Скачано <b>" + stats.downloaded.toLocaleString("ru-RU") + "</b></span>" +
@@ -3424,26 +3428,53 @@
       (dl.attempted ? " · в этой сессии " + dl.attempted : "");
   }
 
+  /* §3.5 (шаг 6): редкие поля — mesh и обход/PO-токены — под «Дополнительно».
+     Progressive disclosure (NN/g): не показываем их до тех пор, пока человек
+     не столкнулся с отказом площадки или сам не раскрыл секцию; <details>
+     раскрывается по факту (failed в снимке), а native-механизм остаётся
+     клавиатурным (Enter/Space на summary). Загрузка обычной библиотеки при
+     этом не меняется: поля те же, просто в вторичном слое. */
+  var EXTRA_KEYS = ["bypass_enabled", "bypass_max_attempts",
+                    "bot_token_enabled", "bot_token", "impersonate"];
+  var EXTRA_SECTION = "Mesh";   // подсказки сети участников — тоже вторичный слой
+  var EXTRA_NAME = "Дополнительно";
+
+  function isExtraField(field) {
+    return field.section === EXTRA_SECTION || EXTRA_KEYS.indexOf(field.key) >= 0;
+  }
+
   function renderSettings() {
     var body = $("settings-body");
     if (!state.schema.length) return;
     var sections = [];
     var bySection = {};
+    var extraFields = [];
     state.schema.forEach(function (field) {
       // Скрытые поля backend в схему не присылает; мок обязан врать так же
       // честно, иначе превью показывает то, чего в окне нет.
       if (field.hidden) return;
+      if (isExtraField(field)) { extraFields.push(field); return; }
       var name = field.section || "Прочее";
       if (!bySection[name]) { bySection[name] = []; sections.push(name); }
       bySection[name].push(field);
     });
-    body.innerHTML = sections.map(function (name) {
+    var html = sections.map(function (name) {
       // Название раздела на текущем языке; словар не покрывает - русское
       // имя из схемы остаётся (state.sections строит только покрытые ключи).
       return '<div class="set-section"><h3>' +
         esc(state.sections[name] || name) + "</h3>" +
         bySection[name].map(fieldHtml).join("") + "</div>";
-    }).join("");
+    });
+    if (extraFields.length) {
+      // Раскрытие по факту отказа: by_status.failed из того же снимка poll.
+      var failed = (state.stats && state.stats.by_status
+        ? state.stats.by_status.failed : 0) || 0;
+      html.push('<details class="set-section set-extra"' +
+        (failed > 0 ? " open" : "") + "><summary>" +
+        esc(state.sections[EXTRA_NAME] || EXTRA_NAME) + "</summary>" +
+        extraFields.map(fieldHtml).join("") + "</details>");
+    }
+    body.innerHTML = html.join("");
     bindSettings();
     // Строки живут вне схемы: после перерисовки тела подтягиваем их
     // состояние заново (ffmpeg-строка и аккаунт Google).
@@ -3451,11 +3482,22 @@
     renderAccountState();
   }
 
+  function hintId(field) {
+    // Id хинта поля: тот же текст подписи, что рисует поле (i18n поверх схемы).
+    var tr = state.labels[field.key] || {};
+    var hint = tr.hint || field.hint || "";
+    return hint ? "hint-" + field.key : "";
+  }
+
   function fieldHtml(field) {
     var value = state.settings[field.key];
     var control = "";
     if (field.type === "bool") {
-      control = '<label class="check"><input type="checkbox" data-key="' + field.key +
+      // §3.5 шаг 6: switch (APG Switch Pattern) - native checkbox остаётся
+      // (значение читает bindSettings), но AT объявляет переключатель:
+      // role="switch" + aria-checked синхронизируется в bindSettings.
+      control = '<label class="switch"><input type="checkbox" role="switch"' +
+        ' data-key="' + field.key + '" aria-checked="' + (value ? "true" : "false") +
         '"' + (value ? " checked" : "") + "><span>включено</span></label>";
     } else if (field.type === "choice") {
       control = '<select data-key="' + field.key + '">' +
@@ -3473,10 +3515,13 @@
           "Установить ffmpeg</button></div>";
       }
     } else if (field.type === "int") {
+      // §3.5 шаг 6: числовое поле читает хинт вслух (aria-describedby на
+      // хинт раздела); хинт появляется в markup с id только когда он есть.
       control = '<input type="number" data-key="' + field.key + '" value="' +
         esc(value) + '"' +
         (field.min !== undefined ? ' min="' + field.min + '"' : "") +
-        (field.max !== undefined ? ' max="' + field.max + '"' : "") + ">";
+        (field.max !== undefined ? ' max="' + field.max + '"' : "") +
+        (hintId(field) ? ' aria-describedby="' + hintId(field) + '"' : "") + ">";
     } else if (field.type === "path") {
       control = '<input type="text" data-key="' + field.key + '" value="' +
         esc(value) + '"><button class="btn ghost" data-browse="' + field.key +
@@ -3517,8 +3562,10 @@
     var tr = state.labels[field.key] || {};
     var label = tr.label || field.label;
     var hint = tr.hint || field.hint || "";
+    var hid = hint ? hintId(field) : "";
     return '<div class="field"><div><div class="field-label">' +
-      esc(label) + '</div><div class="field-hint">' +
+      esc(label) + '</div><div class="field-hint"' +
+      (hid ? ' id="' + hid + '"' : "") + '>' +
       esc(hint) + "</div></div>" +
       '<div class="field-control">' + control + "</div></div>";
   }
@@ -3722,9 +3769,17 @@
     });
     Array.prototype.forEach.call(
       document.querySelectorAll("#settings-body [data-key]"), function (input) {
+        // §3.5 шаг 6: aria-checked switch живёт вместе с checked - и на
+        // включении, и на сбросе после отказа (иначе AT читает устаревшее).
+        function syncSwitch(el) {
+          if (el.type === "checkbox" && el.getAttribute("role") === "switch") {
+            el.setAttribute("aria-checked", el.checked ? "true" : "false");
+          }
+        }
         input.addEventListener("change", function () {
           var key = input.dataset.key;
           var value = input.type === "checkbox" ? input.checked : input.value;
+          syncSwitch(input);
           // Согласие на mesh: включение - явное действие с объяснением,
           // что уходит наружу (адрес и id запрашиваемых видео).
           if (key === "mesh_enabled" && value) {
@@ -3747,6 +3802,7 @@
                 "Продолжить?");
               if (!ok) {
                 input.checked = false;
+                syncSwitch(input);
                 return;
               }
               saveSetting(key, value);
@@ -3759,7 +3815,7 @@
                 "рамках ваших прав (docs/ACCEPTABLE_USE.md).",
                 "Правила использования приняты"
               ).then(function (accepted) {
-                if (!accepted) { input.checked = false; return; }
+                if (!accepted) { input.checked = false; syncSwitch(input); return; }
                 call("legal_accept", { aup: true, first_send: true }).then(
                   proceed);
               });
