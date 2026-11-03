@@ -217,6 +217,16 @@ class TestMarkupLiveRegions(unittest.TestCase):
     def test_sel_count_live_stays(self):
         self.assertIn('id="sel-count" aria-live="polite"', self.html)
 
+    def test_focus_ring_covers_new_controls(self):
+        # Шаг 7: кольцо --focus-ring на всех контролах — в том числе switch
+        # и summary «Дополнительно» (иначе AT и клавиатура видят фокус не всюду).
+        css = _clean(CSS.read_text(encoding="utf-8"))
+        ring = re.search(r":where\(([^)]*)\):focus-visible\s*\{", css)
+        self.assertTrue(ring, "нет общего правила :focus-visible")
+        for sel in (".switch input", ".set-extra summary", ".row", ".tile", ".btn"):
+            self.assertIn(sel, ring.group(1), f"{sel}: вне кольца фокуса (§7)")
+        self.assertIn("var(--focus-ring)", css)
+
 
 if __name__ == "__main__":
     unittest.main()
