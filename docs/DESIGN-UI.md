@@ -200,8 +200,8 @@ body[data-theme="light"] {
   --radius: var(--r-3);          /* legacy-алиас: 8px — то, что окно держит сейчас */
 
   /* цели и контролы: --ctl-h и --tile-min объявлены шагом 3 (§8);
-     --target, --gap-cta и --ctl-h-lg добавятся шагами 4/5 — шаг 1
-      вносил только шкалу отступов/радиуса/типографики/веяний */
+     --target, --target-min, --ctl-h-lg и --gap-cta — шагом 4 (панель
+     выделения); шаг 1 вносил только шкалу отступов/радиуса/типографики/веяний */
   --target:   44px;  /* комфортная цель (WCAG 2.5.8 требует 24 min) */
   --target-min: 24px;
   --ctl-h:    32px;  /* input/select/кнопка в компактном режиме */
@@ -392,9 +392,9 @@ tile: обложка 16/9 → подпись (--fs-sm, 2 строки) → ка�
   страница видео на площадке, Space — добавление, отказ отвечает той же
   подписью, что клик (текст в одном месте). Плитки обходятся через свои
   внутренние цели (play-кнопка и чекбокс в Tab-обходе): roving-обход
-  плиток стрелками отложен вместе с action-кнопками `--target`/`--gap-cta`
-  (шаги 4/5) — плитки ряды виртуального окна, лишние точки Tab на окно
-  были бы регрессией навигации.
+  плиток стрелками остаётся отложенным — `--target`/`--gap-cta` объявлены
+  шагом 4 (§8), но плитки это ряды виртуального окна, и лишние точки Tab
+  на окно были бы регрессией навигации.
 
 ### 3.3 Каталог площадки
 
@@ -483,27 +483,39 @@ dialog (aria-modal,-labelledby)
 фон затемняется `--scrim` за `--dur-slow-02`. Ширина `min(720px, 92vw)`,
 `--shadow`, `--r-4`. Отказ по `kind` остаётся текстом бэкенда (§7).
 
-### 3.7 Панель мультивыбора (`sel-bar`, `index.html:114-137`, `app.css:730-743`)
+### 3.7 Панель мультивыбора (`sel-bar`, `index.html:126-152`, `app.css:1013-1029`)
 
 ```
-sticky bar над content: «Выбрано: N» (#sel-count) · хранилище ·
-  [В коллекцию…] [Пометить…] [Перенести…] [Операции…] [Скачать] [Снять выбор]
-  (в режиме папки-коллекции дополнительно: Убрать из папки / Переименовать / Удалить папку)
+bar вне скроллера тела (видима всегда): «Выбрано: N» (#sel-count) · хранилище ·
+  [В коллекцию…] [Убрать из папки] [Переименовать…] [Пометить…] [Перенести…]
+  [Операции…] [Скачать] [Снять выбор] [Удалить папку]
 ```
 
-- Sticky (`position: sticky; bottom: 0`) внутри content, фон `--surface`,
-  граница `--line-strong`, `--shadow-2`; высота `--ctl-h-lg`; счётчик `var(--nums)`.
-- Порядок кнопов (9 кнопок, `index.html:114-137`) фиксируется: групповые
-  операции → primary «Скачать» → «Снять выбор» последним справа; разрушительные
-  («Удалить папку», удаление строк внутри «Операции…`) — с диалогом подтверждения,
-  где названо N объектов, `--err` граница + подпись.
-- Разрушительный action не стоит в одном ряду с обычными: он либо внутри
-  «Операции…», либо последним справа.
-- «Снять выбор» — ghost-кнопка справа; `aria-live="polite"` на `#sel-count`
-  (`aria-hidden` для самой полосы не ставим: AT должен читать счётчик).
-- Кнопки `min-width` + `min-height: var(--target)`, `--gap-cta` между ними
-  (текст expansion + промахи, замены №21); `max-width: 280px` у select
-  (`app.css:740`) заменяется на `min-width`.
+- Полоса лежит вне скроллера тела и потому видима всегда при мультивыборе:
+  `position: sticky; bottom: 0` внутри content не работает — панель
+  библиотеки flex-контейнер без scroll-root (источник №34), sticky не имеет
+  контейнера прокрутки и полоса ушла бы за край. Фон `--surface`, граница
+  `--line-strong`, `--shadow-2` (полоса читается отдельным слоем над
+  контентом), `--gap-cta` между соседними целями.
+- `role="toolbar"` + `aria-label`; `aria-live="polite"` на `#sel-count`
+  (счётчик на `var(--nums)` из шага 2); `aria-hidden` на полосу не ставим —
+  иначе AT не объявляет «Выбрано: N».
+- Порядок целей фиксируется гвардом (`tests/test_ui_selbar.py`): групповые
+  операции («В коллекцию…», папочные «Убрать из папки» и «Переименовать…») →
+  «Пометить…» → «Перенести…» → «Операции…» → primary «Скачать» →
+  «Снять выбор» → разрушительное «Удалить папку» последней справа.
+- Разрушительное действие не в одном ряду с обычными: «Удалить папку» —
+  `.danger` (граница `--err`) в конце полосы; снятие связей папки
+  (`col-purge`) и удаление строк внутри «Операции…» — свои диалоги.
+- Диалог подтверждения называет N (`pluralRows(col.total)`) и говорит, что
+  строки видео и файлы на диске не трогаются; дефолт — отказ (`legalDialog`:
+  accept `disabled` до галки). Native `confirm()` для этих двух операций
+  убран: он не показывает ни число объектов, ни что остаётся. Прочие
+  `confirm()` окна (перенос файлов, хранилища, mesh) этим шагом не
+  заменены — это не разрушительные операции над выбором.
+- Кнопки `min-height: var(--target)` + `min-width: 84px`; select —
+  `min-width: 170px` + `height: var(--ctl-h-lg)` (прежний `max-width: 280px`
+  обрезал подпись на русском и английском расширении — замена №21).
 
 ### 3.8 Возрастной диалог (legal/18+)
 
@@ -788,7 +800,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 ```
 nav 264px (Библиотека · Источники · Очередь · Коллекции · Площадки · Настройки)
 content: toolbar (поиск/фильтры/вид/колонки) → chips → notice → scan
-         шапка колонок (вне скроллера) → виртуальное окно прокрутки → meta → sel-bar (sticky)
+         шапка колонок (вне скроллера) → виртуальное окно прокрутки → meta → sel-bar (вне скроллера, видима всегда)
 foot: счётчики · журнал (collapse)
 ```
 Плюсы: 6 равноправных секций как secondary navigation (Carbon порог «больше
@@ -819,7 +831,7 @@ sub-nav внутри Настроек и Площадок (табы/сегмен
 
 ```
 nav 264px + content; правая панель деталей 320px (открывается Enter на строке)
-sticky selection bar над content; workspace-контекст: коллекция + фильтры + выбор
+selection bar вне скроллера тела (видима всегда, источник №34); workspace-контекст: коллекция + фильтры + выбор
 журнал как collapsible bottom
 ```
 Плюсы: details без модального диалога (меньше фокус-ловушек), batch-опации
@@ -915,7 +927,7 @@ Escape, hover/keyboard, узкий экран.
 | 1 | **Токен-система**: новые токены цвета/отступов/радиуса/elevation/типографики/веяний; `--line-strong`, `--focus`, `--on-accent`, `--hover`, `--selected`, `--scrim`, `--log-*`; литералы в правилах заменены токенами | `ui_src/app.css` | `build_preview.py`: обе темы, контраст §5.1; `python -m unittest discover -s tests` без регрессий; гварды §7 intact |
 | 2 | **Плотность таблицы**: `--row-h` из токена, JS меряет его пробником (`getComputedStyle` не вычисляет `max()/calc` для custom property); hover/selected/focus состояния; `tabular-nums` на числовые ячейки; шапка вне скроллера и обычный регистр; `aria-sort` на columnheader + грид-семантика (`role="grid"/"rowgroup"/"row"/"gridcell"`, roving `tabindex="-1"`); `content-visibility: auto` + `contain-intrinsic-size` на `.row`; клавиатура строк (↑↓/Home/End, Enter — карточка, Ctrl+Enter — плеер, Space — выбор) и возврат фокуса при перерисовке окна | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py` (100k mock): прокрутка, сортировка, selection; `test_grid_view.py`, `test_ui_hidden.py`, `test_ui_grid.py` |
 | 3 | **Карточки каталога и плитки**: состояния через подпись + границу `--ok-line`/`--info-line`/`--err-line` (без `opacity` для текста, гасится только отказная обложка — замена №18); hover карточки и плитки через `--line-strong` + `--shadow-1`; play-кнопка плитки всегда видима 44×44 (замена №4); `role="radiogroup"` + `aria-checked` + underline на сегменте Библиотека/Каталог; `role="progressbar"` + `aria-valuenow/min/max` + `aria-valuetext` на полосе каталога (indet — без `valuenow`); карточка фокусируема (`tabindex="0"`, Enter — страница видео, Space — добавить); placeholder поиска без литерала имени площадки (замена №20); токены `--ctl-h`/`--tile-min` и контролы каталога на общей высоте | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py --first` (каталог): фокус карточки, Enter/Space, полоса с `aria-valuenow`, сегмент с `aria-checked`; `test_ui_catalog.py`, `test_ui_hidden.py`, `python -m unittest discover -s tests` |
-| 4 | **Панель выделения**: sticky `sel-bar` с `--shadow-2`, счётчик `aria-live`, `--target` и `--gap-cta` на кнопках, destructive последним + диалог подтверждения с N | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py`: мультивыбор на 120 строк; `test_bulk_ops.py` |
+| 4 | **Панель выделения**: `sel-bar` вне скроллера тела (sticky внутри flex-панели без scroll-root не работает — источник №34), фон `--surface`, граница `--line-strong` + `--shadow-2`; `role="toolbar"` + `aria-label`, счётчик `aria-live="polite"` без `aria-hidden`; порядок целей зафиксирован: групповые → «Пометить…» → «Перенести…» → «Операции…» → primary «Скачать» → «Снять выбор» → разрушительное «Удалить папку» (`.danger`) последней; кнопки на `--target` + `min-width`, соседние цели на `--gap-cta`, select на `min-width` вместо `max-width: 280px` (замена №21); разрушительные операции («Удалить папку», «Убрать все связи папки») идут через диалог приложения, который называет N и имеет дефолт-отказ, вместо native `confirm()` | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py`: мультивыбор (Space на строках) и папка-коллекция — полоса видима, порядок и `.danger` читаются, диалог называет N и accept `disabled` до галки; `test_ui_selbar.py`, `test_bulk_ops.py`, `test_ui_hidden.py`, `python -m unittest discover -s tests` |
 | 5 | **Карточка видео/аудио + диалог details/legal**: `aria-labelledby`, ловушка фокуса, Escape, возврат фокуса; action-ряд с `--ctl-h`; meta grid tabular; §3.8 дефолт отказа | `ui_src/app.css`, `ui_src/app.js`, `ui_src/index.html` | `build_preview.py`: открытие карточки с клавиатуры, Escape, Tab по кругу; `test_gui.py` |
 | 6 | **Настройки**: секции-карточки, `minmax()` вместо 260 px, хинты `--fs-sm` на `--surface`, `role="switch"`, числовые поля с `aria-describedby`, progressive disclosure для «Дополнительно», нейтральный текст хинтов колонок | `ui_src/app.css`, `ui_src/app.js` (+ правка текста хинта в `app/settings_schema.py` — только текст, не ключи) | `build_preview.py`: обе темы, RU/EN расширение; `test_settings_schema.py` |
 | 7 | **Веяния**: переходы из токенов §2.7, асимметричные вход/уход, глобальный `prefers-reduced-motion`, live-регионы тоста/статуса, `--focus-ring` на всех контролах и строках | `ui_src/app.css`, `ui_src/app.js` | `build_preview.py` + `prefers-reduced-motion` эмуляция; `python -m unittest discover -s tests`; diff «анимации только CSS» (`@keyframes` новые отсутствуют кроме уже имеющегося `cat-sweep`) |

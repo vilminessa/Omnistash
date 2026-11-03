@@ -118,8 +118,14 @@
         <button class="btn ghost" id="dedupe-note-btn">Разобрать</button>
       </div>
 
-      <div class="sel-bar" id="sel-bar" hidden>
-        <span id="sel-count">Выбрано: 0</span>
+      <!-- Панель мультивыбора (§3.7): групповые операции -> primary
+          «Скачать» -> «Снять выбор» последним; разрушительное («Удалить
+          папку») - в конце ряда, с диалогом подтверждения и N. Полоса
+          лежит вне скроллера тела, поэтому видима всегда (sticky внутри
+          flex-панели без scroll-root не работает - источник №34). -->
+      <div class="sel-bar" id="sel-bar" hidden
+           role="toolbar" aria-label="Действия над выбранными">
+        <span id="sel-count" aria-live="polite">Выбрано: 0</span>
         <span class="muted">Хранилище:</span>
         <select id="sel-storage" data-storage-select
                 title="Куда качать выбранные"></select>
@@ -130,9 +136,6 @@
                 title="Убрать выбранные из этой папки">Убрать из папки</button>
         <button class="btn ghost" id="sel-collect-rename" hidden
                 title="Переименовать папку">Переименовать…</button>
-        <button class="btn ghost" id="sel-collect-delete" hidden
-                title="Удалить папку (строки видео остаются)">Удалить папку</button>
-        <button class="btn ghost" id="sel-clear">Снять выбор</button>
         <button class="btn ghost" id="sel-mark"
                 title="Теги, рейтинг, «просмотрено» для выбранных">Пометить…</button>
         <button class="btn ghost" id="sel-move"
@@ -141,6 +144,11 @@
                 title="Теги, рейтинг, папка и удаление строк для выбранных">Операции…</button>
         <button class="btn primary" id="sel-download"
                 title="Одним действием в очередь; строки, где файл уже на месте, пропустим - они видны в сводке">Скачать</button>
+        <button class="btn ghost" id="sel-clear">Снять выбор</button>
+        <!-- Разрушительное действие не в одном ряду с обычными: последним
+            справа, диалог называет N (шаг 4, §3.7). -->
+        <button class="btn danger" id="sel-collect-delete" hidden
+                title="Удалить папку (строки видео остаются)">Удалить папку</button>
       </div>
 
       <!-- M17: операции над папкой-коллекцией целиком, без мультивыбора -->

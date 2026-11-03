@@ -86,8 +86,13 @@
 
   /* цели и контролы (§2.4): --ctl-h и --tile-min объявлены шагом 3 (§8) -
      компактные контролы тулбара каталога и минимальная ширина карточки;
-     --target, --gap-cta и --ctl-h-lg добавятся шагами 4/5 */
+     --target, --target-min, --ctl-h-lg и --gap-cta - шагом 4 (панель
+     выделения); шаг 1 вносил только шкалу отступов/радиуса/типографики/веяний */
   --ctl-h: 32px;           /* input/select/сегмент в компактном режиме */
+  --ctl-h-lg: 40px;        /* select в панели выделения (кнопки там --target) */
+  --target: 44px;          /* комфортная цель (WCAG 2.5.8 требует 24 min) */
+  --target-min: 24px;      /* нижняя граница цели для мелких контролов */
+  --gap-cta: 8px;          /* расстояние между соседними целями (было 2px) */
   --tile-min: 240px;       /* карточка каталога в сетке auto-fill (§3.3) */
 
   /* типографика (§2.5): --fs-cap допустим только на --surface/--surface-2,
@@ -1000,17 +1005,28 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 
 /* ---------------------------- панель выделения ------------------------ */
 
+/* Панель мультивыбора (§3.7): лежит вне скроллера тела - видима всегда
+   (sticky bottom внутри flex-панели без scroll-root не работает, источник
+   №34). Граница контрола --line-strong + --shadow-2: полоса читается как
+   отдельный слой над контентом; соседние цели разнесены --gap-cta (прежний
+   gap 10px и 2px в других рядах давали промахи - замена №21). */
 .sel-bar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--gap-cta);
   background: var(--surface);
-  border: 1px solid var(--accent);
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius);
-  padding: var(--s-3) var(--s-4);
+  box-shadow: var(--shadow-2);
+  padding: var(--s-2) var(--s-4);
   font-size: var(--fs-sm);
 }
-.sel-bar select { max-width: 280px; }
+/* Комфортная цель 44 px и min-width: текст подписей расширяется на
+   русском/английском, узкие кнопки не ловят промахи (замена №21). */
+.sel-bar .btn { min-height: var(--target); min-width: 84px; }
+/* select: min-width вместо прежнего max-width 280px - подпись «Куда качать»
+   не обрезается на русском/английском расширении. */
+.sel-bar select { min-width: 170px; height: var(--ctl-h-lg); }
 .c-check { display: flex; align-items: center; justify-content: center; }
 .row input.row-check { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
 /* Выбранная строка: тон --selected + левая полоса 3 px --accent - состояние

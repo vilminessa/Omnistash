@@ -1017,9 +1017,20 @@
   function purgeCollection() {
     var scope = state.scope || { type: "pool" };
     if (scope.type !== "collection") return;
-    if (!confirm("Убрать все связи из этой папки? Строки видео и файлы " +
-                 "на диске остаются.")) return;
-    runCollect("remove", null);   // target = папка целиком, без мультивыбора
+    // Тот же разрушительный диалог с N, что у «Удалить папку» (§3.7):
+    // native confirm не называет сколько связей снимает.
+    var col = collectionNode(scope.id);
+    var n = (col && col.total) || 0;
+    legalDialog(
+      "Убрать все связи из папки «" + ((col && col.name) || scope.id) + "»?",
+      "Снимаются связи папки целиком (" + pluralRows(n) + "): строки видео и " +
+      "файлы на диске остаются. Связи можно вернуть - «Операции…» или\n" +
+      "«В коллекцию…» для выбранных строк.",
+      "Подтверждаю: убрать связи папки (строки и файлы остаются)"
+    ).then(function (ok) {
+      if (!ok) { toast("Операция отменена", true); return; }
+      runCollect("remove", null);   // target = папка целиком, без мультивыбора
+    });
   }
 
   function bulkRemoveRows() {
@@ -2231,12 +2242,23 @@
         });
     });
     $("sel-collect-delete").addEventListener("click", function () {
-      if (!confirm("Удалить папку? Строки видео и файлы НЕ трогаются - "
-        + "убираются только связи.")) return;
-      call("collection_delete", { id: state.scope.id }).then(function () {
-        state.scope = { type: "pool" };
-        updateCollectionBar();
-        renderGrid(true);
+      // Разрушительное действие (§3.7): диалог называет N и дефолт - отказ
+      // (галка accept), native confirm не показывает ни N, ни откат.
+      var col = collectionNode(state.scope.id);
+      var n = (col && col.total) || 0;
+      legalDialog(
+        "Удалить папку «" + ((col && col.name) || state.scope.id) + "»?",
+        "Убираются только связи папки (" + pluralRows(n) + "): строки видео и " +
+        "файлы на диске НЕ трогаются. Папку можно создать снова - «В коллекцию…»\n" +
+        "или «Операции…» вернут связи выбранным строкам.",
+        "Подтверждаю: убрать папку (строки и файлы остаются)"
+      ).then(function (ok) {
+        if (!ok) { toast("Удаление папки отменено", true); return; }
+        call("collection_delete", { id: state.scope.id }).then(function () {
+          state.scope = { type: "pool" };
+          updateCollectionBar();
+          renderGrid(true);
+        });
       });
     });
   }
