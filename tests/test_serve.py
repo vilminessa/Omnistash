@@ -47,6 +47,7 @@ from cryptography.x509 import IPAddress, SubjectAlternativeName
 from app import i18n, settings_schema
 from app.gui import Api
 from app.http import audit as serve_audit
+from app.http import media as serve_media
 from app.http import scopes as serve_scopes
 from app.http import server as serve_http
 from app.http import tokens as serve_tokens
@@ -491,7 +492,10 @@ class ServeCase(unittest.TestCase):
         try:
             handler = server._httpd.RequestHandlerClass
             self.assertEqual(handler.rate_bps, 1_000_000)
-            self.assertEqual(handler.watchers_max, 3)
+            self.assertEqual(handler.watchers.limit, 3,
+                             "serve_watchers_max не дошёл до обработчика")
+            # Счётчик один на весь сервер: новые соединения не получают своего.
+            self.assertIsInstance(handler.watchers, serve_media.Watchers)
         finally:
             server.stop()
 

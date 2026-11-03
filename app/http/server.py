@@ -31,6 +31,7 @@ from .. import i18n
 from ..mesh import channel as channel_mod
 from ..mesh import pacing
 from ..ui import build_page
+from . import media
 from . import scopes
 from . import tls
 from .audit import Audit
@@ -40,6 +41,31 @@ from .tokens import TokenStore, TokenStoreError
 MAX_BODY_BYTES = 1_000_000
 CHUNK = 256 * 1024
 HANDSHAKE_TIMEOUT = channel_mod.HANDSHAKE_TIMEOUT
+
+# Байтовые маршруты (§3): путь -> (маршрут, id). `/hls` добавляется в S3,
+# сейчас он отвечает честным 501 «ещё не построен».
+BYTE_ROUTES = ("thumb", "media", "subs", "hls")
+
+
+def route_scope(route: str) -> str:
+    """Право байтового маршрута (§4): обложка - read, медиа и субтитры - watch.
+
+    Один источник правды для GET-маршрутов: `/thumb` не путается с `/media`,
+    и тест сверяет эту карту со списком скоупов.
+    """
+    if route == "thumb":
+        return "read"
+    if route in ("media", "subs", "hls"):
+        return "watch"
+    return ""
+
+
+def byte_route(path: str) -> tuple[str, str]:
+    """/media/12 -> ("media", "12"); чужой путь -> ("", путь)."""
+    parts = path.strip("/").split("/", 1)
+    if len(parts) == 2 and parts[0] in BYTE_ROUTES:
+        return parts[0], parts[1]
+    return "", path
 
 
 class ServeError(Exception):
@@ -124,8 +150,9 @@ class _Handler(BaseHTTPRequestHandler):
     audit = None              # http.audit.Audit
     page = b""                # страница с меткой сервера (строится при старте)
     rate_bps = 0              # 0 = без ограничения отдачи
-    watchers_max = 0          # 0 = без лимита зрителей (байтовые маршруты, S2/S3)
+    watchers = None           # http.media.Watchers (зрители, S2/S3)
     language = staticmethod(lambda: "ru")   # язык подписей сервера
+    _head_only = False        # HEAD: заголовки без тела (плеер спрашивает Range)
 
     def log_message(self, *args) -> None:   # noqa: D102 - в stderr не пишем
         pass
@@ -166,6 +193,101 @@ class _Handler(BaseHTTPRequestHandler):
             payload["code"] = key
         self._json(code, payload)
 
+    # -- помощники для http.media --------------------------------------------
+
+    def addr(self) -> str:
+        return str(self.client_address[0]) if self.client_address else "-"
+
+    @property
+    def token_label(self) -> str:
+        return getattr(self, "_token_label", "")
+
+    def text(self, key: str) -> str:
+        return i18n.t(key, self.language()) or key
+
+    def _record(self, name: str, code: int, scope: str = "", note: str = "") -> None:
+        self.audit.record(name, code, self.addr(), key_label=self.token_label,
+                          scope=scope, note=note)
+
+    def respond_problem(self, code: int, message: str, key: str = "",
+                        target: str = "", note: str = "", route: str = "") -> None:
+        """Честный отказ байтового маршрута: причина в теле, журнал раньше ответа.
+
+        Ни пустой картинки, ни пустого трека, ни «отдали целиком» вместо
+        битого Range: 404/415/416/429/501 называют то, что не найдено или
+        почему отказали (docs/SERVER-CLIENT.md §3).
+        """
+        self._record(f"{route or key} {target}".strip(), code,
+                     scope=route_scope(route), note=note or key)
+        self._error(code, message, key)
+
+    def write(self, code: int, body: bytes, content_type: str,
+              extra: dict | None = None, route: str = "", scope: str = "",
+              target: str = "") -> None:
+        """Ответ с телом (или только заголовки для HEAD)."""
+        self._record(f"{route or 'page'} {target}".strip(), code, scope=scope,
+                     note=f"{len(body)} байт")
+        if self._head_only:
+            self._headers(code, content_type, len(body), extra)
+            return
+        self._write(code, body, content_type, extra)
+
+    def send_file(self, path: str, start: int, length: int, content_type: str,
+                  extra: dict | None = None, route: str = "", scope: str = "",
+                  target: str = "", status: int = 200) -> None:
+        """Отдать файл (или часть) чанками под лимит скорости.
+
+        Раздача прервана клиентом - не авария сервера; файл, пропавший в
+        середине раздачи, называется причиной, а не «додаётся молча».
+        """
+        self._record(f"{route} {target}".strip(), status, scope=scope,
+                     note=f"{length} байт")
+        self._headers(status, content_type, length, extra)
+        if self._head_only or length <= 0:
+            return
+        limiter = pacing.RateLimiter(self.rate_bps)
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(start)
+                left = length
+                while left > 0:
+                    piece = handle.read(min(CHUNK, left))
+                    if not piece:
+                        break
+                    self.wfile.write(piece)
+                    limiter.consume(len(piece))
+                    left -= len(piece)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except OSError as exc:
+            self.log(f"Раздача {route} {target}: файл не читается: {exc}")
+
+    def _headers(self, code: int, content_type: str, length: int,
+                 extra: dict | None = None) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(length))
+        for name, value in (extra or {}).items():
+            self.send_header(name, value)
+        self.end_headers()
+
+    def _authorize(self, name: str, scope: str) -> bool:
+        """Ключ и право для байтового маршрута. False - отказ уже отвечен."""
+        token = self.tokens.verify(self._bearer()) if self.tokens else None
+        if token is None:
+            self._answer(401, {"error": self.text("http.pairing"),
+                               "code": "pairing"}, name=name)
+            return False
+        self._token_label = token.label
+        if scope not in token.scopes:
+            self._answer(403, {"error": self.text("http.scope_denied") + " " + scope,
+                               "code": "scope", "scope": scope},
+                         name=name, scope=scope, label=token.label)
+            return False
+        return True
+
+    # -- маршруты ------------------------------------------------------------
+
     def _answer(self, code: int, payload, name: str = "", scope: str = "",
                 label: str = "", note: str = "") -> None:
         """Записать обращение в журнал и ответить.
@@ -174,33 +296,49 @@ class _Handler(BaseHTTPRequestHandler):
         пустой журнал (гонка между потоками), и «кто что спросил» пропал бы
         при обрыве соединения в середине раздачи.
         """
-        self.audit.record(name or (self.path or "-"), code, self._addr(),
+        self.audit.record(name or (self.path or "-"), code, self.addr(),
                           key_label=label, scope=scope, note=note)
         self._json(code, payload)
 
-    def _addr(self) -> str:
-        return str(self.client_address[0]) if self.client_address else "-"
-
-    def _text(self, key: str) -> str:
-        return i18n.t(key, self.language()) or key
-
-    # -- маршруты ------------------------------------------------------------
-
     def do_GET(self) -> None:  # noqa: N802 - имя из http.server
+        self._head_only = False
+        self._route()
+
+    def do_HEAD(self) -> None:  # noqa: N802 - плеер спрашивает длину и Range
+        self._head_only = True
+        self._route()
+
+    def _route(self) -> None:
         path = (self.path or "").partition("?")[0]
         try:
             if path in ("/", "/index.html"):
-                self.audit.record("page", 200, self._addr())
+                self._record("page", 200)
                 self._write(200, self.page, "text/html; charset=utf-8",
                             {"Cache-Control": "no-store"})
                 return
             if path.startswith("/api/"):
                 # Тот же контракт, что окну: вызов метода - POST.
-                self._answer(405, {"error": self._text("http.post_only"),
-                                   "code": "http"},
-                             name=path[len("/api/"):])
+                self._answer(405, {"error": self.text("http.post_only"),
+                                   "code": "http"}, name=path[len("/api/"):])
                 return
-            self._answer(404, {"error": self._text("http.missing"),
+            route, target = byte_route(path)
+            if route:
+                # Право проверяется до раздачи байтов: карта прав одна
+                # (route_scope), отказ уже назван в _authorize.
+                if not self._authorize(f"{route} {target}", route_scope(route)):
+                    return
+                if route == "thumb":
+                    media.send_thumb(self, target)
+                elif route == "media":
+                    media.send_media(self, target)
+                elif route == "subs":
+                    media.send_subs(self, target)
+                else:
+                    # Конвейер HLS строится в S3: отказ называет причину, а не молчит.
+                    self.respond_problem(501, self.text("http.route_pending"),
+                                         "hls", target=target, route="hls")
+                return
+            self._answer(404, {"error": self.text("http.missing"),
                                "code": "missing"}, name=path)
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -213,25 +351,26 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - имя из http.server
         path = (self.path or "").partition("?")[0]
         name = path[len("/api/"):] if path.startswith("/api/") else ""
-        addr = self._addr()
+        addr = self.addr()
         try:
             if not name:
-                self._answer(404, {"error": self._text("http.missing"),
+                self._answer(404, {"error": self.text("http.missing"),
                                    "code": "missing"}, name="-")
                 return
 
             token = self.tokens.verify(self._bearer()) if self.tokens else None
             if token is None:
                 # Ключа нет или он не из нашего реестра: привязка не завершена.
-                self._answer(401, {"error": self._text("http.pairing"),
+                self._answer(401, {"error": self.text("http.pairing"),
                                    "code": "pairing"}, name=name)
                 return
             label = token.label
+            self._token_label = label
 
             if scopes.is_native(name):
                 # Сервер не может открыть диалог на чужой машине: подпись,
                 # а не молчание (тост читает res.error как есть).
-                self._answer(403, {"error": self._text("http.desktop"),
+                self._answer(403, {"error": self.text("http.desktop"),
                                    "code": "desktop", "target": name},
                              name=name, scope="desktop", label=label)
                 return
@@ -240,13 +379,13 @@ class _Handler(BaseHTTPRequestHandler):
             if scope is None:
                 # Цели нет по HTTP (локальная или внутренняя) - честный 404.
                 code = "local" if scopes.is_local(name) else "missing"
-                self._answer(404, {"error": self._text("http.missing"),
+                self._answer(404, {"error": self.text("http.missing"),
                                    "code": code, "target": name},
                              name=name, scope=code, label=label)
                 return
 
             if scope not in token.scopes:
-                self._answer(403, {"error": self._text("http.scope_denied") + " " + scope,
+                self._answer(403, {"error": self.text("http.scope_denied") + " " + scope,
                                    "code": "scope", "scope": scope},
                              name=name, scope=scope, label=label)
                 return
@@ -287,7 +426,7 @@ class _Handler(BaseHTTPRequestHandler):
                 if not piece:
                     break
                 left -= len(piece)
-            return None, None, {"error": self._text("http.body_too_large") +
+            return None, None, {"error": self.text("http.body_too_large") +
                                 f" ({MAX_BODY_BYTES} байт)", "code": "too_large"}
         raw = self.rfile.read(length) if length else b""
         if not raw.strip():
@@ -295,20 +434,20 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            return None, None, {"error": self._text("http.bad_body") + f": {exc}",
+            return None, None, {"error": self.text("http.bad_body") + f": {exc}",
                                 "code": "bad_json"}
         if isinstance(payload, list):
             return payload, {}, None          # позиционные аргументы (как pywebview)
         if isinstance(payload, dict):
             return [], payload, None          # именованные аргументы
-        return None, None, {"error": self._text("http.bad_body") +
+        return None, None, {"error": self.text("http.bad_body") +
                             f": {type(payload).__name__}", "code": "bad_json"}
 
     def _dispatch(self, name: str) -> tuple[int, object, str]:
         """Вызвать метод фасада и вернуть (код, тело, заметку для аудита)."""
         method = getattr(self.api, name, None)
         if method is None or not callable(method) or scopes.is_internal(name):
-            return 404, {"error": self._text("http.missing"),
+            return 404, {"error": self.text("http.missing"),
                          "code": "missing", "target": name}, ""
 
         args, kwargs, problem = self._body()
@@ -354,6 +493,7 @@ class ServeServer:
         self._port = 1001 if port is None else int(port)
         self._rate_bps = int(rate_bps or 0)
         self._watchers_max = int(watchers_max or 0)
+        self._watchers = media.Watchers(self._watchers_max)
         self._log = log or (lambda message: None)
         # Реестр токенов и журнал читаются лениво - при первом старте: битый
         # файл токенов не должен ронять окно (Api строится до слушателя), а
@@ -403,7 +543,10 @@ class ServeServer:
             "audit": self._audit,
             "page": page,
             "rate_bps": self._rate_bps,
-            "watchers_max": self._watchers_max,
+            # Счётчик зрителей живёт вместе с сервером: обработчики новых
+            # соединений не получают своего счётчика (иначе лимит зрителей
+            # считался бы «на соединение»).
+            "watchers": self._watchers,
             "language": staticmethod(self._language),
         })
         httpd = _ServeServer((self._bind, self._port), handler)

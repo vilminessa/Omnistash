@@ -290,6 +290,17 @@ _TEXTS: dict = {
                           "en": "DPAPI could not encrypt the tokens"},
     "http.tokens_limit": {"ru": "ключей достигнут лимит - сначала отзовите лишний",
                           "en": "key limit reached - revoke an extra key first"},
+    # Подписи байтовых маршрутов (§3, S2): что не найдено и почему отказали.
+    "http.thumb_missing": {"ru": "обложка не найдена", "en": "thumbnail not found"},
+    "http.file_missing": {"ru": "файл не найден или пропал с диска",
+                          "en": "file not found or gone from disk"},
+    "http.subs_missing": {"ru": "субтитры не найдены", "en": "subtitles not found"},
+    "http.subs_format": {"ru": "формат субтитров браузер не читает",
+                         "en": "the browser cannot read this subtitle format"},
+    "http.range": {"ru": "запрошенная часть файла не читается",
+                   "en": "the requested byte range is not readable"},
+    "http.route_pending": {"ru": "этот маршрут ещё не построен (следующий шаг)",
+                           "en": "this route is not built yet (next step)"},
 }
 
 _BY_KEY = dict(_TEXTS)
