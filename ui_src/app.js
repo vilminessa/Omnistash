@@ -391,9 +391,10 @@
     var headers = { "Content-Type": "application/json" };
     var token = httpToken();
     if (token) headers.Authorization = "Bearer " + token;
-    // Как с pywebview: аргумент без значения - пустой объект, чтобы метод
-    // без параметров не получил лишний позиционный null.
-    var body = (arg === undefined || arg === null) ? "{}" : JSON.stringify(arg);
+    // Как с pywebview: аргумент едет позиционным списком ([arg]) - сервер
+    // вызывает тот же фасад Api тем же способом, что окно. Аргумента нет -
+    // пустой объект, чтобы метод без параметров не получил лишний null.
+    var body = (arg === undefined || arg === null) ? "{}" : JSON.stringify([arg]);
     var target = httpBaseUrl() + "/api/" + name;
     return fetch(target, {
       method: "POST", headers: headers, body: body, credentials: "same-origin"
@@ -6784,6 +6785,10 @@
       mesh_enabled: false, mesh_peers: "", mesh_port: 1000, mesh_upnp: true,
       mesh_encrypt: false, mesh_mdns: true, mesh_strict: false, mesh_nick: "",
       mesh_max_mb: 10, mesh_rate_mbit: 10,
+      // SV-C S1: доступ по HTTPS - те же ключи и значения по умолчанию, что
+      // в app/settings_schema.py (слушатель по умолчанию выключен).
+      serve_enabled: false, serve_bind: "loopback", serve_port: 1001,
+      serve_rate_mbit: 10, serve_watchers_max: 4, serve_hls_transcode: false,
       output_template: "%(channel)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s",
       quality: "high", subtitles: "none", transcode: "none",
       view_mode: "list", tile_size: "medium",
@@ -6873,12 +6878,36 @@
         hint: "Russian by default; English is the second language." },
       show_adult_tab: { label: "Show the adult site tab",
         hint: "Off by default: the adult site tab appears only after an " +
-              "explicit 18+ confirmation. The flag does not bypass 18+ gates." }
+              "explicit 18+ confirmation. The flag does not bypass 18+ gates." },
+      // SV-C S1: подписи новых полей доступа по HTTPS - те же английские
+      // названия, что в app/i18n.py (подсказки в превью сокращены намеренно).
+      serve_enabled: { label: "HTTPS access (--serve)",
+        hint: "The same process opens an HTTPS listener next to the window; " +
+              "the database and storages stay on the server. Off by default: " +
+              "rights come from scopes on the access key." },
+      serve_bind: { label: "Where to bind the listener",
+        hint: "Only \"this computer\" (127.0.0.1) now: nothing leaves the " +
+              "machine. LAN, Tailscale and a plain port come with consent." },
+      serve_port: { label: "Client HTTP server port",
+        hint: "TLS on this port; keep it outside the DPI interception zone " +
+              "(1024-65535, 80/443) - 1001 by default, next to mesh 1000." },
+      serve_rate_mbit: { label: "Client delivery limit, Mbit/s",
+        hint: "Delivery to a client is no faster than this; 0 means no limit." },
+      serve_watchers_max: { label: "Max concurrent viewers",
+        hint: "How many clients may play at once; over the limit the server " +
+              "says so honestly. 0 means no limit." },
+      serve_hls_transcode: { label: "Transcode video for the browser",
+        hint: "Re-encoding HEVC/VP9/AV1 burns CPU and quality: off by " +
+              "default, the refusal names the codec." }
     };
     var MOCK_SECTIONS_EN = {
       "Библиотека": "Library", "Загрузка": "Downloads", "Mesh": "Mesh",
       "Расписание": "Schedule", "Аккаунт Google": "Google account",
-      "Внешний вид": "Appearance", "Прочее": "Other"
+      "Метаданные API": "Metadata API",
+      "Внешний вид": "Appearance", "Прочее": "Other",
+      "Доступ по HTTPS": "HTTPS access",
+      // Название вторичного слоя: его рисует превью, а schema его не присылает.
+      "Дополнительно": "Advanced"
     };
     // Стеки шрифта и расчёт строк списка - те же значения, что app/themes.py.
     var MOCK_FONT_STACKS = FONT_STACKS;
@@ -7199,6 +7228,42 @@
         action: "peer-dialog",
         action_label: "Профиль и поиск участников…",
         transient: true, default: [] },
+      { key: "serve_enabled", type: "bool", section: "Доступ по HTTPS",
+        label: "Доступ по HTTPS (--serve)",
+        hint: "Тот же процесс поднимает HTTPS-слушатель рядом с окном; база " +
+              "и хранилища остаются у сервера. По умолчанию выключено: " +
+              "включение - согласие, права клиента задаются скоупами на " +
+              "ключе, обращения пишутся в журнал аудита.",
+        default: false },
+      { key: "serve_bind", type: "choice", section: "Доступ по HTTPS",
+        label: "Куда привязать слушатель",
+        choices: [["loopback", "Только этот компьютер (127.0.0.1)"]],
+        hint: "Сейчас только «этот компьютер»: наружу ничего не уходит. " +
+              "LAN, Tailscale и обычный порт с allowlist - следующим шагом " +
+              "с тем же согласием «что уходит наружу».",
+        default: "loopback" },
+      { key: "serve_port", type: "int", section: "Доступ по HTTPS",
+        label: "Порт HTTP-сервера клиента",
+        hint: "TLS на этом порту; при занятости слушатель не поднимется " +
+              "(причина в журнале). Вне зоны перехвата DPI-утилит " +
+              "(zapret и подобные: 1024-65535/80/443) - рекомендуется " +
+              "444-1023, по умолчанию 1001 рядом с mesh 1000.",
+        min: 100, max: 65535, default: 1001 },
+      { key: "serve_rate_mbit", type: "int", section: "Доступ по HTTPS",
+        label: "Ограничение отдачи клиенту, Мбит/с",
+        hint: "Отдача клиенту не быстрее этого (по умолчанию 10); " +
+              "0 - без ограничения. Тот же ограничитель, что у mesh-сервера.",
+        min: 0, max: 10000, default: 10 },
+      { key: "serve_watchers_max", type: "int", section: "Доступ по HTTPS",
+        label: "Одновременных зрителей, максимум",
+        hint: "Сколько клиентов играют одновременно; сверх лимита - честный " +
+              "«сервер ограничил отдачу». 0 - без лимита.",
+        min: 0, max: 64, default: 4 },
+      { key: "serve_hls_transcode", type: "bool", section: "Доступ по HTTPS",
+        label: "Перекодировать видео для браузера",
+        hint: "Ре-encode HEVC/VP9/AV1 жрёт CPU и качество: по умолчанию " +
+              "выключено, отказ называет кодек.",
+        default: false },
       { key: "output_template", type: "str", section: "Загрузка",
         label: "Шаблон имени и пути",
         hint: "Синтаксис yt-dlp (%(title)s, %(id)s, ...). Часть [%(id)s] в " +

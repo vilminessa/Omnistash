@@ -20,7 +20,7 @@ import re
 import unittest
 from pathlib import Path
 
-from app import settings, settings_schema
+from app import i18n, settings, settings_schema
 
 SRC = Path(__file__).resolve().parent.parent
 JS = SRC / "ui_src" / "app.js"
@@ -230,6 +230,50 @@ class TestSettingsMirror(unittest.TestCase):
         # Подсказка склеена из двух литералов - сверяем обе части.
         self.assertIn("значение сохранено в профиле и скрыто от ", self.text)
         self.assertIn("окна; впишите новое, чтобы заменить", self.text)
+
+    def test_second_language_card_matches_the_dictionary(self):
+        """Английская карточка превью рисует те же подписи, что настоящее окно.
+
+        Окно берёт английские подписи полей и названий разделов из app/i18n.py
+        (`schema_labels`/`sections`), превью - из своих карт MOCK_LABELS_EN и
+        MOCK_SECTIONS_EN. Расхождение показало бы в превью другой английский,
+        чем человек видит в окне, и проверка переключения языка в превью
+        стала бы пустой.
+        """
+        labels_block = re.search(r"var MOCK_LABELS_EN\s*=\s*\{(.*?)\n    \};",
+                                 self.text, re.DOTALL)
+        assert labels_block, "в превью нет карты английских подписей полей"
+        sections_block = re.search(r"var MOCK_SECTIONS_EN\s*=\s*\{(.*?)\};",
+                                   self.text, re.DOTALL)
+        assert sections_block, "в превью нет карты английских названий разделов"
+
+        mock_labels = {}
+        for match in re.finditer(r"([a-z_]+):\s*\{([^{}]*)\}", labels_block.group(1)):
+            label = re.search(r'label:\s*"([^"]+)"', match.group(2))
+            mock_labels[match.group(1)] = label.group(1) if label else ""
+        window_labels = i18n.schema_labels("en")
+        self.assertTrue(window_labels, "словарь не покрывает английский карточки")
+        for key, item in sorted(window_labels.items()):
+            self.assertIn(key, mock_labels, f"{key}: превью не переводит это поле")
+            self.assertEqual(mock_labels[key], item["label"],
+                             f"{key}: английская подпись в превью ≠ словарю окна")
+
+        mock_sections = dict(re.findall(r'"([^"]+)"\s*:\s*"([^"]+)"',
+                                        sections_block.group(1)))
+        window_sections = i18n.sections("en")
+        names = {field["section"] for field in settings_schema.schema()
+                 if field["section"]}
+        # Вторичный слой («Дополнительно») схема не присылает: его имя рисует
+        # код превью из своего списка - оно тоже обязано совпадать с окном.
+        extra = re.search(r'var EXTRA_NAME = "([^"]+)"', self.text)
+        assert extra, "имя вторичного слоя пропало из превью"
+        names.add(extra.group(1))
+        for name in sorted(names):
+            self.assertIn(name, mock_sections,
+                          f"раздел «{name}» не переведён в превью: окно на "
+                          "английском показывает одно имя, превью - другое")
+            self.assertEqual(mock_sections[name], window_sections[name],
+                             f"раздел «{name}»: английский в превью ≠ словарю")
 
     def test_poll_signature_is_cheap(self):
         """Сигнатура снимка не строит JSON больших ключей на каждый тик."""

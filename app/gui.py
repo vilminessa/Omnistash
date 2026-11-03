@@ -52,6 +52,7 @@ from .mesh import mdns as mesh_mdns
 from .mesh import nat as mesh_nat
 from .mesh import pacing as mesh_pacing
 from .mesh import server as mesh_server
+from .http import server as serve_http
 from .db import SYNC_MODES, Database
 from .metadata import normalize_video, video_url
 from .paths import log_path, profile_dir
@@ -283,6 +284,19 @@ class Api:
         # Health-check устройств (1.4): фоновый TLS-probe, живёт при
         # включённом участии.
         self._health = None
+        # Доступ по HTTPS (SV-C S1): тот же процесс и тот же фасад Api, только
+        # по сети. База, хранилища и очередь остаются здесь - слушатель ничего
+        # не «переезжает». Поднимается ТОЛЬКО при включённом serve_enabled
+        # (согласие человека), права решает токен со скоупами (app/http/scopes.py).
+        self._serve_bind = serve_http.bind_address(config0.get("serve_bind"))
+        self._serve_port = int(config0.get("serve_port") or 1001)
+        self._serve_limits = (mesh_pacing.mbit_to_bps(config0.get("serve_rate_mbit")),
+                              int(config0.get("serve_watchers_max") or 0))
+        self._serve_server = serve_http.ServeServer(
+            self, bind=self._serve_bind, port=self._serve_port,
+            rate_bps=self._serve_limits[0], watchers_max=self._serve_limits[1],
+            log=self._log, language=self._ui_language)
+        self._serve_dpi_hinted = False   # подсказка про зону перехвата: раз
         # Аккаунт Google: окно входа живёт отдельно от главного.
         self._login_window = None
         self._login_cancel = threading.Event()
@@ -295,6 +309,9 @@ class Api:
         self._log("Индекс открыт: " + str(self.db.path))
         # Mesh-сервер: поднимется только если участник уже включался.
         self._mesh_apply()
+        # Доступ по HTTPS: поднимется только если человек уже включил
+        # serve_enabled (согласие). По умолчанию выключен - слушателя нет.
+        self._serve_apply()
         # Версия сборки: в журнале всегда видно, что за exe работает
         # (значение одно на весь проект - app.__version__).
         self._log(f"Omnistash {__version__}")
@@ -1456,6 +1473,110 @@ class Api:
             pass
 
     # ------------------------------------------------------------------ #
+    #  SV-C S1: доступ по HTTPS (docs/SERVER-CLIENT.md §3, §7)
+    # ------------------------------------------------------------------ #
+
+    def _serve_apply(self) -> None:
+        """Поднять/остановить HTTPS-слушатель клиента (тот же процесс).
+
+        Сервер не имеет своей базы и очереди: он вызывает тот же фасад `Api`,
+        что окно, поэтому запись идёт теми же воркерами, что в окне. Флаг
+        `serve_enabled` - согласие человека: без него слушатель не поднимается
+        вовсе (наружу ничего не уходит).
+
+        Смена адреса или порта = новый слушатель (адрес должен быть стабилен
+        для клиента), смена лимитов = перезапуск: они живут в обработчике
+        соединений. Отказ старта (порт занят, TLS-материал не построен, файл
+        токенов не читается) - строка в журнале с причиной, окно не падает.
+        """
+        config = self._current_settings()
+        want = bool(config.get("serve_enabled"))
+        bind = serve_http.bind_address(config.get("serve_bind"))
+        port = int(config.get("serve_port") or 1001)
+        limits = (mesh_pacing.mbit_to_bps(config.get("serve_rate_mbit")),
+                  int(config.get("serve_watchers_max") or 0))
+        if (bind, port) != (self._serve_bind, self._serve_port):
+            if self._serve_server.running:
+                self._serve_server.stop()
+                self._log("Доступ по HTTPS: перезапуск - изменился адрес "
+                          "или порт")
+            self._serve_server = serve_http.ServeServer(
+                self, bind=bind, port=port, rate_bps=limits[0],
+                watchers_max=limits[1], log=self._log,
+                language=self._ui_language)
+            self._serve_bind, self._serve_port = bind, port
+            self._serve_limits = limits
+            self._serve_dpi_hinted = False
+        elif self._serve_limits != limits:
+            if self._serve_server.running:
+                self._serve_server.stop()
+                self._log("Доступ по HTTPS: перезапуск - изменился лимит "
+                          "отдачи или зрителей")
+            self._serve_server = serve_http.ServeServer(
+                self, bind=self._serve_bind, port=self._serve_port,
+                rate_bps=limits[0], watchers_max=limits[1], log=self._log,
+                language=self._ui_language)
+            self._serve_limits = limits
+        if want:
+            # Подсказка про зону перехвата DPI: тот же приём, что mesh-порт -
+            # выключать программу не просим, говорим, что порт вне зоны.
+            if not self._serve_dpi_hinted and mesh_firewall.in_dpi_zone(port):
+                self._serve_dpi_hinted = True
+                threading.Thread(target=self._serve_dpi_warn, args=(port,),
+                                 daemon=True,
+                                 name="omnistash-serve-dpi-hint").start()
+            if not self._serve_server.running:
+                try:
+                    self._serve_server.start()
+                    keys = self._serve_server.tokens_state().get("count", 0)
+                    self._log(f"Доступ по HTTPS поднят: "
+                              f"{self._serve_server.base_url()} (TLS, слушает "
+                              f"{self._serve_bind}; права на ключе, "
+                              f"ключей: {keys})")
+                except Exception as exc:  # noqa: BLE001 - старта нет = наружу тихо
+                    self._log(f"Доступ по HTTPS не поднят (порт {port}): {exc}")
+        elif self._serve_server.running:
+            self._serve_server.stop()
+            self._log("Доступ по HTTPS остановлен")
+
+    def _serve_dpi_warn(self, port: int) -> None:
+        """Порт HTTPS в зоне перехвата DPI? Сказать честно, не мешая."""
+        try:
+            if mesh_firewall.dpi_running():
+                self._log(
+                    f"Совместимость: обнаружен DPI-перехватчик "
+                    f"(zapret/winws), а порт HTTPS {port} - в зоне их "
+                    "перехвата (1024-65535/80/443). Выключать программу "
+                    "НЕ нужно: либо смените порт на 1001 (вне зоны, настройка "
+                    "«Порт HTTP-сервера клиента»), либо добавьте его в "
+                    "исключения её конфига.")
+        except Exception:  # noqa: BLE001 - подсказка не должна валить
+            pass
+
+    def _serve_state(self) -> dict:
+        """Состояние доступа по HTTPS (приватное: публичную цель не изобретаем).
+
+        Нужен `--serve` и журналу: человек видит, поднят ли слушатель, где он
+        слушает и сколько ключей живёт. Значений токенов здесь нет - только
+        метки и скоупы (`Token.public`).
+        """
+        config = self._current_settings()
+        running = self._serve_server.running
+        state = self._serve_server.tokens_state()
+        return {
+            "enabled": bool(config.get("serve_enabled")),
+            "running": running,
+            "url": self._serve_server.base_url() if running else "",
+            "bind": self._serve_bind,
+            "port": self._serve_port,
+            "rate_mbit": int(config.get("serve_rate_mbit") or 0),
+            "watchers_max": int(config.get("serve_watchers_max") or 0),
+            "tokens": state.get("tokens") or [],
+            "count": int(state.get("count") or 0),
+            "error": state.get("error") or "",
+        }
+
+    # ------------------------------------------------------------------ #
     #  B4: mDNS-объявление и поиск участников в LAN
     # ------------------------------------------------------------------ #
 
@@ -1696,6 +1817,11 @@ class Api:
                     "mesh_max_mb", "mesh_rate_mbit"):
             # Согласие/порт/лимиты - сервер и проброс следуют сразу.
             self._mesh_apply()
+        if key in ("serve_enabled", "serve_bind", "serve_port",
+                   "serve_rate_mbit", "serve_watchers_max"):
+            # Согласие/адрес/порт/лимиты - слушатель клиента следует сразу:
+            # человек включил или выключил доступ в этом же сохранении.
+            self._serve_apply()
         if key == "mesh_nick":
             # Смена ника объявляется сразу (при включённом участии):
             # другие участники увидят новый адрес без перезапуска.
@@ -5092,6 +5218,9 @@ class Api:
         self._mesh_dht.stop_sync()
         mesh_dht.set_current(None)
         self._nat_stop()
+        # Слушатель клиента снимаем вместе с процессом: порт не должен
+        # остаться живым после выхода окна (и журнал аудита дописывается).
+        self._serve_server.stop()
         self.dl.wait(timeout=15)
         self.db.close()
 
@@ -5144,8 +5273,16 @@ def headless_sync() -> int:
         api.close()
 
 
-def run() -> int:
-    """Открыть окно. Код возврата != 0 - окно не поднялось."""
+def run(serve: bool = False) -> int:
+    """Открыть окно. Код возврата != 0 - окно не поднялось.
+
+    `serve=True` (`omnistash.py --serve`) - тот же процесс и то же окно,
+    только добавляется HTTPS-слушатель клиента (docs/SERVER-CLIENT.md §2):
+    сервер остаётся единственным владельцем базы, хранилищ и очереди.
+    Слушатель поднимается исключительно при включённом `serve_enabled`
+    (согласие человека); когда флаг выключен, причина пишется честно -
+    «не поднят», а не молчание.
+    """
     if hasattr(sys.stdout, "reconfigure"):
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -5172,6 +5309,23 @@ def run() -> int:
             background_color="#0c1622",
         )
         api.bind_window(window)
+        if serve:
+            # Что человек должен увидеть в терминале планировщика: поднят ли
+            # слушатель, где и сколько ключей живёт. Ключи выдаёт pairing
+            # (шаг S6), поэтому без ключа сервер отвечает 401 - это правда,
+            # а не «доступ готов».
+            state = api._serve_state()
+            if state["running"]:
+                print(f"Доступ по HTTPS: {state['url']} "
+                      f"(ключей: {state['count']}, привязка - шаг S6, "
+                      "без ключа сервер отвечает 401 «привязка не завершена»)")
+            elif state["error"]:
+                print(f"Доступ по HTTPS не поднят: {state['error']}",
+                      file=sys.stderr)
+            else:
+                print("Доступ по HTTPS не поднят: включите «Доступ по HTTPS» "
+                      "в настройках (serve_enabled); окно работает как обычно",
+                      file=sys.stderr)
         webview.start(debug="--debug" in sys.argv)
     except Exception as exc:  # noqa: BLE001 - окно не поднялось, но причина видна
         print(f"Окно не открылось: {exc}", file=sys.stderr)

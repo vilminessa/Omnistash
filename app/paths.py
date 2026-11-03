@@ -96,3 +96,20 @@ def platform_tokens_path() -> Path:
     (google_auth.encrypt): без учётки Windows файл бесполезен.
     """
     return profile_dir() / "platform_tokens.bin"
+
+
+def serve_tokens_path() -> Path:
+    """Зашифрованный (DPAPI) реестр токенов доступа HTTP-клиента (SV-C, S1).
+
+    Скоупы ключа - право читать/качать/менять: plaintext на диске означал бы
+    доступ для любого, кто получил файл профиля.
+    """
+    return profile_dir() / "serve_tokens.bin"
+
+
+def serve_audit_path() -> Path:
+    """Журнал обращений HTTP-сервера: ключ -> метод -> код -> адрес (S1).
+
+    Не секрет: метки токенов и коды ответов, без значений токенов и путей.
+    """
+    return profile_dir() / "serve_audit.log"

@@ -8,6 +8,9 @@
     python omnistash.py --scan     # переиндексация без окна (для watchdog)
     python omnistash.py --sync     # синхронизация + очередь, без окна
                                   # (для планировщика Windows)
+    python omnistash.py --serve    # окно + HTTPS-слушатель клиента: слушатель
+                                  # поднимается только при включённом
+                                  # serve_enabled (доступ по HTTPS - согласие)
 """
 
 from __future__ import annotations
@@ -25,6 +28,13 @@ def main() -> int:
         # Тот же сценарий, но для источников: синк и доедание очереди.
         from app.gui import headless_sync
         return headless_sync()
+
+    if "--serve" in sys.argv:
+        # SV-C S1: тот же процесс, что окно, только добавляется слушатель
+        # клиента. База, хранилища и очередь остаются здесь - второго
+        # владельца не появляется; флаг serve_enabled решает, поднимать ли его.
+        from app.gui import run
+        return run(serve=True)
 
     from app.gui import run
     return run()

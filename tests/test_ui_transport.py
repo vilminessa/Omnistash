@@ -13,8 +13,8 @@
     не уходят по HTTP; предпочтения клиента (theme/font/language) не
     передаются серверу; bind_window не экспортируется;
   * транспорт: POST /api/<имя>, Bearer из localStorage, тело "{}" когда
-    аргумента нет, credentials same-origin, адрес только свой (ни одного
-    fetch на чужой хост);
+    аргумента нет и `[arg]` когда он есть (позиционный, как pywebview),
+    credentials same-origin, адрес только свой (ни одного fetch на чужой хост);
   * коды ответа читаются честно: 401 привязка, 403 скоуп, 404 «не найдено»,
     409 «уже выполняется», 413 и 429 лимиты, 5xx ошибка - каждая подпись
     есть в словаре i18n с английским вариантом и совпадает с fallback в коде;
@@ -184,6 +184,15 @@ class TestTransport(unittest.TestCase):
         self.assertRegex(self.js,
                          r'\(arg === undefined \|\| arg === null\) \? "\{\}"',
                          "аргумент без значения снова едет как null")
+
+    def test_argument_is_sent_positionally(self):
+        """Аргумент уходит списком ([arg]): окно передаёт его позиционным."""
+        self.assertRegex(self.js, r"JSON\.stringify\(\[arg\]",
+                         "аргумент снова едет kwargs-объектом: сервер вызвал бы "
+                         "метод с именованными параметрами, которых у Api нет")
+        # Контракт зафиксован в документе: тело - массив позиционных аргументов.
+        self.assertIn("массив позиционных аргументов", self.doc,
+                      "§3 документа не описывает тело, которое отправляет клиент")
 
     def test_only_own_origin_is_reachable(self):
         self.assertNotRegex(self.js, r"fetch\(\s*['\"]https?://",

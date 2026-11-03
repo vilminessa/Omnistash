@@ -39,7 +39,7 @@
 | Окно поднимается строкой: `webview.create_window(html=build_page())`, мост — `js_api=Api` | `app/gui.py:5160-5175`, `app/ui.py:25-29` | Клиент получает ту же разметку, но мост заменяется HTTP-мостом; контракт имён методов сохраняется |
 | `Api` — 120 публичных методов, фасад к `app/repo.py`/`queue.py`/`storages.py`/`mesh` | `app/gui.py:121` | Это готовый слой для HTTP: `POST /api/<имя>` вызывает тот же метод |
 | Два headless-режима: `--scan`, `--sync` | `omnistash.py:19-27` | `--serve` — третий режим, рядом с ними; окно не обязательно, но серверный режим остаётся Windows |
-| Mesh-сервер: `ThreadingHTTPServer` + TLS из `channel.server_context()`, `Range`, 416/413, `pacing.RateLimiter`, `getfqdn` обойден | `app/mesh/server.py:33-91`, `app/mesh/channel.py:100-130` | Образец, который прямо переиспользуется: TLS-контекст, обход обратного DNS (17 с на подъём), чанковая раздача, лимит скорости |
+| Mesh-сервер: `ThreadingHTTPServer` + TLS из `channel.server_context()`, `Range`, 416/413, `pacing.RateLimiter`, `getfqdn` обойден | `app/mesh/server.py:33-91`, `app/mesh/channel.py:100-130` | Переиспользуется приём, а не материал: обход обратного DNS (17 с на подъём), чанковая раздача, лимит скорости. TLS для браузера — `app/http/tls.py` (ECDSA с SAN), Ed25519 остаётся для mesh |
 | Соединение sqlite — на поток (`threading.local`) | `app/db.py` | HTTP-потоки читают безопасно; пишущие потоки — те же, что в окне |
 | Обложки приходят data-URI: `_thumb_data_uri`, `get_thumb`, `get_thumbs` | `app/gui.py:71`, `app/gui.py:2832` | Для клиента это 120 запросов с base64 в JSON; заменяется `GET /thumb/<video_id>` + ETag (§3) |
 | Страница не делает внешних запросов: в тесте запрещён и `fetch(` | `tests/test_gui.py` (`test_page_has_no_external_requests`) | Разрешаем только свой адрес: `fetch` с `location.origin`, тест переформулируется на «нет чужих хостов» (§9 S0) |
@@ -77,10 +77,13 @@
 ## 3. Транспорт
 
 Вызов: `POST /api/<method>`, `Content-Type: application/json`,
-`Authorization: Bearer <token>`, тело `{...}` или `{}` (аргумент не передаём,
-когда его нет — тот же нюанс, что `ui_src/app.js:258-270`, чтобы метод
-`get_initial()` не получил лишний позиционный аргумент). Ответ — тот же
-Python-объект, что возвращает `Api`, в JSON (`ensure_ascii=false`).
+`Authorization: Bearer <token>`, тело — массив позиционных аргументов
+(`[arg]`, как их передаёт pywebview) или объект именованных аргументов
+(`{"key": ...}`); пустое тело и `{}` — ноль аргументов, чтобы метод
+`get_initial()` не получил лишний позиционный `None` (тот же нюанс, что
+`ui_src/app.js:481-484`). Ответ — тот же Python-объект, что возвращает `Api`,
+в JSON (`ensure_ascii=false`); отказ процесса (`{error: "Переиндексация уже
+идёт"`) приходит подписью самого `Api` при 200, 409 остаётся байтовым маршрутам.
 
 | Код | Что сервер говорит | Что делает клиент |
 |---|---|---|
@@ -143,9 +146,17 @@ pairing (§5) и правится в настройках сервера. Пуб
 
 ## 5. TLS, привязка, порт
 
-- TLS всегда: контекст из `app/mesh/channel.py:server_context()` (эфемерный
-  сертификат в памяти, на диск не оседает; TLS 1.3 минимум; SPKI-аттестация
-  `ATTEST_OID`).
+- TLS всегда: для клиента материал строит `app/http/tls.py` — эфемерный
+  ECDSA P-256 с SAN (`localhost` + адрес привязки), TLS 1.3 минимум, PEM
+  пишется во временный файл на мгновение и удаляется (ключ живёт в памяти).
+  `app/mesh/channel.py:server_context()` остаётся для mesh: там ключ Ed25519 со
+  SPKI-аттестацией и собеседник — не браузер. Замер на этой машине
+  (in-app Chromium, loopback): сертификат Ed25519 отвергается рукопожатием
+  (`ERR_SSL_VERSION_OR_CIPHER_MISMATCH`), ECDSA и RSA доходят до решения
+  человека о доверии (`ERR_CERT_AUTHORITY_INVALID`).
+- Сервер пишет отпечаток SPKI страницы в журнал при подъёме слушателя — человек
+  видит, какой ключ клиент должен запомнить; сравнение по отпечатку, а не
+  «мы включили HTTPS».
 - Клиент проверяет отпечаток SPKI (SHA-256) до первого байта запроса: первый
   контакт запоминает (TOFU), несовпадение = отказ и журнал. Для второго окна
   Omnistash проверка своя (как `channel.verify_peer`); для браузера — то же
@@ -231,7 +242,7 @@ pairing (§5) и правится в настройках сервера. Пуб
 | Шаг | Что делает | Файлы | Коммит |
 |---|---|---|---|
 | **S0** | Транспорт в UI: `HttpApi` рядом с `apiBridge` (тот же контракт имён, `POST /api/<имя>`, Bearer, честные коды), `HTTP_METHODS`/`HTTP_DENIED` как единый список прав; `bridge()` выбирает pywebview → HTTP → mock; тест страницы переформулируется на «нет чужих хостов» | `ui_src/app.js`, `tests/test_ui_transport.py`, `tests/test_gui.py` | `feat(ui): HTTP-транспорт клиента …` |
-| **S1** | `omnistash.py --serve` + `app/http/`: `ThreadingHTTPServer` с TLS из `channel.server_context()`, обход `getfqdn`, токены в профиле (DPAPI-путь), скоупы, `/api/*` под гейтом, аудит; новые поля `serve_enabled`, `serve_bind`, `serve_port`, `serve_rate_mbit`, `serve_hls_transcode`, `serve_watchers_max` в схеме и подписи в i18n | `omnistash.py`, `app/http/*.py`, `app/settings_schema.py`, `app/i18n.py`, `tests/test_serve.py` | `feat(serve): HTTP-сервер рядом с окном …` |
+| **S1** | `omnistash.py --serve` + `app/http/`: `ThreadingHTTPServer` с TLS для браузера из `app/http/tls.py` (эфемерный ECDSA с SAN; Ed25519 остаётся для mesh), обход `getfqdn`, токены в профиле (DPAPI-путь), скоупы, `/api/*` под гейтом, аудит; новые поля `serve_enabled`, `serve_bind`, `serve_port`, `serve_rate_mbit`, `serve_hls_transcode`, `serve_watchers_max` в схеме и подписи в i18n | `omnistash.py`, `app/http/*.py`, `app/settings_schema.py`, `app/i18n.py`, `tests/test_serve.py` | `feat(serve): HTTP-сервер рядом с окном …` |
 | **S2** | Байты: `/thumb/<video_id>` (ETag вместо data-URI), `/media/<file_id>` с `Range`/206/416/413 и честным 404 по `files.missing`, `/subs/<file_id>` (VTT) | `app/http/media.py`, `tests/test_serve_media.py` | `feat(serve): раздача обложек, байтов и субтитров …` |
 | **S3** | HLS-конвейер: ffprobe-проба кодекса и `moov`, `-c copy` в `profile/hls_cache/`, инвалидация по repack/migrate/rebind/missing, `serve_rate_mbit`, `serve_watchers_max`, откат по кодексу и `serve_hls_transcode` | `app/http/hls.py`, `tests/test_serve_hls.py` | `feat(serve): HLS на лету …` |
 | **S4** | `ui_src/watch.html` + `ui_src/watch.js` + `ui_src/vendor/hls.js`: HLS, субтитры, список файлов; доступность и узкий экран по §7 DESIGN-UI | `ui_src/watch.html`, `ui_src/watch.js`, `ui_src/vendor/hls.js`, `tests/test_ui_watch.py` | `feat(ui): страница воспроизведения клиента …` |
@@ -250,7 +261,7 @@ S0 работает с mock-бэкендом (превью) и со «стуб-�
 
 | Риск / решение | Как отражается в коде |
 |---|---|
-| Самоподписанный эфемерный сертификат: браузер показывает предупреждение | Пин отпечатка в `localStorage` + pairing-код; текст объяснения честный, без «мы включили HTTPS, значит всё безопасно» |
+| Самоподписанный эфемерный сертификат: браузер показывает предупреждение | Материал ECDSA с SAN (Ed25519 браузер отвергает рукопожатием — замер на этой машине); пин отпечатка SPKI в `localStorage` + pairing-код; отпечаток пишется в журнал при подъёме; текст объяснения честный, без «мы включили HTTPS, значит всё безопасно» |
 | Чужой `fetch` как источник supply chain | Только `location.origin`; `hls.js` лежит в репозитории, рантайм не скачивает |
 | Запись из HTTP-потоков в sqlite при живущей очереди | Пишущие операции идут тем же потоком, что в окне (`Api`-воркеры), читающие — свои соединения; тест на loopback с идущим сканом |
 | Ре-encode HEVC/VP9/AV1 жрёт CPU и качество | По умолчанию выключен (`serve_hls_transcode`), отказ с подписью кодека |

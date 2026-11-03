@@ -62,6 +62,8 @@ _TEXTS: dict = {
     "sec.other": {"ru": "Прочее", "en": "Other"},
     # §3.5 шаг 6: вторичный слой редких полей (mesh, обход, PO-токены).
     "sec.extra": {"ru": "Дополнительно", "en": "Advanced"},
+    # SV-C S1: доступ по HTTPS для клиента (docs/SERVER-CLIENT.md §7).
+    "sec.http": {"ru": "Доступ по HTTPS", "en": "HTTPS access"},
 
     # ---- новые поля темы/шрифта/языка --------
     "settings.theme.label": {"ru": "Тема", "en": "Theme"},
@@ -115,6 +117,82 @@ _TEXTS: dict = {
               "settings). Without confirmation the interface has no link to "
               "that site, no cards and no filters; the 18+ gates (add, bulk "
               "operations, catalog) are not bypassed."},
+
+    # ---- новые поля SV-C S1: доступ по HTTPS ------------------------------
+    # Подписи на русском берёт схема (settings_schema), английская карта нужна
+    # только второму языку: карточка настроек не остаётся русской.
+    "settings.serve_enabled.label": {"ru": "Доступ по HTTPS (--serve)",
+                                     "en": "HTTPS access (--serve)"},
+    "settings.serve_enabled.hint": {
+        "ru": "Тот же процесс Omnistash поднимает HTTPS-слушатель рядом с "
+              "окном: браузер-клиент читает ту же библиотеку и работает с "
+              "той же очередью, а база и хранилища остаются у сервера. По "
+              "умолчанию выключено: включение - явное согласие, права "
+              "клиента задаются скоупами на ключе доступа, обращения "
+              "пишутся в журнал аудита.",
+        "en": "The same Omnistash process opens an HTTPS listener next to "
+              "the window: a browser client reads the same library and works "
+              "with the same queue, while the database and storages stay on "
+              "the server. Off by default: turning it on is explicit consent, "
+              "client rights come from scopes on the access key, and every "
+              "call is written to the audit log."},
+    "settings.serve_bind.label": {"ru": "Куда привязать слушатель",
+                                  "en": "Where to bind the listener"},
+    "settings.serve_bind.hint": {
+        "ru": "Сейчас доступен только «этот компьютер» (127.0.0.1): наружу "
+              "ничего не уходит. Сеть (LAN), Tailscale и обычный порт с "
+              "allowlist придут следующим шагом и потребуют того же согласия "
+              "«что уходит наружу».",
+        "en": "Only \"this computer\" (127.0.0.1) is available now: nothing "
+              "leaves the machine. LAN, Tailscale and a plain port with an "
+              "allowlist come in the next step and need the same consent "
+              "about what leaves outward."},
+    "settings.serve_port.label": {"ru": "Порт HTTP-сервера клиента",
+                                  "en": "Client HTTP server port"},
+    "settings.serve_port.hint": {
+        "ru": "TLS на этом порту, адрес стабилен между перезапусками; при "
+              "занятости слушатель не поднимется, причина - в журнале. "
+              "ВАЖНО для совместимости: DPI-утилиты (zapret и подобные) по "
+              "умолчанию перехватывают порты 1024-65535 (а также 80/443) - "
+              "держите порт ВНЕ этой зоны: рекомендуется 444-1023, по "
+              "умолчанию 1001 (рядом с mesh 1000). Выключать DPI-программу "
+              "не нужно.",
+        "en": "TLS on this port; the address stays stable across restarts, "
+              "and a busy port means the listener does not start (the reason "
+              "goes to the log). IMPORTANT for compatibility: DPI tools "
+              "(zapret and similar) intercept ports 1024-65535 and 80/443 by "
+              "default - keep the port OUTSIDE that zone: 444-1023 is "
+              "recommended, 1001 by default (next to mesh 1000). Turning the "
+              "DPI program off is not needed."},
+    "settings.serve_rate_mbit.label": {"ru": "Ограничение отдачи клиенту, Мбит/с",
+                                       "en": "Client delivery limit, Mbit/s"},
+    "settings.serve_rate_mbit.hint": {
+        "ru": "Отдача клиенту не быстрее этого (по умолчанию 10); 0 - без "
+              "ограничения. Тот же ограничитель скорости, что у mesh-сервера: "
+              "быстрая выкачка не выжирает канал.",
+        "en": "Delivery to a client is no faster than this (10 by default); "
+              "0 means no limit. The same rate limiter the mesh server uses: "
+              "a fast pull does not eat the whole channel."},
+    "settings.serve_watchers_max.label": {"ru": "Одновременных зрителей, максимум",
+                                          "en": "Max concurrent viewers"},
+    "settings.serve_watchers_max.hint": {
+        "ru": "Сколько клиентов играют одновременно (байты медиа и HLS); "
+              "сверх лимита - честный отказ «сервер ограничил отдачу», полоса "
+              "не выдумывается. 0 - без лимита.",
+        "en": "How many clients may play at once (media bytes and HLS); over "
+              "the limit the server answers honestly \"the server limited "
+              "delivery\" and no progress bar is invented. 0 means no limit."},
+    "settings.serve_hls_transcode.label": {"ru": "Перекодировать видео для браузера",
+                                           "en": "Transcode video for the browser"},
+    "settings.serve_hls_transcode.hint": {
+        "ru": "Ре-encode HEVC/VP9/AV1 жрёт CPU и качество: по умолчанию "
+              "выключено, отказ называет кодек и говорит, что браузер не "
+              "играет этот файл без перекодирования. Включается, когда байты "
+              "файла браузеру действительно не годятся.",
+        "en": "Re-encoding HEVC/VP9/AV1 burns CPU and quality: off by "
+              "default, and the refusal names the codec and says the browser "
+              "cannot play this file without re-encoding. Turn it on only "
+              "when the file bytes really do not work for the browser."},
 
     # ---- диалоги согласий --------------------
     "dlg.adult.title": {"ru": "Возрастной контент", "en": "Adult content"},
@@ -191,6 +269,27 @@ _TEXTS: dict = {
                      "en": "available on the server only"},
     "http.local": {"ru": "это локальная настройка клиента, серверу не передаётся",
                    "en": "this is a local client setting, not sent to the server"},
+
+    # ---- подписи HTTP-сервера (docs/SERVER-CLIENT.md S1) -------------------
+    # Их называет сервер в теле ответа: клиент показывает причину как есть,
+    # а не подставляет свою подпись, когда сервер молчит.
+    "http.scope_denied": {"ru": "не выдан скоуп", "en": "scope not granted"},
+    "http.post_only": {"ru": "вызов метода - только POST",
+                       "en": "method calls must use POST"},
+    "http.bad_body": {"ru": "тело запроса не разобрано",
+                      "en": "the request body was not parsed"},
+    "http.body_too_large": {"ru": "тело запроса слишком большое",
+                            "en": "the request body is too large"},
+    "http.scopes_none": {"ru": "пустой список скоупов - доступа нет",
+                         "en": "empty scope list - no access"},
+    "http.tokens_broken": {"ru": "файл токенов не расшифровывается "
+                                 "(DPAPI или битый файл)",
+                           "en": "the token file cannot be decrypted "
+                                 "(DPAPI or a broken file)"},
+    "http.tokens_dpapi": {"ru": "DPAPI не удалось зашифровать токены",
+                          "en": "DPAPI could not encrypt the tokens"},
+    "http.tokens_limit": {"ru": "ключей достигнут лимит - сначала отзовите лишний",
+                          "en": "key limit reached - revoke an extra key first"},
 }
 
 _BY_KEY = dict(_TEXTS)

@@ -108,6 +108,7 @@ class TestPersistence(unittest.TestCase):
         self.assertTrue(all(not f.get("hidden") for f in fields))
         sections = {f["section"] for f in fields}
         self.assertEqual(sections, {"Библиотека", "Загрузка", "Mesh",
+                                    "Доступ по HTTPS",
                                     "Расписание", "Аккаунт Google",
                                     "Метаданные API", "Внешний вид"})
 
