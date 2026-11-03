@@ -30,6 +30,7 @@ UI = Path(__file__).resolve().parent.parent / "ui_src"
 CSS = UI / "app.css"
 JS = UI / "app.js"
 HTML = UI / "index.html"
+REPO = UI.parent / "app" / "repo.py"
 
 
 def _clean(text: str) -> str:
@@ -187,6 +188,39 @@ class TestCatalogUi(unittest.TestCase):
         # Активный сегмент различим тоном и underline (NN/g: не только цвет).
         self.assertRegex(self.css,
                          r"\.seg-btn\.active[^{}]*\{[^}]*background: var\(--surface-2\)")
+
+    # ------------------------------ чипсы тегов ------------------------------
+
+    def test_tag_chips_read_the_backend_shape(self):
+        # Подпись чипса строится из t.name и t.n: с другими ключами кнопка
+        # читает «(undefined)» — превью показывает то, чего в окне нет.
+        self.assertGreaterEqual(self.js.count("esc(t.name)"), 2,
+                                "подпись чипса не читает t.name")
+        self.assertGreaterEqual(self.js.count("t.n"), 2,
+                                "счётчик чипса не читает t.n")
+        self.assertNotRegex(self.js, r"esc\(t\.tag\)", "чипс читает t.tag")
+
+    def test_preview_mock_tags_match_repo_columns(self):
+        # Мок обязан врать теми же ключами, что отдаёт repo.tags_popular.
+        mock = re.search(r"tags_popular: function \(\) \{([\s\S]*?)\n      \},", self.js)
+        self.assertTrue(mock, "мок tags_popular удалён")
+        push = re.search(r"tags\.push\(\{([^}]*)\}\)", mock.group(1))
+        self.assertTrue(push, "мок не строит список тегов")
+        keys = set(re.findall(r"([a-z_]+):", push.group(1)))
+        self.assertTrue({"slug", "name", "n"} <= keys,
+                        f"мок тегов без ключей UI: {sorted(keys)}")
+        self.assertNotIn("tag", keys, "мок отдаёт tag вместо name")
+        self.assertNotIn("count", keys, "мок отдаёт count вместо n")
+
+        sql = re.search(r"def tags_popular[\s\S]*?SELECT([\s\S]*?)FROM",
+                        REPO.read_text(encoding="utf-8"))
+        self.assertTrue(sql, "не найден SELECT tags_popular")
+        cols = set()
+        for a, b in re.findall(r"t\.([a-z_]+)|AS\s+([a-z_]+)", sql.group(1)):
+            cols.add(a or b)
+        self.assertTrue(keys <= cols,
+                        f"мок врёт ключами, которых нет у бэкенда: {sorted(keys - cols)}")
+
         self.assertRegex(self.css,
                          r"\.seg-btn\.active[^{}]*\{[^}]*inset 0 -2px[^}]*var\(--accent\)")
 

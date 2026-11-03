@@ -7489,9 +7489,12 @@
         ] });
       },
       tags_popular: function () {
+        // Ключи ровно те же, что отдаёт repo.tags_popular (slug, name, n):
+        // чипсы читают t.name и t.n, с другими ключами подпись чипса
+        // становится «(undefined)» — превью показывает то, чего нет в окне.
         var tags = [];
         for (var i = 1; i <= 6; i++) {
-          tags.push({ slug: "tag" + i, tag: "тег " + i, count: 7 - i });
+          tags.push({ slug: "tag" + i, name: "тег " + i, platform: "", n: 7 - i });
         }
         return Promise.resolve({ ok: true, tags: tags });
       },
