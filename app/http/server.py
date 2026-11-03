@@ -334,6 +334,26 @@ class _Handler(BaseHTTPRequestHandler):
         self._write(200, self.watch_page, "text/html; charset=utf-8",
                     {"Cache-Control": "no-store"})
 
+    def _serve_whoami(self) -> None:
+        """GET /whoami: какие скоупы выданы предъявленному ключу (§4, S5).
+
+        Клиент подписывает недоступные цели до запроса, а не тыкает 403 на
+        каждую кнопку: список прав своего ключа - не секрет, он принадлежит
+        тому, кто его предъявил. Значений токенов в ответе нет: метка ключа и
+        имена скоупов. Без ключа ответ называет причину привязки, а не пустой
+        список прав (пустой список означал бы «доступ есть, но никакой»).
+        """
+        token = self.tokens.verify(self._bearer()) if self.tokens else None
+        if token is None:
+            self._answer(401, {"error": self.text("http.pairing"),
+                               "code": "pairing"}, name="whoami")
+            return
+        self._token_label = token.label
+        self._answer(200, {"ok": True, "paired": True, "label": token.label,
+                           "scopes": list(token.scopes)},
+                     name="whoami", label=token.label,
+                     note="права: " + "+".join(token.scopes))
+
     def _serve_asset(self, path: str, asset: tuple) -> None:
         """Файл интерфейса клиента: ETag и 304, без чужих путей (карта одна)."""
         ctype, body, etag = asset
@@ -389,6 +409,11 @@ class _Handler(BaseHTTPRequestHandler):
                 self._answer(405, {"error": self.text("http.post_only"),
                                    "code": "http"}, name=path[len("/api/"):])
                 return
+            if path == "/whoami":
+                # Права этого ключа (§4): клиент знает, что ему выдано, и
+                # подписывает недоступные цели, а не получает 403 вслепую.
+                self._serve_whoami()
+                return
             if path.startswith("/watch/"):
                 # Страница воспроизведения клиента (S4): сама она не данные,
                 # данные плеер спрашивает по скоупам ключа.
@@ -433,6 +458,11 @@ class _Handler(BaseHTTPRequestHandler):
         addr = self.addr()
         try:
             if not name:
+                if path == "/whoami":
+                    # Права ключа читаются GET; POST сюда - не вызов метода.
+                    self._answer(405, {"error": self.text("http.get_only"),
+                                       "code": "http"}, name="whoami")
+                    return
                 self._answer(404, {"error": self.text("http.missing"),
                                    "code": "missing"}, name="-")
                 return

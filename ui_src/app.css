@@ -317,6 +317,26 @@ body {
   border-radius: 0 0 var(--r-2) var(--r-2);
 }
 
+/* Права ключа и «где я» (S5, §8; DESIGN-UI №25): обычная строка в потоке
+    страницы, не fixed-банер - она читается вместе с контролами. Подложка и
+    граница из токенов, подпись текстом; анимации нет (состояние - данные). */
+.access-band {
+  padding: 4px 10px;
+  background: var(--surface-2);
+  color: var(--info);
+  border-bottom: 1px solid var(--info-line);
+  font-size: var(--fs-cap);
+}
+
+.where {
+  display: none;      /* на широком экране активная вкладка читается сама */
+  padding: 4px 10px;
+  background: var(--surface-2);
+  color: var(--text);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--fs-cap);
+}
+
 .muted { color: var(--muted); }
 .spacer { flex: 1 1 auto; }
 
@@ -448,7 +468,12 @@ body {
 }
 
 .tab:hover { color: var(--text); }
-.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+/* Активная вкладка - три индикатора (замена №25, NN/g ≥2): цвет подписи,
+   underline акцента и фон выбранного контрола. Состояние читается без цвета
+   через underline и фон (SC 1.4.1), AT читает его через aria-selected (§5.5).
+   Подложка и полоса - данные, не «веяние»: перехода для них нет. */
+.tab.active { color: var(--text); border-bottom-color: var(--accent);
+              background: var(--selected); }
 
 .badge {
   background: var(--accent);
@@ -1446,8 +1471,30 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 }
 .browser-hint { font-size: var(--fs-cap); max-width: 90%; }
 
+/* Пояснение недоступной цели (S5, §8): текст подписи, а не серая кнопка.
+   Лежит одним блоком на контейнер и называет, чего не выдано этому ключу. */
+.access-note {
+  display: inline-block;
+  padding: 2px 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--info-line);
+  border-radius: var(--r-2);
+  color: var(--text);
+  font-size: var(--fs-cap);
+}
+
+/* Цель, которой этому ключу не выдано (или которая возможна только на
+    сервере): форма границы меняется вместе с подписью - состояние не только
+    цветом (SC 1.4.1), text не гасится через opacity (замена №18). */
+.btn.no-access { border-color: var(--line-strong); }
+.icon-btn.no-access, .link-btn.no-access { color: var(--text); }
+.storage-row .no-access { border-color: var(--line-strong); }
+
 @media (max-width: 900px) {
   .tree { width: 180px; flex-basis: 180px; }
+  /* «Где я» появляется там, где строка вкладок не помещается целиком
+     (замена №25): текстовый индикатор текущего раздела. */
+  .where { display: block; }
   /* Колонки списка на узком экране пересчитывает JS (applyListColumns):
      скрытые колонки и ширины - одна переменная, media здесь не мешает. */
   .field { grid-template-columns: 1fr; }

@@ -82,7 +82,12 @@
     themeIds: [],            // ids тем из theme_list (битая настройка -> дефолт)
     adultConfirmed: false,   // факт «мне есть 18» (legal.state().adult_ok)
     adultVisible: false,     // вкладка взрослой площадки доступна (оба условия)
-    adultLabel: ADULT_LABEL_RU // нейтральная подпись площадки (без имени)
+    adultLabel: ADULT_LABEL_RU, // нейтральная подпись площадки (без имени)
+    // Права предъявленного ключа (S5, §4): null - сервер ещё не ответил
+    // «кому какие скоупы»; отказ не подписывается выдумкой.
+    scopes: null,
+    platformTab: "",         // активная вкладка площадки (tab-pf:<id>)
+    tree: null               // дерево из poll: имена каналов/плейлистов/папок
   };
   state.selected = new Set();
   state.dedupeResolved = new Set();
@@ -124,14 +129,64 @@
     return Math.round(base * factor / 100);
   }
 
+  /* ------------------------------------------------------------------ *
+    *  Предпочтения клиента (тема, шрифт, язык) - localStorage (§4, §8).
+    *  Окно (pywebview) их читает из настроек сервера, как раньше; HTTP-клиент
+    *  держит у себя: иначе клиент менял бы вид окна сервера. Значение, которого
+    *  клиент ещё не выбирал, берётся из снимка сервера - стартовый вид тот же,
+    *  и «пустой клиент» не выглядит как сломанная тема.
+    * ------------------------------------------------------------------ */
+
+  var PREF_PREFIX = "omnistash.pref.";
+  var PREF_FIELDS = ["theme", "font_family", "font_size", "font_scale", "language"];
+  var LANG_IDS = ["ru", "en"];   // зеркало i18n.language_ids() (битое -> ru)
+
+  function prefRaw(key) {
+    if (!httpMode()) return null;
+    try {
+      var raw = localStorage.getItem(PREF_PREFIX + key);
+      return raw === null || raw === "" ? null : raw;
+    } catch (err) {
+      // localStorage недоступен (изолированный контекст): значение не читается,
+      // и клиент берёт вид сервера - подписью об отказе хранения.
+      return null;
+    }
+  }
+
+  function prefStore(key, value) {
+    try {
+      localStorage.setItem(PREF_PREFIX + key, String(value));
+      return true;
+    } catch (err) {
+      toast(t("prefs.local.denied",
+              "localStorage недоступен - настройка клиента не сохранится"), true);
+      return false;
+    }
+  }
+
+  function chromeSetting(key, serverValue) {
+    var local = prefRaw(key);
+    return local === null ? serverValue : local;
+  }
+
+  function clientLanguage() {
+    if (!httpMode()) return state.lang || "ru";
+    var local = prefRaw("language");
+    if (local === null) return state.lang || "ru";
+    // Битое значение возвращает русский - тот же normalize, что app/i18n.py.
+    return LANG_IDS.indexOf(local) >= 0 ? local : "ru";
+  }
+
   function applyChrome() {
     var s = state.settings || {};
-    document.body.dataset.theme = themeId(s.theme);
-    var px = fontPx(s.font_size, s.font_scale);
+    document.body.dataset.theme = themeId(chromeSetting("theme", s.theme));
+    var px = fontPx(chromeSetting("font_size", s.font_size),
+                    chromeSetting("font_scale", s.font_scale));
     var root = document.documentElement.style;
     root.setProperty("--font-size", px + "px");
     root.setProperty("--font-family",
-                    FONT_STACKS[s.font_family] || FONT_STACKS.system);
+                    FONT_STACKS[chromeSetting("font_family", s.font_family)] ||
+                    FONT_STACKS.system);
     // --row-h считает CSS по --font-size (растёт вместе с текстом), поэтому
     // сюда не дублируем: высота строк - один источник в app.css.
     rowHeight._px = 0;      // шрифт изменился - меряем --row-h заново
@@ -199,7 +254,10 @@
     // Подписи текущего языка + перевод подписей карточки настроек.
     // Словарь (app/i18n.py) покрывает не всё: непокрытые ключи UI
     // рисует русскими подписями из разметки/кода.
-    return call("ui_texts").then(function (res) {
+    // Клиент просит свой локальный язык (S5): ui_texts с language читает
+    // подписи, НЕ меняя настройку сервера - окно остаётся на своём языке.
+    var ask = httpMode() ? { language: clientLanguage() } : undefined;
+    return call("ui_texts", ask).then(function (res) {
       if (!res || !res.ok) return;
       state.lang = res.language || "ru";
       state.texts = res.texts || {};
@@ -305,6 +363,75 @@
   /* Внутренний метод моста окна (нужен для нативных диалогов) - не
      экспортируется ни окну-клиенту, ни HTTP. */
   var HTTP_INTERNAL = ["bind_window"];
+
+  /* Скоуп цели: зеркало app/http/scopes.py (§4). Права решает СЕРВЕР -
+     зеркало нужно, чтобы клиент подписывал «не выдан скоуп <имя>» до
+     запроса, а не выглядело битой кнопкой, которая получает 403. Сверка
+     зеркала с бэком - tests/test_ui_http_scopes.py (цель не может
+     исчезнуть из одного места и остаться в другом). */
+  var HTTP_SCOPE_OF = {
+    // read
+    "adult_tab": "read", "collections_list": "read", "data_api_meta": "read",
+    "data_api_status": "read", "duplicates": "read", "get_initial": "read",
+    "get_thumb": "read", "get_thumbs": "read", "get_video": "read",
+    "language_list": "read", "legal_state": "read", "list_videos": "read",
+    "migrate_preview": "read", "platforms_list": "read", "poll": "read",
+    "repack_preview": "read", "site_catalog": "read",
+    "site_catalog_cancel": "read", "site_catalog_channels": "read",
+    "site_catalog_clear": "read", "site_catalog_more": "read",
+    "site_catalog_status": "read", "storage_preview_detach": "read",
+    "storages_list": "read", "tags_popular": "read", "theme_list": "read",
+    "ui_texts": "read",
+    // queue
+    "add_close": "queue", "add_confirm": "queue", "add_start": "queue",
+    "bulk_download": "queue", "enqueue": "queue", "legal_accept": "queue",
+    "queue_retry": "queue", "queue_start": "queue", "queue_stop": "queue",
+    "repair_broken": "queue", "sync_queue_new": "queue",
+    // mark
+    "bulk_rating": "mark", "bulk_tags": "mark", "save_fields": "mark",
+    // sources
+    "bulk_collection": "sources", "bulk_remove_rows": "sources",
+    "collection_create": "sources", "collection_delete": "sources",
+    "collection_edit": "sources", "collection_rename": "sources",
+    "dedupe_resolve": "sources", "migrate_start": "sources",
+    "migrate_stop": "sources", "rebind_file": "sources",
+    "refresh_meta_start": "sources", "refresh_meta_stop": "sources",
+    "repack_start": "sources", "repack_stop": "sources", "start_scan": "sources",
+    "stop_scan": "sources", "storage_add": "sources", "storage_check": "sources",
+    "storage_detach": "sources", "storage_enable": "sources",
+    "storage_forget": "sources", "storage_restore": "sources",
+    "storage_set_default": "sources", "storage_set_path": "sources",
+    "sync_start": "sources", "sync_stop": "sources", "verify_start": "sources",
+    "verify_stop": "sources",
+    // mesh
+    "catalog_forget": "mesh", "catalog_list": "mesh", "catalog_refresh": "mesh",
+    "catalog_restore": "mesh", "catalog_restore_friend": "mesh",
+    "device_doctor": "mesh", "mesh_fetch_stop": "mesh",
+    "mesh_fetch_video": "mesh", "mesh_reject": "mesh",
+    "mesh_request_video": "mesh", "nick_probe": "mesh", "nick_search": "mesh",
+    "peer_profile": "mesh", "trust_op": "mesh", "trust_sas_begin": "mesh",
+    "trust_sas_confirm": "mesh", "wormhole_receive": "mesh",
+    "wormhole_send": "mesh", "wormhole_status": "mesh",
+    // accounts
+    "account_forget": "accounts", "account_import": "accounts",
+    "oauth_forget": "accounts", "oauth_status": "accounts",
+    // server_config
+    "adult_tab_hide": "server_config", "adult_tab_show": "server_config",
+    "ffmpeg_start": "server_config", "ffmpeg_stop": "server_config",
+    "rotate_log_file": "server_config", "save_setting": "server_config",
+    "wormhole_setup": "server_config"
+  };
+
+  /* Права байтовых маршрутов: зеркало app/http/server.py:route_scope.
+     Обложка - read (она часть карточки), байты и HLS - watch. */
+  var HTTP_ROUTE_SCOPE = { thumb: "read", media: "watch", subs: "watch",
+                           hls: "watch" };
+
+  /* Скоупы токена: зеркало SCOPES из scopes.py. `desktop` здесь нет:
+     нативные цели по HTTP не выполняются вовсе, их подписывает
+     http.desktop, а не «не выдан скоуп desktop». */
+  var ACCESS_SCOPES = ["read", "watch", "queue", "mark", "sources", "mesh",
+                       "accounts", "server_config"];
 
   function httpBaseUrl() {
     /* HTTP-клиент включается ТОЛЬКО по метке сервера (window.OMNISTASH_HTTP),
@@ -414,6 +541,9 @@
         }
         if (res.status >= 200 && res.status < 300) {
           clientBadge("");            // привязка работает - баннер не нужен
+          // Ключ принят, а права ещё не прочитаны (страница открыта раньше
+          // привязки): спрашиваем один раз, не на каждый ответ.
+          if (state.scopes === null) fetchAccess();
           return payload === null ? {} : payload;
         }
         var problem = httpProblemText(res.status, payload);
@@ -461,6 +591,209 @@
     return api;
   }
 
+  /* ------------------------------------------------------------------ *
+    *  Права ключа и недоступные цели (docs/SERVER-CLIENT.md §4, §8, шаг S5)
+    * ------------------------------------------------------------------ */
+
+  function scopeDenied(scope) {
+    // Подпись та же, что выдаёт сервер в 403: имя скоупа не переводим.
+    return t("http.scope_denied", "не выдан скоуп") + " " + scope;
+  }
+
+  function accessReason(name) {
+    // Окно и превью: прав нет - мост прямой. Клиент: решает токен.
+    // Пока скоупы не прочитаны, отказа не объявляем (не выдумываем).
+    if (!httpMode()) return "";
+    if (HTTP_DESKTOP.indexOf(name) >= 0) {
+      return t("http.desktop", "доступно только на сервере");
+    }
+    var scope = HTTP_SCOPE_OF[name];
+    if (!scope) return "";
+    if (!state.scopes) return "";
+    if (state.scopes.indexOf(scope) < 0) return scopeDenied(scope);
+    return "";
+  }
+
+  function routeReason(route) {
+    var scope = HTTP_ROUTE_SCOPE[route] || "";
+    if (!httpMode() || !scope || !state.scopes) return "";
+    return state.scopes.indexOf(scope) >= 0 ? "" : scopeDenied(scope);
+  }
+
+  function missingScopes() {
+    if (!httpMode() || !state.scopes) return [];
+    return ACCESS_SCOPES.filter(function (scope) {
+      return state.scopes.indexOf(scope) < 0;
+    });
+  }
+
+  function accessBand(problem) {
+    var band = $("access-band");
+    if (!band) return;
+    if (!httpMode()) {
+      band.hidden = true;
+      band.textContent = "";
+      return;
+    }
+    var text = problem || "";
+    if (!text && !state.scopes) {
+      text = t("access.unknown", "права ключа не прочитаны");
+    } else if (!text && !state.scopes.length) {
+      text = t("access.none",
+               "на ключе нет ни одного скоупа - доступ не выдан");
+    } else if (!text) {
+      var missing = missingScopes();
+      text = t("access.granted", "права ключа:") + " " + state.scopes.join(" · ") +
+        (missing.length
+          ? " · " + t("access.missing", "не выдано:") + " " + missing.join(" · ")
+          : "");
+    }
+    band.textContent = text;
+    band.hidden = !text;
+  }
+
+  var ACCESS_CONTAINERS = ".toolbar, .storage-actions, .storage-toolbar, " +
+    ".browser-line, .card-actions, .notice, .settings, .account-list, .field";
+
+  function accessNote(box, scopes, native) {
+    var parts = [];
+    if (scopes.length) {
+      parts.push(t("access.missing", "не выдано:") + " " + scopes.join(" · "));
+    }
+    if (native) {
+      parts.push(t("access.native",
+                   "часть целей доступна только на сервере: диалог папки, " +
+                   "проводник, окно площадки, вход в аккаунт"));
+    }
+    if (!parts.length) return;
+    var note = document.createElement("span");
+    note.className = "access-note";
+    note.setAttribute("role", "note");
+    note.textContent = parts.join(" · ");
+    box.appendChild(note);
+  }
+
+  function clearAccess() {
+    Array.prototype.forEach.call(document.querySelectorAll(".access-note"),
+      function (note) { note.remove(); });
+    Array.prototype.forEach.call(document.querySelectorAll("[data-need], [data-native]"),
+      function (el) {
+        if (el.dataset.tip !== undefined) el.title = el.dataset.tip;
+        el.classList.remove("no-access");
+        el.removeAttribute("aria-disabled");
+      });
+    accessBand("");
+  }
+
+  /* Подписи недоступных целей. Один текст на контейнер, а не на каждую
+     кнопку: ряд контролов остаёт читаемым, а причина - видна. Кнопка не
+     гасится opacity и не становится серой: форма границы меняется вместе с
+     подписью, состояние читается текстом (§8, SC 1.4.1). */
+  function applyAccess() {
+    if (!httpMode()) { clearAccess(); return; }
+    Array.prototype.forEach.call(document.querySelectorAll(".access-note"),
+      function (note) { note.remove(); });
+    var boxes = new Map();   // контейнер -> {scopes: [], native: bool}
+    Array.prototype.forEach.call(document.querySelectorAll("[data-need], [data-native]"),
+      function (el) {
+        var scope = el.dataset.need || "";
+        var native = el.dataset.native || "";
+        var reason = "";
+        if (native) reason = t("http.desktop", "доступно только на сервере");
+        else if (scope && state.scopes && state.scopes.indexOf(scope) < 0) {
+          reason = scopeDenied(scope);
+        }
+        if (el.dataset.tip === undefined) el.dataset.tip = el.title || "";
+        el.title = reason ? (el.dataset.tip ? el.dataset.tip + " · " + reason : reason)
+                          : el.dataset.tip;
+        el.dataset.denied = reason;
+        if (/^(BUTTON|INPUT|SELECT|A|LABEL)$/.test(el.tagName)) {
+          el.classList.toggle("no-access", !!reason);
+          el.setAttribute("aria-disabled", reason ? "true" : "false");
+        }
+        if (!reason) return;
+        var box = el.closest(ACCESS_CONTAINERS) || el.parentElement;
+        if (!box) return;
+        var entry = boxes.get(box) || { scopes: [], native: false };
+        if (scope && entry.scopes.indexOf(scope) < 0) entry.scopes.push(scope);
+        if (native) entry.native = true;
+        boxes.set(box, entry);
+      });
+    boxes.forEach(function (entry, box) {
+      accessNote(box, entry.scopes, entry.native);
+    });
+  }
+
+  // Denied target stays visible and clickable, but the click never reaches
+  // the server: the reason is the message, not a silent null (§3 honesty).
+  document.addEventListener("click", function (event) {
+    if (!httpMode()) return;
+    var el = event.target && event.target.closest
+      ? event.target.closest("[data-need], [data-native]") : null;
+    if (!el || el.getAttribute("aria-disabled") !== "true") return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+    toast(el.dataset.denied || t("http.scope", "право не выдано сервером"), true);
+  }, true);
+
+  var accessPending = false;
+
+  /* GET /whoami: сервер называет скоупы предъявленного ключа (§4). Без
+     ключа - причина привязки, без тела - подпись по коду ответа: список
+     прав не выдумывается и не становится «прав ноль». */
+  function fetchAccess() {
+    if (!httpMode() || httpProblem.unpaired || accessPending) {
+      return Promise.resolve(null);
+    }
+    accessPending = true;
+    var headers = {};
+    var token = httpToken();
+    if (token) headers.Authorization = "Bearer " + token;
+    return fetch(httpBaseUrl() + "/whoami", {
+      headers: headers, credentials: "same-origin"
+    }).then(function (res) {
+      return res.text().then(function (text) {
+        accessPending = false;
+        var payload = null;
+        if (text) {
+          try {
+            payload = JSON.parse(text);
+          } catch (err) {
+            payload = {
+              error: t("http.bad_json", "сервер ответил не JSON") +
+                     ": " + text.slice(0, 80),
+              code: "bad_json"
+            };
+          }
+        }
+        if (res.status >= 200 && res.status < 300) {
+          state.scopes = (payload && payload.scopes) || [];
+          accessBand("");
+          applyAccess();
+          return state.scopes;
+        }
+        var problem = httpProblemText(res.status, payload);
+        if (res.status === 401) {
+          httpProblem.unpaired = true;
+          httpProblem.shown = problem.error;
+          clientBadge(problem.error);
+        }
+        state.scopes = null;
+        accessBand(problem.error);
+        applyAccess();
+        return null;
+      });
+    }, function (err) {
+      accessPending = false;
+      state.scopes = null;
+      accessBand(t("http.offline", "сервер не отвечает") + ": " +
+                 ((err && err.message) ? err.message : String(err)));
+      applyAccess();
+      return null;
+    });
+  }
+
   function bridge() {
     if (window.pywebview && window.pywebview.api) {
       // Настоящий мост появился после превью (медленный старт) - переключаемся
@@ -476,6 +809,17 @@
   }
 
   function call(name, arg) {
+    // Цель, которой этому ключу не выдано (или которая возможна только на
+    // сервере), не уходит по сети: ответ с причиной тот же, что дал бы
+    // сервер, и UI показывает его как тост (§4, §8).
+    var blocked = accessReason(name);
+    if (blocked) {
+      return Promise.resolve({
+        error: blocked,
+        code: HTTP_DESKTOP.indexOf(name) >= 0 ? "desktop" : "scope",
+        target: name
+      });
+    }
     var api = bridge();
     if (!api || typeof api[name] !== "function") return Promise.resolve(null);
     try {
@@ -548,6 +892,9 @@
 
   function toast(text, isError) {
     var el = $("toast");
+    // Подпись записывается: без этой строки тост остаётся пустым пузырём, и
+    // причина отказа (transport, скоуп, путь) не читается (§7, замена №17).
+    el.textContent = text;
     clearTimeout(toast._t);
     clearTimeout(toast._hide);
     // §7 (замена №17): live-регион - сообщение читается AT; отказ - alert,
@@ -709,6 +1056,8 @@
     }
     $("stop-scan-btn").hidden = !(snap.scan && snap.scan.running);
     $("rescan-btn").disabled = !!(snap.scan && snap.scan.running);
+    // Контролы перерисованы снимком: подписи прав применяются заново (§8).
+    applyAccess();
   }
 
   var signatures = {};
@@ -975,9 +1324,10 @@
       "</div>" +
       '<div class="card-actions">' +
       '<button class="btn" data-mark="close">Отмена</button>' +
-      '<button class="btn primary" data-mark="apply">Применить</button></div>';
+      '<button class="btn primary" data-need="mark" data-mark="apply">Применить</button></div>';
     $("mark-overlay").hidden = false;
     bindMark();
+    applyAccess();
   }
 
   function bindMark() {
@@ -1188,8 +1538,8 @@
       '<div class="bulk-row"><span class="field-label">Папка</span>' +
       '<select id="bulk-collection">' +
       bulkCollectionOptions(scope.type === "collection" ? scope.id : "") + "</select>" +
-      '<button class="btn" data-bulk="collect-add">в папку</button>' +
-      '<button class="btn" data-bulk="collect-remove">из папки</button></div>' +
+      '<button class="btn" data-need="sources" data-bulk="collect-add">в папку</button>' +
+      '<button class="btn" data-need="sources" data-bulk="collect-remove">из папки</button></div>' +
       '<div class="bulk-hint">Теги - ваши локальные метки (по ним ищется ' +
       "поиск), теги площадки не меняются. «Из папки» снимает связи: строки " +
       "видео остаются. «Скачать» не берёт строки, где файл уже на месте - " +
@@ -1199,13 +1549,14 @@
       "Кнопка удаления строк работает только после подтверждения диалога.</div>" +
       "</div>" +
       '<div class="card-actions">' +
-      '<button class="btn danger" data-bulk="remove-rows">' +
+      '<button class="btn danger" data-need="sources" data-bulk="remove-rows">' +
       "Убрать строки из индекса</button>" +
       '<span class="spacer"></span>' +
       '<button class="btn" data-bulk="close">Закрыть</button>' +
       '<button class="btn primary" data-bulk="apply">Применить</button></div>';
     $("bulk-overlay").hidden = false;
     bindBulk();
+    applyAccess();   // цели диалога подписываются по правам mark/sources
   }
 
   function bulkApply() {
@@ -1698,6 +2049,7 @@
       }
     }
     $("peer-body").innerHTML = html;
+    applyAccess();   // панель участников: право mesh и установка wormhole подписаны
   }
 
   function updateFfmpegOffer() {
@@ -1755,6 +2107,7 @@
         "Скачать FFmpeg</button></div>";
     }
     $("ffmpeg-body").innerHTML = head + progress + actions;
+    applyAccess();   // установка ffmpeg - server_config: подпись, если права нет
   }
 
   /* ------------------------------------------------------------------ *
@@ -1771,7 +2124,7 @@
           '<span class="muted">' + esc(item.label || item.id) + "</span>" +
           '<span class="muted">· ' + esc(shortTime(item.since)) + "</span>" +
           '<span class="spacer"></span>' +
-          '<button class="link-btn" data-account-forget="' +
+          '<button class="link-btn" data-need="accounts" data-account-forget="' +
             esc(item.id) + '">забыть</button></div>';
       }).join("");
       if (acc.logging_in) {
@@ -1795,10 +2148,13 @@
         if (act !== "login" && act !== "abort") return;
         // В момент входа кнопка «Войти» превращается в «Прервать»:
         // закрыли окно сами или передумали - состояние снимается сразу,
-        // а не через таймаут ожидания.
+        // а не через таймаут ожидания. Обе цели нативные (окно сервера).
         btn.dataset.actAccount = acc.logging_in ? "abort" : "login";
         btn.textContent = acc.logging_in ? "Прервать вход" : "Войти в окне…";
+        btn.dataset.native = acc.logging_in
+          ? "account_login_stop" : "account_login_start";
       });
+    applyAccess();
   }
 
   function updateBotNote() {
@@ -1841,21 +2197,27 @@
           "окне. Если окно закрыли или передумали - прервите и начните " +
           "заново.</div>" +
           '<div class="card-actions">' +
-          '<button class="btn ghost" data-account-act="facts">' +
+          '<button class="btn ghost" data-native="account_visible" ' +
+          'data-account-act="facts">' +
           "Проверить, что видит программа</button>" +
           '<button class="btn" data-account-act="close">Отмена</button>' +
-          '<button class="btn primary" data-account-act="abort">' +
+          '<button class="btn primary" data-native="account_login_stop" ' +
+          'data-account-act="abort">' +
           "Прервать вход</button></div>"
         : '<div class="card-actions">' +
-          '<button class="btn ghost" data-account-act="facts">' +
+          '<button class="btn ghost" data-native="account_visible" ' +
+          'data-account-act="facts">' +
           "Проверить, что видит программа</button>" +
-          '<button class="btn ghost" data-account-act="capture">' +
+          '<button class="btn ghost" data-native="account_capture_now" ' +
+          'data-account-act="capture">' +
           "Я вошёл - забрать куки</button>" +
-          '<button class="btn" data-account-act="import">' +
+          '<button class="btn" data-need="accounts" data-account-act="import">' +
           "Импортировать cookies.txt…</button>" +
           '<button class="btn" data-account-act="close">Отмена</button>' +
-          '<button class="btn primary" data-account-act="login">' +
+          '<button class="btn primary" data-native="account_login_start" ' +
+          'data-account-act="login">' +
           "Открыть окно входа</button></div>");
+    applyAccess();   // вход в окне - цель сервера; импорт требует accounts
   }
 
   function importCookies() {
@@ -2233,6 +2595,7 @@
       $("dedupe-body").innerHTML = dedupeHtml(data, moves);
       $("dedupe-overlay").hidden = false;
       bindDedupe(data, moves);
+      applyAccess();   // «Разобрать» требует sources: подпись до клика
       renderDedupeNote(state.scan);
     });
   }
@@ -2370,7 +2733,7 @@
     });
 
     html.push('<div class="tree-group">Коллекции ' +
-      '<button class="icon-btn" id="tree-collection-add" ' +
+      '<button class="icon-btn" id="tree-collection-add" data-need="sources" ' +
       'title="Новая папка (можно из видео разных площадок)">+</button></div>');
     if (!(tree.collections || []).length) {
       html.push('<div class="tree-item muted"><span class="name">нет коллекций</span></div>');
@@ -2384,6 +2747,8 @@
     // Счётчики папки в её панели: дерево приходит из poll, поэтому и
     // заголовок col-bar обновляется вместе с ним.
     updateCollectionBar();
+    whereIndicator();   // текущая область - второй индикатор «где я»
+    applyAccess();      // «+» новой папки подписывается по праву sources
 
     Array.prototype.forEach.call($("tree").querySelectorAll(".tree-item[data-scope]"),
       function (node) {
@@ -2393,6 +2758,7 @@
           updateCollectionBar();
           renderTree(tree);
           renderGrid(true);
+          whereIndicator();   // «где я» называет новую область (§1 №25)
         });
       });
     var addBtn = $("tree-collection-add");
@@ -2408,11 +2774,14 @@
     });
 
     function item(scope, ico, name, total, current, done) {
-      var active = JSON.stringify(scope) === current ? " active" : "";
+      var active = JSON.stringify(scope) === current;
       var count = total === undefined || total === null ? "" :
         (done !== undefined && done !== null && done !== total
           ? done + "/" + total : String(total));
-      return '<div class="tree-item' + active + '" data-scope=\'' +
+      // Текущая область библиотеки читается AT через aria-current
+      // (замена №25: «где я» вне строки вкладок тоже).
+      return '<div class="tree-item' + (active ? " active" : "") + '"' +
+        (active ? ' aria-current="true"' : "") + ' data-scope=\'' +
         JSON.stringify(scope).replace(/'/g, "&apos;") + '\'>' +
         '<span class="ico">' + ico + "</span>" +
         '<span class="name" title="' + esc(name) + '">' + esc(name) + "</span>" +
@@ -2712,8 +3081,15 @@
     // Первый запуск (и пока хранилищ нет): спрашиваем, где хранить.
     var need = (state.storages || []).length === 0 && !state.wizardDismissed;
     $("storage-overlay").hidden = !need;
+    // Проводник папки - нативная цель сервера (§8): на клиенте вместо
+    // «Выбрать папку…» поле пути и кнопка «Добавить папку».
+    var pick = $("wizard-pick");
+    if (pick) pick.hidden = httpMode();
+    var clientRow = $("wizard-client");
+    if (clientRow) clientRow.hidden = !httpMode();
     // Закрыли диалог хранилища - следом идёт предложение ffmpeg.
     updateFfmpegOffer();
+    applyAccess();
   }
 
   /* ------------------------------------------------------------------ *
@@ -2943,6 +3319,7 @@
       rows.style.transform = "translateY(" + (start * rowH) + "px)";
       rows.innerHTML = html.join("");
       bindGridItems();
+      applyAccess();   // плитка/строки перерисованы: право watch подписывается заново
       if (keep !== null) {
         var back = rows.querySelector('.row[data-i="' + keep + '"]');
         if (back) back.focus();   // фокус того же ряда переживает перерисовку
@@ -2991,6 +3368,11 @@
 
   function playVideo(id) {
     if (httpMode()) {
+      // Право на байты (`watch`) решает сервер: без него плеер получил бы
+      // 403 на /media и /hls, поэтому цель подписывается до перехода
+      // («не выдан скоуп watch»), а не молча открывается (§4, §8).
+      var blocked = routeReason("media") || routeReason("hls");
+      if (blocked) { toast(blocked, true); return; }
       // Клиент не имеет файлов на диске: воспроизведение - страница сервера
       // /watch/<id> (байты по HTTPS, плеер браузера, HLS при надобности).
       // Системный плеер (open_file) остаётся нативной целью окна.
@@ -3092,7 +3474,7 @@
         (picked ? " checked" : "") + ' aria-label="Выбрать плитку"></span>' +
       thumb +
       '<button class="tile-play" data-play="' + row.id +
-        '" title="Открыть в плеере" aria-label="Открыть в плеере">▶</button>' +
+        '" data-need="watch" title="Открыть в плеере" aria-label="Открыть в плеере">▶</button>' +
       '<span class="tile-badges">' +
         '<span class="status status-dot" data-s="' + esc(row.status) +
         '" title="' + esc(row.status_label || statusLabel(row.status)) +
@@ -3214,10 +3596,10 @@
         actions.push('<select class="detail-storage" data-storage-select ' +
           'data-prefer="' + esc(defaultStorageId()) + '" aria-label="Хранилище">' +
           storageOptionsHtml(defaultStorageId()) + "</select>");
-        actions.push('<button class="btn primary" data-detail="download">Скачать</button>');
+        actions.push('<button class="btn primary" data-need="queue" data-detail="download">Скачать</button>');
       }
       if (data.status === "queued" || data.status === "downloading") {
-        actions.push('<button class="btn" data-detail="queue">К очереди</button>');
+        actions.push('<button class="btn" data-need="queue" data-detail="queue">К очереди</button>');
       }
       // «Открыть» опирается на наличие файла, а не только на статус:
       // у архивного («удалено на площадке») локальная копия цела и её
@@ -3227,9 +3609,11 @@
           return f.kind === "video" && !f.missing;
         })[0];
         if (localFile) {
-          actions.push('<button class="btn primary" data-detail="play">' +
+          // Плеер клиента требует право `watch` (байты /media и /hls),
+          // проводник папки - нативная цель сервера (§8).
+          actions.push('<button class="btn primary" data-need="watch" data-detail="play">' +
             "Открыть</button>");
-          actions.push('<button class="btn" data-detail="folder">Открыть папку</button>');
+          actions.push('<button class="btn" data-native="open_folder" data-detail="folder">Открыть папку</button>');
         }
       }
       // Mesh: запрос файлу у участников - путь восстановления, когда
@@ -3238,10 +3622,10 @@
           ["known", "failed", "missing", "detached",
            "unavailable"].indexOf(data.status) >= 0) {
         if (state.mesh && state.mesh.running) {
-          actions.push('<button class="btn" data-detail="mesh-stop">' +
+          actions.push('<button class="btn" data-need="mesh" data-detail="mesh-stop">' +
             "Остановить запрос</button>");
         } else {
-          actions.push('<button class="btn" data-detail="mesh">' +
+          actions.push('<button class="btn" data-need="mesh" data-detail="mesh">' +
             "Запросить у участников</button>");
         }
       }
@@ -3249,12 +3633,12 @@
       // Кнопка только у скачанной mesh-копии: у файла с площадки отзывать
       // нечего (там своя история).
       if (data.status === "downloaded" && meshInfo && !meshInfo.file.missing) {
-        actions.push('<button class="btn ghost" data-detail="reject" ' +
+        actions.push('<button class="btn ghost" data-need="mesh" data-detail="reject" ' +
           'title="Файл получен от участника и оказался не тем: хеш уйдёт ' +
           'в стоп-лист, файл удалится">Файл оказался не тем?</button>');
       }
       if (data.webpage_url) {
-        actions.push('<button class="btn ghost" data-detail="source">Открыть на площадке</button>');
+        actions.push('<button class="btn ghost" data-native="open_url" data-detail="source">Открыть на площадке</button>');
       }
       if (actions.length) {
         html = '<div class="card-actions detail-actions">' +
@@ -3270,6 +3654,7 @@
         detailMarksHtml(data) + raw;
       $("detail-overlay").hidden = false;
       bindDetail(data);
+      applyAccess();   // карточка открыта: недоступные цели подписаны сразу
     });
   }
 
@@ -3336,7 +3721,7 @@
       '<label>Заметка<textarea id="detail-notes" rows="2">' +
         esc(data.notes || "") + "</textarea></label>" +
       '<div class="card-actions"><button class="btn primary" ' +
-        'data-detail="save-marks">Сохранить пометки</button></div>' +
+        'data-need="mark" data-detail="save-marks">Сохранить пометки</button></div>' +
       "</div>";
   }
 
@@ -3664,7 +4049,12 @@
     var failed = dl.failed || 0;
     var retry = $("queue-retry-btn");
     retry.hidden = !failed;
-    retry.textContent = "Повторить упавшие (" + failed + ")";
+    retry.textContent = t("queue.retry.label", "Повторить упавшие") +
+      " (" + failed + ")";
+    // Флаг «другая дорога» живёт вместе с кнопкой повтора: упавших строк
+    // нет - решения не о чём спрашивать (M13).
+    var chainWrap = $("queue-chain-wrap");
+    if (chainWrap) chainWrap.hidden = !failed;
 
     var bar = $("dl-bar");
     if (!dl.running && !dl.current) {
@@ -3738,6 +4128,7 @@
     // состояние заново (ffmpeg-строка и аккаунт Google).
     renderFfmpegState();
     renderAccountState();
+    applyAccess();   // карточка перерисована: право server_config и проводник подписываются
   }
 
   function hintId(field) {
@@ -3781,13 +4172,22 @@
         (field.max !== undefined ? ' max="' + field.max + '"' : "") +
         (hintId(field) ? ' aria-describedby="' + hintId(field) + '"' : "") + ">";
     } else if (field.type === "path") {
+      // Проводник папки - нативная цель окна: сервер не может открыть диалог
+      // на чужой машине, поэтому на клиенте остаётся поле пути, а кнопка
+      // читается подписью «доступно только на сервере» (§8).
       control = '<input type="text" data-key="' + field.key + '" value="' +
         esc(value) + '"><button class="btn ghost" data-browse="' + field.key +
-        '">…</button>';
+        '" data-native="pick_folder" title="Выбрать папку в проводнике сервера">…</button>';
     } else if (field.type === "action") {
       // Поле-кнопка (transient): значение не читаем, действие - по data-action.
       // Спан состояния у каждого действия свой - их несколько в карточке.
-      control = '<button class="btn ghost" data-action="' +
+      // Право цели подписывается по скоупу (§4): установка ffmpeg правит
+      // сервер, участники - право mesh, обновление метаданных - sources.
+      var need = field.action === "ffmpeg-install" ? "server_config"
+        : field.action === "peer-dialog" ? "mesh"
+        : field.action === "refresh-meta" ? "sources" : "";
+      control = '<button class="btn ghost"' +
+        (need ? ' data-need="' + need + '"' : "") + ' data-action="' +
         esc(field.action || "") + '">' +
         esc(field.action_label || "Выполнить") + "</button>" +
         '<span class="muted"' +
@@ -3796,10 +4196,12 @@
     } else if (field.type === "account") {
       // Виджет аккаунтов: живой список (метка/дата/удаление) + добавление.
       // Куки применяются там, где аккаунт привязан к источнику.
+      // Вход в окне - нативная цель сервера (§8); импорт и удаление - accounts.
       control = '<div class="account-list" data-account-list></div>' +
-        '<button class="btn ghost" data-act-account="login">' +
+        '<button class="btn ghost" data-native="account_login_start" ' +
+        'data-act-account="login">' +
         "Войти в окне…</button>" +
-        '<button class="btn ghost" data-act-account="import">' +
+        '<button class="btn ghost" data-need="accounts" data-act-account="import">' +
         "Импортировать cookies.txt…</button>";
     } else if (field.type === "storages") {
       control = storagesHtml();
@@ -3821,14 +4223,30 @@
     var label = tr.label || field.label;
     var hint = tr.hint || field.hint || "";
     var hid = hint ? hintId(field) : "";
+    // Клиентские предпочтения (§8): поле применяется локально и серверу не
+    // передаётся - окно сервера от него не меняется.
+    var local = httpMode() && PREF_FIELDS.indexOf(field.key) >= 0;
+    var localNote = local
+      ? '<div class="field-hint">' + esc(t("prefs.local.note",
+          "вид этого клиента: значение сохраняется у вас и не меняет окно " +
+          "сервера")) + "</div>"
+      : "";
     return '<div class="field"><div><div class="field-label">' +
       esc(label) + '</div><div class="field-hint"' +
       (hid ? ' id="' + hid + '"' : "") + '>' +
       esc(hint) + "</div></div>" +
-      '<div class="field-control">' + control + "</div></div>";
+      '<div class="field-control">' + control + localNote + "</div></div>";
   }
 
+  /* Виджет хранилищ. На клиенте проводника нет (§8): путь пишется текстом,
+     а «путь указан» и «папка доступна» решает сервер (storage_set_path и
+     storage_check отвечают причиной). Все цели виджета - право `sources`. */
   function storagesHtml() {
+    var client = httpMode();
+    var pathLabel = t("storage.path.label", "Путь папки на сервере");
+    var pathTip = t("storage.path.tip",
+                    "диалог папки доступен только на сервере: путь пишется " +
+                    "здесь, доступность проверяет сервер");
     var rows = (state.storages || []).map(function (storage) {
       var active = storage.status === "active";
       var dot = !active ? "off" : (storage.available ? "" : "bad");
@@ -3847,20 +4265,31 @@
       var actions = [];
       if (active) {
         actions.push('<label class="storage-default"><input type="radio" ' +
-          'name="storage-default" data-storage-default="' + storage.id + '"' +
+          'name="storage-default" data-need="sources" data-storage-default="' +
+          storage.id + '"' +
           (state.settings.default_storage_id === storage.id ? " checked" : "") +
           "><span>по умолчанию</span></label>");
-        actions.push('<button class="link-btn" data-storage-toggle="' +
+        actions.push('<button class="link-btn" data-need="sources" data-storage-toggle="' +
           storage.id + '">' + (storage.enabled ? "отключить" : "включить") +
           "</button>");
-        actions.push('<button class="link-btn" data-storage-path="' +
-          storage.id + '">путь…</button>');
-        actions.push('<button class="link-btn" data-storage-detach="' +
+        if (client) {
+          actions.push('<input type="text" class="storage-path-input" ' +
+            'data-storage-path-input="' + storage.id + '" value="' +
+            esc(storage.path) + '" aria-label="' + esc(pathLabel) +
+            '" title="' + esc(pathTip) + '">' +
+            '<button class="link-btn" data-need="sources" data-storage-path-apply="' +
+            storage.id + '">' + esc(t("storage.path.apply", "Применить путь")) +
+            "</button>");
+        } else {
+          actions.push('<button class="link-btn" data-native="pick_folder" data-storage-path="' +
+            storage.id + '">путь…</button>');
+        }
+        actions.push('<button class="link-btn" data-need="sources" data-storage-detach="' +
           storage.id + '">отвязать</button>');
       } else {
-        actions.push('<button class="link-btn" data-storage-restore="' +
+        actions.push('<button class="link-btn" data-need="sources" data-storage-restore="' +
           storage.id + '">вернуть</button>');
-        actions.push('<button class="link-btn" data-storage-forget="' +
+        actions.push('<button class="link-btn" data-need="sources" data-storage-forget="' +
           storage.id + '">забыть навсегда</button>');
       }
       return '<div class="' + cls + '">' +
@@ -3876,12 +4305,22 @@
     }).join("");
     if (!rows) {
       rows = '<div class="muted">Хранилищ нет. Добавьте папку, в которую ' +
-        "будете скачивать и которую будем индексировать.</div>";
+        "будете скачивать и которую будем индексировать." +
+        (client ? " " + esc(t("storage.client.note",
+          "хранилища правит сервер: путь и доступность читает он, проводник " +
+          "этого клиента отсутствует")) : "") + "</div>";
     }
+    var newField = client
+      ? '<input type="text" id="storage-path-new" placeholder="' +
+        esc(pathLabel.toLowerCase()) + '" aria-label="' + esc(pathLabel) +
+        '" title="' + esc(pathTip) + '">'
+      : "";
     return '<div class="storages">' + rows +
-      '<div class="storage-toolbar">' +
-      '<button class="btn ghost" id="storage-add">+ Добавить папку</button>' +
-      '<button class="btn ghost" id="storage-check">Проверить доступность</button>' +
+      '<div class="storage-toolbar">' + newField +
+      '<button class="btn ghost" id="storage-add" data-need="sources">' +
+      esc(t("storage.add.label", "+ Добавить папку")) + "</button>" +
+      '<button class="btn ghost" id="storage-check" data-need="sources">' +
+      esc(t("storage.check.label", "Проверить доступность")) + "</button>" +
       "</div></div>";
   }
 
@@ -4044,6 +4483,15 @@
           var key = input.dataset.key;
           var value = input.type === "checkbox" ? input.checked : input.value;
           syncSwitch(input);
+          // Предпочтения клиента (тема, шрифт, язык) - локально (§8):
+          // серверу не передаются, иначе клиент менял бы вид окна сервера.
+          if (httpMode() && PREF_FIELDS.indexOf(key) >= 0) {
+            prefStore(key, value);
+            if (key === "language") syncLanguage();   // подписи этого клиента
+            else applyChrome();                       // палитра и шрифт
+            applyAccess();
+            return;
+          }
           // Согласие на mesh: включение - явное действие с объяснением,
           // что уходит наружу (адрес и id запрашиваемых видео).
           if (key === "mesh_enabled" && value) {
@@ -4107,6 +4555,25 @@
         });
       });
 
+    /* Кнопка «…» у поля пути: проводник сервера. На клиенте эта цель
+       нативная (сервер не открывает диалог на чужой машине): поле пути
+       остаётся, а кнопка читается подписью «доступно только на сервере». */
+    Array.prototype.forEach.call(
+      document.querySelectorAll("#settings-body [data-browse]"), function (btn) {
+        btn.addEventListener("click", function () {
+          if (httpMode()) return;   // проводник этого клиента отсутствует
+          var key = btn.dataset.browse;
+          pickFolder().then(function (path) {
+            if (!path) return;
+            var input = document.querySelector(
+              '#settings-body input[data-key="' + key + '"]');
+            if (!input) return;
+            input.value = path;
+            saveSetting(key, path);
+          });
+        });
+      });
+
     // Виджет аккаунтов Google: вход/импорт + удаление конкретного аккаунта.
     Array.prototype.forEach.call(
       document.querySelectorAll("#settings-body [data-act-account]"),
@@ -4154,6 +4621,23 @@
     on("#storage-add, .storage-add", function () { pickAndAddStorage(); });
     on("#storage-check", function () {
       call("storage_check").then(function () { toast("Проверяем…"); });
+    });
+    // Клиент меняет путь текстом (§8): проводник сервера ему недоступен.
+    on("[data-storage-path-apply]", function (ev) {
+      var id = ev.currentTarget.dataset.storagePathApply;
+      var row = ev.currentTarget.closest(".storage-row");
+      var input = row && row.querySelector("[data-storage-path-input]");
+      var path = ((input && input.value) || "").trim();
+      if (!path) {
+        toast(t("storage.path.none",
+                "путь не указан - сервер ничего не проверяет"), true);
+        return;
+      }
+      call("storage_set_path", { id: id, path: path }).then(function (res) {
+        if (res && res.error) { toast(res.error, true); return; }
+        toast("Переехало файлов: " + res.files + ", найдено на месте: " +
+          res.present);
+      });
     });
     on("[data-storage-default]", function (ev) {
       call("storage_set_default", { id: ev.currentTarget.dataset.storageDefault })
@@ -4239,48 +4723,65 @@
   }
 
   function pickAndAddStorage() {
+    // Клиент не имеет проводника (§8): путь пишется в поле, сервер решает
+    // доступность. Пустое поле названо причиной, а не «тихий отказ».
+    if (httpMode()) {
+      var input = $("storage-path-new") || $("wizard-path");
+      var typed = ((input && input.value) || "").trim();
+      if (!typed) {
+        toast(t("storage.path.none",
+                "путь не указан - сервер ничего не проверяет"), true);
+        return;
+      }
+      addStorageAtPath(typed);
+      return;
+    }
     pickFolder().then(function (path) {
       if (!path) return;
-      call("storage_add", { path: path }).then(function (res) {
-        if (!res) return;
-        if (res.error) { toast(res.error, true); return; }
-        if (res.hint === "already") {
-          toast("Это хранилище уже добавлено");
-          return;
+      addStorageAtPath(path);
+    });
+  }
+
+  function addStorageAtPath(path) {
+    call("storage_add", { path: path }).then(function (res) {
+      if (!res) return;
+      if (res.error) { toast(res.error, true); return; }
+      if (res.hint === "already") {
+        toast("Это хранилище уже добавлено");
+        return;
+      }
+      // Папку раньше отвязали: спрашиваем, вернуть ли её. Это и есть
+      // «переинициализация» - дальше файлы вернёт обычный скан.
+      if (res.hint === "detached" || (res.hint === "known_root" &&
+                                      res.storage.status !== "active")) {
+        var label = res.storage.label;
+        if (confirm("Папка уже была в библиотеке как «" + label + "».\n\n" +
+                    "Вернуть её? Файлы восстановятся при переиндексации, " +
+                    "без перекачки.")) {
+          call("storage_restore", { id: res.storage.id }).then(function (r) {
+            if (r && r.error) { toast(r.error, true); return; }
+            toast("«" + label + "» возвращено - запустите переиндексацию");
+          });
         }
-        // Папку раньше отвязали: спрашиваем, вернуть ли её. Это и есть
-        // «переинициализация» - дальше файлы вернёт обычный скан.
-        if (res.hint === "detached" || (res.hint === "known_root" &&
-                                        res.storage.status !== "active")) {
-          var label = res.storage.label;
-          if (confirm("Папка уже была в библиотеке как «" + label + "».\n\n" +
-                      "Вернуть её? Файлы восстановятся при переиндексации, " +
-                      "без перекачки.")) {
-            call("storage_restore", { id: res.storage.id }).then(function (r) {
+        return;
+      }
+      // Маркер нашёлся у активного хранилища с другим путём: это переезд
+      // (диск переименовали) - предлагаем указать новый путь.
+      if (res.hint === "known_root" && res.storage.path !== path) {
+        if (confirm("Это хранилище «" + res.storage.label + "», но раньше " +
+                    "оно лежало по другому пути:\n" + res.storage.path +
+                    "\n\nУказать новый путь? Файлы перепривяжу, ничего " +
+                    "не перекачивая.")) {
+          call("storage_set_path", { id: res.storage.id, path: path })
+            .then(function (r) {
               if (r && r.error) { toast(r.error, true); return; }
-              toast("«" + label + "» возвращено - запустите переиндексацию");
+              toast("Переехало файлов: " + r.files + ", найдено на месте: " +
+                r.present);
             });
-          }
-          return;
         }
-        // Маркер нашёлся у активного хранилища с другим путём: это переезд
-        // (диск переименовали) - предлагаем указать новый путь.
-        if (res.hint === "known_root" && res.storage.path !== path) {
-          if (confirm("Это хранилище «" + res.storage.label + "», но раньше " +
-                      "оно лежало по другому пути:\n" + res.storage.path +
-                      "\n\nУказать новый путь? Файлы перепривяжу, ничего " +
-                      "не перекачивая.")) {
-            call("storage_set_path", { id: res.storage.id, path: path })
-              .then(function (r) {
-                if (r && r.error) { toast(r.error, true); return; }
-                toast("Переехало файлов: " + r.files + ", найдено на месте: " +
-                  r.present);
-              });
-          }
-          return;
-        }
-        toast("Хранилище добавлено: " + (res.storage ? res.storage.label : ""));
-      });
+        return;
+      }
+      toast("Хранилище добавлено: " + (res.storage ? res.storage.label : ""));
     });
   }
 
@@ -4771,21 +5272,112 @@
     });
   }
 
-  function switchTab(name) {
+  /* Вкладки: табовая семантика (§5.5, замена №5) - активная вкладка читает
+     aria-selected + aria-current + фон/underline (№25), обход стрелками
+     кольцевой (APG Tabs), roving tabindex: одна точка Tab на строку вкладок.
+     Вкладки площадок динамические, поэтому состояния applies по data-tab. */
+  function syncTabs(name) {
+    var key = state.tab === "platform" ? state.platformTab : name;
+    Array.prototype.forEach.call(document.querySelectorAll(".tab"),
+      function (tab) {
+        var on = tab.dataset.tab === key;
+        tab.classList.toggle("active", on);
+        tab.setAttribute("aria-selected", on ? "true" : "false");
+        tab.setAttribute("aria-current", on ? "true" : "false");
+        tab.tabIndex = on ? 0 : -1;   // roving tabindex (§5.3)
+      });
+  }
+
+  var TAB_RU = { library: "Библиотека", sync: "Синхронизация",
+                 queue: "Очередь", settings: "Настройки",
+                 platform: "Площадка" };
+  // Ключ подписи вкладки: имя строки, а не «tab.» + имя (словарь проверяется
+  // по литеральным ключам, динамическая склейка читалась бы как несуществующий).
+  var TAB_KEYS = { library: "tab.library", sync: "tab.sync",
+                   queue: "tab.queue", settings: "tab.settings" };
+
+  /* «Где я» (замена №25): текстовый индикатор текущего раздела и области
+     библиотеки - виден там, где строка вкладок не помещается целиком. */
+  function scopeCaption() {
+    var scope = state.scope || { type: "pool" };
+    if (scope.type === "pool") return t("ui.where.pool", "весь пул");
+    var key = scope.type === "channel" ? "channels"
+      : scope.type === "playlist" ? "playlists" : "collections";
+    var node = ((state.tree || {})[key] || []).filter(function (item) {
+      return item.id === scope.id;
+    })[0];
+    return (node && (node.name || node.title)) || String(scope.id || "");
+  }
+
+  function whereIndicator() {
+    var el = $("where-am-i");
+    if (!el) return;
+    var label = state.tab === "platform"
+      ? (platState.label || t("ui.where.platform", "площадка"))
+      : t(TAB_KEYS[state.tab] || "", TAB_RU[state.tab] || state.tab);
+    var extra = state.tab === "library" ? scopeCaption() : "";
+    el.textContent = t("ui.where", "Где я:") + " " + label +
+      (extra ? " · " + extra : "");
+  }
+
+  function switchTab(name, tabKey) {
     state.tab = name;
-    Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (tab) {
-      tab.classList.toggle("active", tab.dataset.tab === name);
-    });
+    if (name === "platform" && tabKey) state.platformTab = tabKey;
+    syncTabs(name);
     ["library", "sync", "queue", "settings", "platform"].forEach(function (panel) {
       var node = $("panel-" + panel);
-      if (node) node.hidden = panel !== name;
+      if (!node) return;
+      node.hidden = panel !== name;
+      if (panel === "platform" && name === "platform") {
+        // Панель называется активной вкладкой площадки: её id появляется
+        // вместе с вкладкой, поэтому aria-labelledby ставит JS.
+        var tab = document.getElementById(state.platformTab);
+        if (tab) node.setAttribute("aria-labelledby", tab.id);
+      }
     });
+    whereIndicator();
     if (name === "library") paintGrid();
     // Карточка настроек рисуется из schema+storages: на вкладке её надо
     // перерисовать, иначе виджет хранилищ останется пустым (он рисовался
     // до того, как пришли данные).
     if (name === "settings") renderSettings();
     if (name === "platform") { phLoad(true); phTags(); }
+    applyAccess();
+  }
+
+  function activateTab(tab) {
+    var key = tab.dataset.tab || "";
+    if (key.indexOf("pf:") === 0) {
+      openPlatform(key.slice(3), tab.dataset.label, tab.dataset.adult === "1",
+                   tab.dataset.catalog === "1", tab.dataset.channels === "1");
+      return;
+    }
+    switchTab(key, key);
+  }
+
+  /* Кольцевой обход вкладок стрелками (APG Tabs, §5.5): ←→ между вкладками,
+     Home/End - первая и последняя. Select на стрелке: табы переключают
+     панели, а не открывают новую цель Tab. */
+  function bindTabKeyboard() {
+    var nav = $("tabs");
+    if (!nav) return;
+    nav.addEventListener("keydown", function (event) {
+      var key = event.key;
+      if (key !== "ArrowLeft" && key !== "ArrowRight" &&
+          key !== "Home" && key !== "End") return;
+      var tabs = Array.prototype.slice.call(nav.querySelectorAll(".tab"));
+      if (!tabs.length) return;
+      var at = tabs.indexOf(document.activeElement);
+      if (at < 0) return;
+      var next = key === "ArrowRight" ? at + 1
+        : key === "ArrowLeft" ? at - 1
+        : key === "Home" ? 0 : tabs.length - 1;
+      if (next < 0) next = tabs.length - 1;
+      if (next >= tabs.length) next = 0;
+      event.preventDefault();
+      tabs[next].focus();
+      activateTab(tabs[next]);
+    });
   }
 
   /* ------------------------------------------------------------------ *
@@ -4807,6 +5399,7 @@
 
   function openPlatform(id, label, adult, hasCatalog, hasChannels) {
     platState.platform = id;
+    state.platformTab = "pf:" + id;   // вкладка площадки - активная цель табов
     // M15: для взрослой площадки - нейтральная подпись («взрослая
     // площадка») без её имени и доменов; внутренние id не меняются.
     var shown = adult ? (state.adultLabel || ADULT_LABEL_RU) : (label || id);
@@ -4880,7 +5473,7 @@
     if ($("cat-mode")) $("cat-mode").hidden = true;
     if ($("cat-sort")) $("cat-sort").hidden = true;
     if ($("cat-channels")) $("cat-channels").hidden = true;
-    switchTab("platform");
+    switchTab("platform", "pf:" + id);
   }
 
   function renderPlatformTabs() {
@@ -4911,7 +5504,9 @@
         box.innerHTML = list.map(function (p) {
           // Нейтральная подпись: без имени площадки и её доменов
           var name = p.adult ? label : p.label;
-          return '<button class="tab" data-tab="pf:' + esc(p.id) +
+          return '<button class="tab" id="pf:' + esc(p.id) +
+            '" role="tab" tabindex="-1" aria-selected="false"' +
+            ' aria-controls="panel-platform" data-tab="pf:' + esc(p.id) +
             '" data-label="' + esc(name) + '" data-adult="' +
             (p.adult ? "1" : "") + '" data-catalog="' +
             (p.catalog ? "1" : "") + '" data-channels="' +
@@ -4929,6 +5524,11 @@
                          tab.dataset.channels === "1");
           });
         });
+      // Вкладки появились позже разметки: состояния активной вкладки
+      // (aria-selected, roving tabindex) применяются по текущему выбору.
+      syncTabs(state.tab);
+      whereIndicator();
+      applyAccess();
     });
   }
 
@@ -6050,8 +6650,10 @@
 
   function bind() {
     Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (tab) {
-      tab.addEventListener("click", function () { switchTab(tab.dataset.tab); });
+      tab.addEventListener("click", function () { activateTab(tab); });
     });
+    // Табовая семантика строки вкладок (§5.5, замена №5): обход стрелками.
+    bindTabKeyboard();
     bindPh();
     bindCollections();
     updateCollectionBar();
@@ -6245,6 +6847,10 @@
 
     // Стартовый выбор хранилища.
     $("wizard-pick").addEventListener("click", function () {
+      pickAndAddStorage();
+    });
+    // Клиент: путь пишется текстом (§8), доступность решает сервер.
+    $("wizard-path-btn").addEventListener("click", function () {
       pickAndAddStorage();
     });
     $("wizard-later").addEventListener("click", function () {
@@ -6605,7 +7211,20 @@
       });
     });
     $("queue-stop-btn").addEventListener("click", function () { call("queue_stop"); });
-    $("queue-retry-btn").addEventListener("click", function () { call("queue_retry"); });
+    $("queue-retry-btn").addEventListener("click", function () {
+      // M13: attempt_chain=True - «попробовать другую дорогу» (цепочка дорог
+      // выкачки проходит список заново); флаг читается как обычный checkbox.
+      var chain = !!$("queue-chain").checked;
+      call("queue_retry", { attempt_chain: chain }).then(function (res) {
+        if (!res) return;
+        if (res.error) { toast(res.error, true); return; }
+        var retried = res.retried || 0;
+        toast("В очередь возвращено: " + retried + " · " +
+          (res.attempt_chain
+            ? t("queue.chain.on", "другая дорога прогоняется заново")
+            : t("queue.chain.off", "прежная выигравшая дорога площадки")));
+      });
+    });
 
     $("sync-all-btn").addEventListener("click", function () {
       call("sync_start").then(function (res) {
@@ -6675,6 +7294,9 @@
 
   function boot() {
     bind();
+    // Права ключа читаем до первого рисования: недоступные цели подписываются
+    // сразу, а не после 403 на кнопке (§4, §8).
+    fetchAccess();
     call("get_initial").then(function (data) {
       if (!data) return;
       state.settings = data.settings || {};
@@ -6684,11 +7306,16 @@
       applyLanguage();    // русские подписи разметки до языка из бэка
       $("version").textContent = "Omnistash " + (data.version || "");
       renderSettings();
+      // Вид и выбор вкладки - состояние страницы: табовые атрибуты и «где я»
+      // применяются по текущему выбору (вкладки площадки ещё не пришли).
+      syncTabs(state.tab);
+      whereIndicator();
       // Шапка и шаблон сетки живут по настройкам (sort_col/col_*): до
       // первого тика rev уже выровнен, ветка в applySnapshot не сработает.
       syncViewFromSettings();
       syncSortAndCols();
       renderGrid(true);
+      applyAccess();
       // M15: темы, второй язык и доступ к вкладке взрослой площадки
       // приходят отдельными запросами (schema и settings уже получены).
       syncThemes();
@@ -6870,7 +7497,41 @@
       "http.bad_json": "the server answered with non-JSON",
       "http.offline": "the server does not answer",
       "http.desktop": "available on the server only",
-      "http.local": "this is a local client setting, not sent to the server"
+      "http.local": "this is a local client setting, not sent to the server",
+      // Права ключа и подписи недоступных целей (S5): тот же текст, что
+      // выдаёт сервер в 403 и что читает окно.
+      "http.scope_denied": "scope not granted",
+      "access.granted": "key rights:",
+      "access.missing": "not granted:",
+      "access.unknown": "key rights were not read",
+      "access.none": "the key has no scopes - access is not granted",
+      "access.native": "some targets are available on the server only: the " +
+        "folder picker, the explorer, the site window, the account sign-in",
+      "ui.where": "Where am I:",
+      "ui.where.pool": "whole pool",
+      "ui.where.platform": "site",
+      // M13: повтор упавших и флаг «другой дороги».
+      "queue.retry.label": "Retry failed",
+      "queue.chain.label": "Try another road",
+      "queue.chain.tip": "For failed rows: forget the road that won and walk " +
+        "the download road chain again. The user's network is not changed - " +
+        "the DPI bypass is not touched.",
+      "queue.chain.on": "another road is walked again",
+      "queue.chain.off": "the site road that won stays",
+      // Локальные предпочтения клиента и поле пути вместо проводника (§8).
+      "prefs.local.note": "this client's view: the value is saved for you and " +
+        "does not change the server window",
+      "prefs.local.denied": "localStorage is unavailable - the client setting " +
+        "will not be saved",
+      "storage.path.label": "Folder path on the server",
+      "storage.path.apply": "Apply path",
+      "storage.path.tip": "the folder picker is available on the server only: " +
+        "the path is typed here, availability is checked by the server",
+      "storage.path.none": "path not given - the server checks nothing",
+      "storage.add.label": "+ Add folder",
+      "storage.check.label": "Check availability",
+      "storage.client.note": "storages are owned by the server: it reads the " +
+        "path and availability, this client has no explorer"
     };
     var MOCK_LABELS_EN = {
       theme: { label: "Theme",
@@ -8516,10 +9177,13 @@
         mockDl.current = null;
         return Promise.resolve({ ok: true });
       },
-      queue_retry: function () {
+      queue_retry: function (req) {
         var retried = mockDl.failed;
         mockDl.failed = 0;
-        return Promise.resolve({ ok: true, retried: retried });
+        // attempt_chain - тот же результат, что у бэка: сводка называет,
+        // какая дорога прогоняется (превью не выдумывает «цепочку»).
+        return Promise.resolve({ ok: true, retried: retried,
+                                 attempt_chain: !!(req && req.attempt_chain) });
       },
       sync_start: function () {
         mockSync.running = true;

@@ -4048,8 +4048,16 @@ class Api:
         Для русского labels и sections пустые: карточка рисуется подписями
         из settings_schema (русскими), а UI подставляет свои русские
         строки из разметки - ничего не «переписывается» на русском.
+
+        request.language - ПРОЧЕСТЬ подписи на другом языке, не меняя
+        настройку: HTTP-клиент держит язык локально (§8), и иначе клиент
+        менял бы вид окна сервера. Битое значение возвращается русским
+        (app/i18n.py:normalize), как и на настройке языка.
         """
-        language = self._ui_language()
+        request = request if isinstance(request, dict) else {}
+        override = request.get("language")
+        language = (i18n_mod.normalize(override) if override
+                    else self._ui_language())
         return {"ok": True, "language": language, **self._ui_maps(language)}
 
     def _ui_maps(self, language: str) -> dict:

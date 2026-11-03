@@ -87,8 +87,12 @@ class FakeApi:
     Настоящий Api поднимает базу и воркеры - здесь важны только коды и тела.
     """
 
-    def ui_texts(self):
-        return {"ok": True, "language": i18n.DEFAULT_LANGUAGE}
+    def ui_texts(self, request=None):
+        # Тот же контракт, что у Api: request.language читает подписи на
+        # другом языке, НЕ меняя настройку сервера (S5).
+        return {"ok": True,
+                "language": (request or {}).get("language")
+                or i18n.DEFAULT_LANGUAGE}
 
     def tags_popular(self):
         return ["музыка", "код"]     # список - как окну, без обёртки
@@ -380,6 +384,44 @@ class ServeCase(unittest.TestCase):
         self.assertEqual(payload.get("code"), "missing")
         self.assertEqual(payload.get("target"), "nothing_here")
 
+    # -- права ключа для клиента (S5: GET /whoami) ---------------------------
+
+    def test_whoami_reports_the_scopes_of_the_presented_key(self):
+        """Клиент узнаёт свои права, чтобы подписать недоступные цели до запроса."""
+        status, payload, text, _ = self.request("GET", "/whoami",
+                                                token=self.read_token.value)
+        self.assertEqual(status, 200, payload or text[:80])
+        self.assertTrue(payload.get("ok"))
+        self.assertTrue(payload.get("paired"))
+        self.assertEqual(payload.get("scopes"), ["read", "watch"],
+                         "список прав должен быть тем же, что на токене")
+        self.assertEqual(payload.get("label"), "читатель")
+        self.assertNotIn(self.read_token.value, text,
+                         "значение токена ушло в ответ - читает любой, кто его перехватил")
+
+    def test_whoami_without_a_key_names_pairing(self):
+        """Без ключа - причина привязки, а не пустой список прав (§3)."""
+        status, payload, _, _ = self.request("GET", "/whoami")
+        self.assertEqual(status, 401)
+        self.assertEqual(payload.get("code"), "pairing")
+        self.assertIn(i18n.t("http.pairing", "ru"), payload.get("error", ""))
+        self.assertNotIn("scopes", payload or {},
+                         "пустой список прав читался бы как «доступ есть, но никакой»")
+
+    def test_whoami_is_a_read_route_not_a_method_call(self):
+        status, payload, _, _ = self.request("POST", "/whoami",
+                                             token=self.read_token.value)
+        self.assertEqual(status, 405)
+        self.assertIn(i18n.t("http.get_only", "ru"), payload.get("error", ""))
+
+    def test_whoami_is_written_to_the_audit(self):
+        self.request("GET", "/whoami", token=self.full_token.value)
+        blob = "\n".join(self.journal.tail())
+        self.assertIn("whoami", blob, "обращение за читаемые права не видно в журнале")
+        self.assertIn("полный", blob)
+        self.assertNotIn(self.full_token.value, blob,
+                         "значение токена попало в журнал аудита")
+
     # -- тело запроса -------------------------------------------------------
 
     def test_positional_array_matches_the_window_bridge(self):
@@ -402,6 +444,13 @@ class ServeCase(unittest.TestCase):
                                              token=self.read_token.value)
         self.assertEqual(status, 200, payload)
         self.assertTrue(payload.get("ok"))
+
+    def test_local_language_override_is_passed_positionally(self):
+        """Клиент читает подписи своего языка тем же способом, что окно (§8)."""
+        status, payload, _, _ = self.post("ui_texts", body=[{"language": "en"}])
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload.get("language"), "en",
+                         "язык клиента не дошёл до сервера: подписи пришли на русском")
 
     def test_bad_json_is_named(self):
         status, payload, _, _ = self.request("POST", "/api/poll", raw="не json",

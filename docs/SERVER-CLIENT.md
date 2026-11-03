@@ -120,6 +120,13 @@
   карте (traversal по чужому пути — 404), `ETag` по sha256 и 304; вендор
   закреплён по sha256 в `ui_src/vendor/hls.js.meta.json`.
 
+Права ключа (S5, §4): `GET /whoami` — сервер называет скоупы предъявленного
+ключа (`{paired, label, scopes}`), значений токенов в ответе нет; без ключа —
+401 «привязка не завершена», `POST /whoami` — 405 (это чтение, а не вызов
+метода). Клиент по этому списку подписывает недоступные цели до запроса
+(«не выдан скоуп <имя>», «доступно только на сервере») и не отправляет вызов,
+которому право не выдано; решают права по-прежнему сервер и тот же список.
+
 Никаких чужих хостов: HTTP включается только по метке сервера
 (`window.OMNISTASH_HTTP`), которую ставит `--serve` — страница окна живёт
 строкой (`about:`), а превью может подаваться обычным статическим сервером и
@@ -249,15 +256,22 @@ pairing (§5) и правится в настройках сервера. Пуб
 
 - та же разметка и те же токены DESIGN-UI; никаких новых `@keyframes`;
 - тема/шрифт/язык — локальные (`localStorage`), подписи приходят из того же
-  словаря `app/i18n.py` через `ui_texts`;
+  словаря `app/i18n.py` через `ui_texts` с `request.language` (это чтение
+  подписей, а не смена настройки: окно сервера остаётся на своём языке);
 - вместо системного диалога папки — поле пути и `storage_check` (доступность
-  проверяет сервер);
-- нативные цели показываются с подписью «доступен только на сервере»
-  (не серой кнопкой); цели без скоупа — «не выдан скоуп <имя>»;
-- `/watch/<video_id>` — доступность и узкий экран по §7 DESIGN-UI;
+  проверяет сервер); пустое поле названо причиной, а не «тихий отказ»;
+- права ключа читает `GET /whoami`: строка «права ключа: … · не выдано: …»,
+  а на недоступной цели — подпись «не выдан скоуп <имя>» текстом (не серой
+  кнопкой, не молчанием); нативные цели — «доступно только на сервере»;
+  запрос, которому право не выдано, клиент не отправляет;
+- `/watch/<video_id>` — доступность и узкий экран по §7 DESIGN-UI; переход
+  в плеер требует права `watch` и отказывает подписью до перехода;
 - заодно закрываем открытые пункты DESIGN-UI: №5 (табовая семантика строки
-  вкладок) и №25 (второй индикатор «где я»), и M13 (`queue_retry` с
-  `attempt_chain=True`).
+  вкладок — `tablist`/`tab`/`tabpanel`, `aria-selected`, `aria-controls`,
+  roving tabindex, стрелки ←→ с Home/End) и №25 (активная вкладка: цвет +
+  underline + фон, и текстовый «Где я» на узком экране), и M13 (`queue_retry`
+  с `attempt_chain=True` — флаг «Попробовать другую дорогу» рядом с кнопкой
+  повтора, итог называет, какая дорога прогоняется).
 
 ---
 
@@ -274,7 +288,7 @@ pairing (§5) и правится в настройках сервера. Пуб
 | **S2** | Байты: `/thumb/<video_id>` (ETag вместо data-URI), `/media/<file_id>` с `Range`/206/416/413 и честным 404 по `files.missing`, `/subs/<file_id>` (VTT) | `app/http/media.py`, `tests/test_serve_media.py` | `feat(serve): раздача обложек, байтов и субтитров …` |
 | **S3** | HLS-конвейер: ffprobe-проба кодекса, `-c copy` в `profile/hls_cache/` (ffmpeg пишет `index.m3u8` + `seg<N>.ts`), кеш по сигнатуре файла и замок на видео, инвалидация хуками по repack/migrate/rebind/удалению строки, `serve_rate_mbit`, `serve_watchers_max` (слоты раздачи и сессии плеера — одним лимитом), откат по кодексу и `serve_hls_transcode` | `app/http/hls.py`, `tests/test_serve_hls.py` | `feat(serve): HLS на лету …` |
 | **S4** | `ui_src/watch.html` + `ui_src/watch.js` + `ui_src/vendor/hls.js` (Apache-2.0 по метадате пакета, pin по sha256 в `ui_src/vendor/hls.js.meta.json`): HLS, субтитры, список файлов; доступность и узкий экран по §7 DESIGN-UI | `ui_src/watch.html`, `ui_src/watch.js`, `ui_src/vendor/hls.js`, `tests/test_ui_watch.py` | `feat(ui): страница воспроизведения клиента …` |
-| **S5** | Полная UI по HTTP: скоупы `queue`, `mark`, `sources`, `mesh`, `accounts`, `server_config`; локальные тема/язык; поле пути вместо `pick_folder`; честные подписи недоступных целей; DESIGN-UI №5 и №25; M13 `queue_retry(attempt_chain=True)` | `ui_src/app.js`, `ui_src/index.html`, `ui_src/app.css`, `tests/test_ui_http_scopes.py` | `feat(ui): клиентская UI по HTTP с скоупами …` |
+| **S5** | Полная UI по HTTP: `GET /whoami` (права ключа), скоупы `queue`, `mark`, `sources`, `mesh`, `accounts`, `server_config` в подписях целей; локальные тема/язык (`localStorage` + `ui_texts` с `language`); поле пути вместо `pick_folder`; честные подписи недоступных целей; DESIGN-UI №5 и №25; M13 `queue_retry(attempt_chain=True)` | `ui_src/app.js`, `ui_src/index.html`, `ui_src/app.css`, `app/http/server.py`, `app/gui.py`, `app/i18n.py`, `tests/test_ui_http_scopes.py`, `tests/test_serve.py` | `feat(ui): клиентская UI по HTTP с скоупами …` |
 | **S6** | Экспозиция: `serve_bind` (loopback / LAN / Tailscale / 0.0.0.0+allowlist), диалог согласия «что уходит наружу», предупреждение zapret/DPI и зоны портов, pairing-код, тормоз перебора, лимиты | `app/http/pair.py`, `app/http/bind.py`, `app/gui.py`, `app/settings_schema.py`, `tests/test_serve_exposure.py` | `feat(serve): режимы экспозиции и привязка …` |
 | **S7** | Сборка и документы: режим сервера в exe и планировщике, строка дорожной карты **SV-C** в `README.md`, `THIRD_PARTY_NOTICES.md` + `docs/LEGAL-REVIEW.md` для `hls.js`, **и правка CI-workflow** (`.github/workflows/*.yml`, `.github/workflows/release.yml`) — шаг сборки клиентского бандла (`ui_src` + `vendor/hls.js` + `watch.*`) после проверочных шагов набора, с линтом пинов | `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `tools/build_client.py`, `README.md`, `THIRD_PARTY_NOTICES.md`, `docs/LEGAL-REVIEW.md`, `Omnistash.spec` | `build(ci): сборка клиентского решения …` |
 

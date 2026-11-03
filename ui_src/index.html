@@ -23,28 +23,55 @@
     <!-- data-l/data-l-tip: перевод подписей по ключам i18n (M15);
         русские строки остаются в разметке как fallback -->
     <button id="rescan-btn" class="btn" title="Пройти папки библиотеки и обновить индекс"
-            data-l-tip="btn.rescan.tip"><span data-l="btn.rescan">Переиндексировать</span></button>
-    <button id="stop-scan-btn" class="btn ghost" data-l="btn.stop">Отмена</button>
+            data-need="sources" data-l-tip="btn.rescan.tip"><span data-l="btn.rescan">Переиндексировать</span></button>
+    <button id="stop-scan-btn" class="btn ghost" data-need="sources" data-l="btn.stop">Отмена</button>
     <button id="add-btn" class="btn primary" title="Добавить плейлист или канал"
-            data-l-tip="btn.add.tip"><span data-l="btn.add">Добавить</span></button>
+            data-need="queue" data-l-tip="btn.add.tip"><span data-l="btn.add">Добавить</span></button>
   </div>
 </header>
 
-<nav class="tabs" id="tabs">
-  <button class="tab active" data-tab="library"><span data-l="tab.library">Библиотека</span></button>
-  <button class="tab" data-tab="sync"><span data-l="tab.sync">Синхронизация</span></button>
-  <button class="tab" data-tab="queue"><span data-l="tab.queue">Очередь</span> <span class="badge" id="queue-badge" hidden>0</span></button>
+<!-- Строка вкладок: табовая семантика (§5.5, замена №5) - tablist с tabs,
+    панель как tabpanel, активная вкладка читается AT через aria-selected,
+    обход стрелками ←→ (кольцевой) с Home/End. Площадочные вкладки добавляются
+    динамически в span с role="presentation": он не входит в дерево AT, его
+    tabs остаются детьми tablist. -->
+<nav class="tabs" id="tabs" role="tablist" aria-label="Разделы программы">
+  <button class="tab active" id="tab-library" role="tab" tabindex="0"
+          aria-selected="true" aria-current="true" aria-controls="panel-library"
+          data-tab="library"><span data-l="tab.library">Библиотека</span></button>
+  <button class="tab" id="tab-sync" role="tab" tabindex="-1"
+          aria-selected="false" aria-controls="panel-sync"
+          data-tab="sync"><span data-l="tab.sync">Синхронизация</span></button>
+  <button class="tab" id="tab-queue" role="tab" tabindex="-1"
+          aria-selected="false" aria-controls="panel-queue"
+          data-tab="queue"><span data-l="tab.queue">Очередь</span> <span class="badge" id="queue-badge" hidden>0</span></button>
   <!-- Вкладки площадок: взрослая вкладка добавляется только после
       подтверждения 18+ (M15), до подтверждения её здесь нет -->
-  <span id="platform-tabs"></span>
-  <button class="tab" data-tab="settings"><span data-l="tab.settings">Настройки</span></button>
+  <span id="platform-tabs" role="presentation"></span>
+  <button class="tab" id="tab-settings" role="tab" tabindex="-1"
+          aria-selected="false" aria-controls="panel-settings"
+          data-tab="settings"><span data-l="tab.settings">Настройки</span></button>
 </nav>
+
+<!-- Права ключа (S5, §4): что выдано и что не выдано - текст, а не серая
+    кнопка и не молчание. Пока сервер не ответил «кому какие права», строка
+    говорит, что права не прочитаны: недоступные цели не подписываются
+    выдуманным отказом. -->
+<div id="access-band" class="access-band" role="status" aria-live="polite" hidden></div>
+
+<!-- Второй индикатор «где я» (замена №25): на широком экране активная вкладка
+    имеет цвет + underline + фон, на узком строка вкладок не помещается и
+    текущий раздел назван текстом (виден только на узком экране - app.css). -->
+<div class="where" id="where-am-i" role="status" aria-live="polite"></div>
 
 <main class="main">
 
   <!-- ================= Библиотека ================= -->
-  <section class="panel split" id="panel-library">
-    <aside class="tree" id="tree"></aside>
+  <section class="panel split" id="panel-library" role="tabpanel" tabindex="0"
+           aria-labelledby="tab-library">
+    <!-- Боковая навигация области (§5.5, замена №25): landmark + текущая
+        область читается через aria-current на записи дерева. -->
+    <aside class="tree" id="tree" role="navigation" aria-label="Область библиотеки"></aside>
 
     <section class="list">
       <div class="toolbar">
@@ -79,11 +106,11 @@
                   title="Крупная плитка" aria-label="Крупная плитка">К</button>
         </span>
         <span class="spacer"></span>
-        <button class="btn ghost" id="verify-btn"
+        <button class="btn ghost" id="verify-btn" data-need="sources"
                 title="Сверить файлы с хешем в индексе">Целостность</button>
-        <button class="btn ghost" id="repack-btn"
+        <button class="btn ghost" id="repack-btn" data-need="sources"
                 title="Переименовать выбранные (или текущую область) по шаблону из настроек">Переупаковать…</button>
-        <button class="btn ghost" id="dedupe-btn"
+        <button class="btn ghost" id="dedupe-btn" data-need="read"
                 title="Найти копии файлов и разобрать их">Дубликаты</button>
         <span class="muted" id="list-total"></span>
       </div>
@@ -105,20 +132,20 @@
       <div class="scan-bar" id="refresh-bar" hidden>
         <div class="scan-track"><div class="scan-fill" id="refresh-fill"></div></div>
         <div class="scan-text" id="refresh-text"></div>
-        <div><button class="btn ghost" id="refresh-stop-btn">Остановить</button></div>
+        <div><button class="btn ghost" id="refresh-stop-btn" data-need="sources">Остановить</button></div>
       </div>
 
       <div class="notice" id="verify-note" hidden>
         <span id="verify-note-text"></span>
         <span class="spacer"></span>
-        <button class="btn ghost" id="verify-repair-btn" hidden>Перекачать битые</button>
+        <button class="btn ghost" id="verify-repair-btn" hidden data-need="queue">Перекачать битые</button>
         <button class="btn ghost" id="verify-close-btn">Скрыть</button>
       </div>
 
       <div class="notice" id="dedupe-note" hidden>
         <span id="dedupe-note-text"></span>
         <span class="spacer"></span>
-        <button class="btn ghost" id="dedupe-note-btn">Разобрать</button>
+        <button class="btn ghost" id="dedupe-note-btn" data-need="sources">Разобрать</button>
       </div>
 
       <!-- Панель мультивыбора (§3.7): групповые операции -> primary
@@ -133,24 +160,26 @@
         <select id="sel-storage" data-storage-select
                 title="Куда качать выбранные"></select>
         <span class="spacer"></span>
-        <button class="btn ghost" id="sel-collect"
+        <button class="btn ghost" id="sel-collect" data-need="sources"
                 title="Добавить выбранные в папку-коллекцию (разные площадки)">В коллекцию…</button>
-        <button class="btn ghost" id="sel-collect-remove" hidden
+        <button class="btn ghost" id="sel-collect-remove" hidden data-need="sources"
                 title="Убрать выбранные из этой папки">Убрать из папки</button>
-        <button class="btn ghost" id="sel-collect-rename" hidden
+        <button class="btn ghost" id="sel-collect-rename" hidden data-need="sources"
                 title="Переименовать папку">Переименовать…</button>
-        <button class="btn ghost" id="sel-mark"
+        <button class="btn ghost" id="sel-mark" data-need="mark"
                 title="Теги, рейтинг, «просмотрено» для выбранных">Пометить…</button>
-        <button class="btn ghost" id="sel-move"
+        <button class="btn ghost" id="sel-move" data-need="sources"
                 title="Перенести выбранные файлы в другое хранилище">Перенести…</button>
+        <!-- «Операции…» смешивает права (mark + sources): цели внутри диалога
+            подписываются отдельно, поэтому полоса не гасит её целиком. -->
         <button class="btn ghost" id="sel-bulk"
                 title="Теги, рейтинг, папка и удаление строк для выбранных">Операции…</button>
-        <button class="btn primary" id="sel-download"
+        <button class="btn primary" id="sel-download" data-need="queue"
                 title="Одним действием в очередь; строки, где файл уже на месте, пропустим - они видны в сводке">Скачать</button>
         <button class="btn ghost" id="sel-clear">Снять выбор</button>
         <!-- Разрушительное действие не в одном ряду с обычными: последним
             справа, диалог называет N (шаг 4, §3.7). -->
-        <button class="btn danger" id="sel-collect-delete" hidden
+        <button class="btn danger" id="sel-collect-delete" hidden data-need="sources"
                 title="Удалить папку (строки видео остаются)">Удалить папку</button>
       </div>
 
@@ -161,11 +190,11 @@
         <select id="col-storage" data-storage-select
                 title="Куда качать все строки папки"></select>
         <span class="spacer"></span>
-        <button class="btn primary" id="col-download"
+        <button class="btn primary" id="col-download" data-need="queue"
                 title="Все строки папки в очередь одним действием; скачанные пропустим - сводка покажет причины">Скачать всё</button>
         <button class="btn ghost" id="col-ops"
                 title="Теги, рейтинг, папка и удаление строк для всех строк папки">Операции…</button>
-        <button class="btn ghost" id="col-purge"
+        <button class="btn ghost" id="col-purge" data-need="sources"
                 title="Убрать все связи этой папки (строки видео остаются)">Убрать из папки</button>
       </div>
 
@@ -190,13 +219,14 @@
   </section>
 
   <!-- ================= Синхронизация ================= -->
-  <section class="panel" id="panel-sync" hidden>
+  <section class="panel" id="panel-sync" role="tabpanel" tabindex="0"
+           aria-labelledby="tab-sync" hidden>
     <div class="toolbar">
       <h2>Источники</h2>
       <span class="spacer"></span>
-      <button class="btn primary" id="sync-all-btn"
+      <button class="btn primary" id="sync-all-btn" data-need="sources"
               title="Синк всех источников, затем метаданные видео вне источников">Актуализировать</button>
-      <button class="btn ghost" id="sync-stop-btn" hidden>Остановить</button>
+      <button class="btn ghost" id="sync-stop-btn" hidden data-need="sources">Остановить</button>
     </div>
 
     <div class="schedule-line" id="schedule-line"></div>
@@ -230,7 +260,7 @@
         <span class="spacer"></span>
         <select id="sync-storage" data-storage-select aria-label="Хранилище"
                 title="Куда ставить новые"></select>
-        <button class="btn primary" id="sync-queue-btn" hidden>Поставить новые в очередь</button>
+        <button class="btn primary" id="sync-queue-btn" hidden data-need="queue">Поставить новые в очередь</button>
       </div>
       <table class="table">
         <thead><tr><th>Источник</th><th>Режим</th><th class="num">Новых</th>
@@ -251,13 +281,21 @@
   </section>
 
   <!-- ================= Очередь ================= -->
-  <section class="panel" id="panel-queue" hidden>
+  <section class="panel" id="panel-queue" role="tabpanel" tabindex="0"
+           aria-labelledby="tab-queue" hidden>
     <div class="toolbar">
       <h2>Очередь загрузки</h2>
       <span class="spacer"></span>
-      <button class="btn primary" id="queue-start-btn">Запустить</button>
-      <button class="btn ghost" id="queue-stop-btn" hidden>Остановить</button>
-      <button class="btn" id="queue-retry-btn" hidden>Повторить упавшие</button>
+      <button class="btn primary" id="queue-start-btn" data-need="queue">Запустить</button>
+      <button class="btn ghost" id="queue-stop-btn" hidden data-need="queue">Остановить</button>
+      <button class="btn" id="queue-retry-btn" hidden data-need="queue">Повторить упавшие</button>
+      <!-- M13: «попробовать другую дорогу» - флаг для того же повтора:
+          value идёт в queue_retry(attempt_chain=True). Появляется вместе с
+          кнопкой повтора (упавшие строки есть или их нет - одно решение). -->
+      <label class="check" id="queue-chain-wrap" hidden>
+        <input type="checkbox" id="queue-chain" data-l-tip="queue.chain.tip">
+        <span data-l="queue.chain.label">Попробовать другую дорогу</span>
+      </label>
     </div>
 
     <!-- Появляется, когда очередь реально качала без ffmpeg, и гаснет после
@@ -266,7 +304,7 @@
       <span id="ffmpeg-note-text">ffmpeg не найден: склейка, метаданные и
         субтитры в файл, перекодировка - недоступны.</span>
       <span class="spacer"></span>
-      <button class="btn ghost" id="ffmpeg-note-btn">Установить ffmpeg</button>
+      <button class="btn ghost" id="ffmpeg-note-btn" data-need="server_config">Установить ffmpeg</button>
       <button class="btn ghost" id="ffmpeg-note-close">Скрыть</button>
     </div>
 
@@ -304,7 +342,9 @@
   <!-- ================= Платформенная вкладка (P2): одна панель на
        любую площадку (контекст = platform); вкладки-кнопки динамические,
        см. platforms_list ======================================= -->
-  <section class="panel" id="panel-platform" hidden>
+  <!-- Панель площадки: aria-labelledby ставит JS на активную вкладку
+      площадки (вкладки динамические, их id появляется с данными). -->
+  <section class="panel" id="panel-platform" role="tabpanel" tabindex="0" hidden>
     <div class="toolbar">
       <b id="pf-title">Площадка</b>
       <!-- Сегмент режима внутри панели (не боковая навигация): радио-группа
@@ -339,10 +379,10 @@
         <option value="tag:asc">по тегу (алфавит)</option>
       </select>
       <span class="spacer"></span>
-      <button class="btn ghost" id="pf-add"
+      <button class="btn ghost" id="pf-add" data-need="queue"
               title="Добавить видео/канал/плейлист этой площадки">+ Добавить</button>
-      <button class="btn ghost" id="cat-refresh" hidden title="Обновить без кэша">↻ Обновить</button>
-      <button class="btn ghost" id="cat-cancel" hidden>Отменить загрузку</button>
+      <button class="btn ghost" id="cat-refresh" hidden data-need="read" title="Обновить без кэша">↻ Обновить</button>
+      <button class="btn ghost" id="cat-cancel" hidden data-need="read">Отменить загрузку</button>
       <span class="muted" id="ph-count"></span>
     </div>
     <div class="toolbar" id="ph-tags" aria-label="Фильтр по тегам"></div>
@@ -354,22 +394,25 @@
      открывается рядом с приложением, а панель показывает захваченный адрес. -->
     <div class="browser-panel" id="browser-panel">
       <div class="browser-line">
-        <button class="btn primary" id="browser-open-btn"
+        <!-- Окно площадки и проводник адреса - нативные цели: сервер не
+            может открыть окно на чужой машине, клиент читает подпись, а не
+            серую кнопку (§8). -->
+        <button class="btn primary" id="browser-open-btn" data-native="browser_open"
                 title="Открыть площадку в отдельном окне рядом с Omnistash">Открыть площадку</button>
-        <button class="btn ghost" id="browser-system-btn" hidden
+        <button class="btn ghost" id="browser-system-btn" hidden data-native="browser_open_system_browser"
                 title="Открыть ссылку в системном браузере (webview-окно не поднялось)">В системном браузере</button>
-        <button class="btn ghost" id="browser-pick-btn" hidden
+        <button class="btn ghost" id="browser-pick-btn" hidden data-native="browser_address"
                 title="Снять адрес со страницы окна (location.href)">Забрать адрес</button>
-        <button class="btn ghost" id="browser-close-btn" hidden>Закрыть окно</button>
+        <button class="btn ghost" id="browser-close-btn" hidden data-native="browser_close">Закрыть окно</button>
         <input type="text" id="browser-url" autocomplete="off"
                placeholder="ссылка площадки или адрес из окна…"
                title="Ссылка для окна или адрес, вставленный из браузера">
       </div>
       <div class="browser-address" id="browser-address" hidden></div>
       <div class="browser-line" id="browser-actions" hidden>
-        <button class="btn primary" id="browser-download-btn"
+        <button class="btn primary" id="browser-download-btn" data-need="queue"
                 title="Одиночное видео по адресу: пишется и встаёт в очередь сразу">Скачать это видео</button>
-        <button class="btn ghost" id="browser-source-btn"
+        <button class="btn ghost" id="browser-source-btn" data-need="queue"
                 title="Плейлист или канал по адресу: план в диалоге «Добавить источник»">Как источник</button>
         <span class="muted" id="browser-pending"></span>
       </div>
@@ -422,8 +465,11 @@
     </div>
   </section>
 
-  <section class="panel" id="panel-settings" hidden>
-    <div id="settings-body" class="settings"></div>
+  <!-- Карточка настроек правится server_config: клиент без этого права
+      видит подпись, а не поле, которое не сохранится (§8). -->
+  <section class="panel" id="panel-settings" role="tabpanel" tabindex="0"
+           aria-labelledby="tab-settings" hidden>
+    <div id="settings-body" class="settings" data-need="server_config"></div>
   </section>
 
 </main>
@@ -433,7 +479,7 @@
       смену «Готов. / Работаю…», роль status. -->
   <div class="foot-status" id="status" role="status" aria-live="polite">Готов.</div>
   <button class="link-btn" id="log-toggle">Журнал</button>
-  <button class="link-btn" id="log-open"
+  <button class="link-btn" id="log-open" data-native="open_log"
           title="Открыть omnistash.log в ассоциированной программе">Файл журнала</button>
   <div class="foot-version" id="version"></div>
 </footer>
@@ -462,7 +508,7 @@
       <div class="card-title" id="add-title">Добавить источник</div>
       <button class="icon-btn" id="add-close" aria-label="Закрыть">✕</button>
     </div>
-    <div class="card-body" id="add-body"></div>
+    <div class="card-body" id="add-body" data-need="queue"></div>
   </div>
 </div>
 
@@ -473,7 +519,9 @@
       <div class="card-title" id="mark-title">Пометить</div>
       <button class="icon-btn" id="mark-close" aria-label="Закрыть">✕</button>
     </div>
-    <div class="card-body" id="mark-body"></div>
+    <!-- Право пометок (`mark`): неподписанная цель отказывается тостом с
+        причиной, а не молча (§8). -->
+    <div class="card-body" id="mark-body" data-need="mark"></div>
   </div>
 </div>
 
@@ -495,7 +543,7 @@
       <div class="card-title" id="repack-title">Переупаковка по шаблону</div>
       <button class="icon-btn" id="repack-close" aria-label="Закрыть">✕</button>
     </div>
-    <div class="card-body" id="repack-body"></div>
+    <div class="card-body" id="repack-body" data-need="sources"></div>
   </div>
 </div>
 
@@ -506,7 +554,7 @@
       <div class="card-title" id="migrate-title">Перенос в другое хранилище</div>
       <button class="icon-btn" id="migrate-close" aria-label="Закрыть">✕</button>
     </div>
-    <div class="card-body" id="migrate-body"></div>
+    <div class="card-body" id="migrate-body" data-need="sources"></div>
   </div>
 </div>
 
@@ -517,7 +565,7 @@
       <div class="card-title" id="dedupe-title">Сверка и дубликаты</div>
       <button class="icon-btn" id="dedupe-close" aria-label="Закрыть">✕</button>
     </div>
-    <div class="card-body" id="dedupe-body"></div>
+    <div class="card-body" id="dedupe-body" data-need="sources"></div>
   </div>
 </div>
 
@@ -528,7 +576,7 @@
       <div class="card-title" id="ffmpeg-title">Установка FFmpeg</div>
       <button class="icon-btn" id="ffmpeg-close" aria-label="Закрыть">✕</button>
     </div>
-    <div class="card-body" id="ffmpeg-body"></div>
+    <div class="card-body" id="ffmpeg-body" data-need="server_config"></div>
   </div>
 </div>
 
@@ -539,7 +587,7 @@
       <div class="card-title" id="peer-title">Участники</div>
       <button class="icon-btn" id="peer-close" aria-label="Закрыть">✕</button>
     </div>
-    <div class="card-body" id="peer-body"></div>
+    <div class="card-body" id="peer-body" data-need="mesh"></div>
   </div>
 </div>
 
@@ -570,7 +618,9 @@
       <div class="card-title" id="account-title">Вход в Google</div>
       <button class="icon-btn" id="account-close" aria-label="Закрыть">✕</button>
     </div>
-    <div class="card-body" id="account-body"></div>
+    <!-- Вход в Google открывается окном сервера: клиенту цель недоступна,
+        путь без окна - импорт cookies (§8). -->
+    <div class="card-body" id="account-body" data-native="account_login_start"></div>
   </div>
 </div>
 
@@ -586,9 +636,16 @@
         выбрать, куда качать, при каждой загрузке.</p>
       <p class="muted">Папку можно сменить в любой момент в настройках;
         смена пути не перекачивает файлы.</p>
+      <!-- Клиент не имеет проводника сервера: путь пишется текстом, а
+          «добавлено ли» и «доступно ли» решает сервер (§8). -->
+      <div class="card-actions" id="wizard-client" hidden>
+        <input type="text" id="wizard-path" placeholder="путь папки хранилища…"
+               aria-label="Путь папки хранилища" data-l-tip="storage.path.tip">
+        <button class="btn primary" id="wizard-path-btn" data-need="sources">Добавить папку</button>
+      </div>
       <div class="card-actions">
         <button class="btn ghost" id="wizard-later">Настроить позже</button>
-        <button class="btn primary" id="wizard-pick">Выбрать папку…</button>
+        <button class="btn primary" id="wizard-pick" data-native="pick_folder">Выбрать папку…</button>
       </div>
     </div>
   </div>

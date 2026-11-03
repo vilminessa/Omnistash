@@ -178,6 +178,12 @@ class TestJsMotion(unittest.TestCase):
         toast = re.search(r"function toast\(([\s\S]*?)\n  \}", self.js)
         self.assertTrue(toast, "toast не найден")
         body = toast.group(1)
+        # Подпись тоста обязана записываться: без textContent тост - пустой
+        # пузырь, и отказ (transport, скоуп, путь) не читается вообще.
+        self.assertIn("el.textContent = text", body,
+                      "тост не записывает подпись - причина отказа не читается")
+        self.assertLess(body.index("el.textContent"), body.index('setAttribute("role"'),
+                        "текст ставится после роли: live-регион мог прочитать пустоту")
         self.assertIn('setAttribute("role", isError ? "alert" : "status")', body,
                       "тост без live-роли (замена №17)")
         self.assertIn("requestAnimationFrame", body)

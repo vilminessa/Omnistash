@@ -276,6 +276,8 @@ _TEXTS: dict = {
     "http.scope_denied": {"ru": "не выдан скоуп", "en": "scope not granted"},
     "http.post_only": {"ru": "вызов метода - только POST",
                        "en": "method calls must use POST"},
+    "http.get_only": {"ru": "этот маршрут читается только GET",
+                      "en": "this route is read with GET only"},
     "http.bad_body": {"ru": "тело запроса не разобрано",
                       "en": "the request body was not parsed"},
     "http.body_too_large": {"ru": "тело запроса слишком большое",
@@ -341,6 +343,81 @@ _TEXTS: dict = {
     "watch.hash": {"ru": "хеш выдан", "en": "hash granted"},
     "watch.hash_none": {"ru": "хеш не вычислен", "en": "hash not computed"},
     "watch.gone": {"ru": "файл пропал с диска", "en": "file gone from disk"},
+
+    # ---- права ключа клиента (SV-C S5, docs/SERVER-CLIENT.md §4, §8) ------
+    # Права клиент читает у сервера (GET /whoami). Чего не выдано - называется
+    # подписью, а не серой кнопкой и не молчанием; имена скоупов не переводим:
+    # их говорит сервер в 403 и они те же в реестре токенов.
+    "access.granted": {"ru": "права ключа:", "en": "key rights:"},
+    "access.missing": {"ru": "не выдано:", "en": "not granted:"},
+    "access.unknown": {"ru": "права ключа не прочитаны",
+                       "en": "key rights were not read"},
+    "access.none": {"ru": "на ключе нет ни одного скоупа - доступ не выдан",
+                    "en": "the key has no scopes - access is not granted"},
+    "access.native": {"ru": "часть целей доступна только на сервере: диалог "
+                            "папки, проводник, окно площадки, вход в аккаунт",
+                      "en": "some targets are available on the server only: "
+                            "the folder picker, the explorer, the site window, "
+                            "the account sign-in"},
+
+    # ---- «где я» (DESIGN-UI §1 №25) ---------------------------------------
+    # На широком экране активная вкладка читается цветом + underline + фоном;
+    # на узком строка вкладок может не помещаться, поэтому добавлен второй
+    # индикатор - текстовая строка «Где я».
+    "ui.where": {"ru": "Где я:", "en": "Where am I:"},
+    "ui.where.pool": {"ru": "весь пул", "en": "whole pool"},
+    "ui.where.platform": {"ru": "площадка", "en": "site"},
+
+    # ---- M13: повтор упавших «другой дорогой» -----------------------------
+    "queue.retry.label": {"ru": "Повторить упавшие", "en": "Retry failed"},
+    "queue.chain.label": {"ru": "Попробовать другую дорогу",
+                          "en": "Try another road"},
+    "queue.chain.tip": {
+        "ru": "Для упавших строк: забыть дорогу, которая выиграла, и прогнать "
+              "цепочку дорог выкачки заново. Сеть пользователя не меняется - "
+              "обход DPI не трогается.",
+        "en": "For failed rows: forget the road that won and walk the download "
+              "road chain again. The user's network is not changed - the DPI "
+              "bypass is not touched."},
+    "queue.chain.on": {"ru": "другая дорога прогоняется заново",
+                       "en": "another road is walked again"},
+    "queue.chain.off": {"ru": "прежная выигравшая дорога площадки",
+                        "en": "the site road that won stays"},
+
+    # ---- локальные предпочтения клиента (§8) ------------------------------
+    # Тема, шрифт и язык применяются к этому клиенту и лежат в localStorage:
+    # окно сервера от них не меняется.
+    "prefs.local.note": {
+        "ru": "вид этого клиента: значение сохраняется у вас и не меняет окно "
+              "сервера",
+        "en": "this client's view: the value is saved for you and does not "
+              "change the server window"},
+    "prefs.local.denied": {
+        "ru": "localStorage недоступен - настройка клиента не сохранится",
+        "en": "localStorage is unavailable - the client setting will not be "
+              "saved"},
+
+    # ---- поле пути вместо диалога папки (§8) ------------------------------
+    # Клиент не имеет проводника сервера: путь пишется текстом, а доступность
+    # проверяет сервер (storage_check и storage_set_path отвечают причиной).
+    "storage.path.label": {"ru": "Путь папки на сервере",
+                           "en": "Folder path on the server"},
+    "storage.path.apply": {"ru": "Применить путь", "en": "Apply path"},
+    "storage.add.label": {"ru": "+ Добавить папку", "en": "+ Add folder"},
+    "storage.check.label": {"ru": "Проверить доступность",
+                            "en": "Check availability"},
+    "storage.path.tip": {
+        "ru": "диалог папки доступен только на сервере: путь пишется здесь, "
+              "доступность проверяет сервер",
+        "en": "the folder picker is available on the server only: the path is "
+              "typed here, availability is checked by the server"},
+    "storage.path.none": {"ru": "путь не указан - сервер ничего не проверяет",
+                          "en": "path not given - the server checks nothing"},
+    "storage.client.note": {
+        "ru": "хранилища правит сервер: путь и доступность читает он, проводник "
+              "этого клиента отсутствует",
+        "en": "storages are owned by the server: it reads the path and "
+              "availability, this client has no explorer"},
 }
 
 _BY_KEY = dict(_TEXTS)
