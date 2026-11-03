@@ -1,0 +1,260 @@
+# SERVER-CLIENT — раздел «Сервер» и «Клиент»
+
+Дата: 2026-11-03. Basis: `d1ce071` (DESIGN-UI шаги 1–7 закоммичены).
+Документ фиксирует архитектуру, права доступа, конвейер воспроизведения и
+порядок исполнения S0–S7. Это спецификация: код в этой сессии меняется
+только в порядке §9. Связанные документы: `docs/DESIGN-UI.md` (UI клиента —
+те же токены и доступность), `docs/mesh-platform.md` (TLS-канал и аттестация),
+`docs/ACCEPTABLE_USE.md` и `docs/LEGAL-REVIEW.md` (взрослый гейт, публичные
+тексты,Third Party notices).
+
+## 0. Термины (фиксированные; использоваться в коде и комментариях)
+
+| Термин | Что означает в этом документе |
+|---|---|
+| **сервер** | Тот же процесс Omnistash, что сейчас (окно + очередь + скан), запущенный дополнительно с `--serve`: он поднимает HTTPS-слушатель рядом с окном и остаёт единственным владельцем базы, хранилищ и очереди. Серверный режим — Windows (DPAPI в `app/google_auth.py` остаётся в силе). |
+| **клиент** | Браузер (или второе окно Omnistash), который не имеет доступа к базе и к папкам хранилищ: говорит с сервером по HTTPS и воспроизводит видео напрямую из байтов сервера. |
+| **скоуп** | Право на токене доступа (`read`, `watch`, `queue`, `mark`, `sources`, `mesh`, `accounts`, `server_config`, `desktop`). Сервер решает скоуп, клиент только честно показывает, что ему не выдано. |
+| **аттестация и пин** | Эфемерный сертификат из `app/mesh/channel.py` несёт расширение `ATTEST_OID` (SPKI, подписанное identity-ключом Ed25519); клиент запоминает отпечаток SPKI (SHA-256) по TOFU и отказывает при подмене. |
+| **HLS-конвейер** | Раздача видео для браузера: `ffprobe` определяет кодек и позицию `moov`, `ffmpeg -f hls ... -c copy` пишет плейлист и сегменты в кеш профиля, плеер читает их по обычным HTTP-запросам. Ре-encode по умолчанию выключен. |
+| **честная подпись** | «не найден», «не получен», «не выдан», «доступен только на сервере» — как есть. Ни выдуманных 0→100 %, ни серой кнопки вместо объяснения (тот же принцип, что `docs/DESIGN-UI.md` §4.4 и §5.6). |
+
+Ограничения проекта, которые задают раздел: лицензия PolyForm Noncommercial
+(нельзя GPL/AGPL-зависимости; `hls.js` — MIT, проходит), ничего не
+скачивается в рантайме интерфейсом (весь плеер вшивается в `ui_src/vendor/`),
+страница окна не делает внешних запросов (`tests/test_gui.py`), TLS всегда и
+порт вне зоны перехвата DPI (тот же приём, что `mesh_port`, `app/settings_schema.py:502`),
+взрослый гейт решается на сервере и не обходится клиентом
+(`docs/PLAN-15H.md:11-14`, `app/legal.py`), русский по умолчанию и английский
+как опция (`app/i18n.py`), ffmpeg не встраивается в UI, новые `@keyframes`
+запрещены кроме `pulse`/`cat-sweep` (`docs/DESIGN-UI.md` §4), переходы только
+из токенов §2.7.
+
+---
+
+## 1. Что есть сейчас (факты по коду, не намерения)
+
+| Факт | Где | Что это значит для раздела |
+|---|---|---|
+| Окно поднимается строкой: `webview.create_window(html=build_page())`, мост — `js_api=Api` | `app/gui.py:5160-5175`, `app/ui.py:25-29` | Клиент получает ту же разметку, но мост заменяется HTTP-мостом; контракт имён методов сохраняется |
+| `Api` — 120 публичных методов, фасад к `app/repo.py`/`queue.py`/`storages.py`/`mesh` | `app/gui.py:121` | Это готовый слой для HTTP: `POST /api/<имя>` вызывает тот же метод |
+| Два headless-режима: `--scan`, `--sync` | `omnistash.py:19-27` | `--serve` — третий режим, рядом с ними; окно не обязательно, но серверный режим остаётся Windows |
+| Mesh-сервер: `ThreadingHTTPServer` + TLS из `channel.server_context()`, `Range`, 416/413, `pacing.RateLimiter`, `getfqdn` обойден | `app/mesh/server.py:33-91`, `app/mesh/channel.py:100-130` | Образец, который прямо переиспользуется: TLS-контекст, обход обратного DNS (17 с на подъём), чанковая раздача, лимит скорости |
+| Соединение sqlite — на поток (`threading.local`) | `app/db.py` | HTTP-потоки читают безопасно; пишущие потоки — те же, что в окне |
+| Обложки приходят data-URI: `_thumb_data_uri`, `get_thumb`, `get_thumbs` | `app/gui.py:71`, `app/gui.py:2832` | Для клиента это 120 запросов с base64 в JSON; заменяется `GET /thumb/<video_id>` + ETag (§3) |
+| Страница не делает внешних запросов: в тесте запрещён и `fetch(` | `tests/test_gui.py` (`test_page_has_no_external_requests`) | Разрешаем только свой адрес: `fetch` с `location.origin`, тест переформулируется на «нет чужих хостов» (§9 S0) |
+| Воспроизведение — системный плеер: `open_file` | `app/gui.py` (Api) | В окне остаётся; на клиенте появляется страница `/watch/<video_id>` с HLS и субтитрами |
+| Взрослый гейт: `app/legal.py`, `adult_tab_show` пишет флаг настройки | `app/gui.py:853-871` (UI), `app/legal.py` | Решается на сервере: клиент подтверждает 18+ тем же диалогом, флаг и факт живут в профиле сервера |
+| Токены OAuth хранятся через DPAPI | `app/google_auth.py:49-96` | Токены доступа HTTP-клиента — тот же путь хранения в профиле, без plaintext на диске |
+
+---
+
+## 2. Разделение: кто чем владеет
+
+**Сервер** (единственный владелец):
+- база (`app/db.py`), хранилища (`app/storages.py`), очередь (`app/queue.py`),
+  скан/синк (`app/indexer.py`, `app/sources.py`), mesh-участие и доверие
+  (`app/mesh/*`), настройки (`app/settings_schema.py`), журнал, ffmpeg, wormhole;
+- решает взрослый гейт и скоупы токена; пишет журнал аудита;
+- окно — как сейчас; `--serve` поднимает слушатель в том же процессе.
+
+**Клиент** (не имеет доступа к базе и диску):
+- та же разметка `ui_src/index.html` + `app.css` + `app.js`, тот же набор
+  вызовов, но через `POST /api/<имя>`;
+- воспроизведение: `/watch/<video_id>` (hls.js, субтитры, список файлов);
+- локальные предпочтения: тема, шрифт, язык — `localStorage`, серверный вид
+  окна не меняются (§8);
+- нативные цели (`pick_folder`, `open_folder`, `open_url`, `open_file`,
+  `close`, `browser_*`, вход OAuth) не вызываются: вместо них поле пути +
+  `storage_check` и честная подпись «доступен только на сервере».
+
+Разделение прав — не «тонкий клиент»: клиент с полными скоупами делает всё,
+что окно, кроме нативных диалогов; клиент с `read`+`watch` — только смотрит
+и играет.
+
+---
+
+## 3. Транспорт
+
+Вызов: `POST /api/<method>`, `Content-Type: application/json`,
+`Authorization: Bearer <token>`, тело `{...}` или `{}` (аргумент не передаём,
+когда его нет — тот же нюанс, что `ui_src/app.js:258-270`, чтобы метод
+`get_initial()` не получил лишний позиционный аргумент). Ответ — тот же
+Python-объект, что возвращает `Api`, в JSON (`ensure_ascii=false`).
+
+| Код | Что сервер говорит | Что делает клиент |
+|---|---|---|
+| 200 | результат метода | как в окне |
+| 400 | `{error: "битый запрос: …"}` | тост с причиной, метод не повторяется вслепую |
+| 401 | `{error: "ключ доступа не принят", code: "pairing"}` | одна строка-баннер «привязка не завершена», опрос не пишется каждый кадр |
+| 403 | `{error: "не выдан скоуп", scope: "queue"}` | честная подпись цели: «не выдано право queue» |
+| 404 | `{error: "не найдено"}` для файла/обложки | «файл не найден», не пустая картинка (§честность) |
+| 409 | конфликт (идёт тот же процесс: скан/перенос/repack) | подпись «уже выполняется на сервере» |
+| 413 | файл больше лимита | честный размер в подписи |
+| 429 | `serve_rate_mbit` или лимит зрителей исчерпан | «лимит отдачи сервера», полоса не выдумывается |
+| 500 | `{error: "<тип>: <текст>"}` | тост; журнал сервера содержит подробности |
+
+Байтовые маршруты (GET, тот же TLS и Range, что mesh-сервер):
+- `GET /thumb/<video_id>` — обложка, `ETag` вместо data-URI;
+- `GET /media/<file_id>` — байты с `Range` (206, 416, честный 404 по
+  `files.missing`), аудио (.mp3/.m4a/.opus) играется прямо;
+- `GET /subs/<file_id>` — WebVTT (sidecar `.vtt`/`.srt` или извлечение из mp4);
+- `GET /hls/<video_id>/master.m3u8` и сегменты — из кеша (§6).
+
+Никаких чужих хостов: `baseUrl` берётся из `location.origin` (или
+`window.OMNISTASH_HTTP.base`, который ставит сервер). Токен — `localStorage`
+(`omnistash.token`), привязка — §5. `fetch` не уходит на чужой адрес; тест
+страницы проверяет именно это (§9 S0).
+
+---
+
+## 4. Модель прав (скоупы)
+
+Скоупы на токене; список скоупов — запись в профиле сервера, выдаётся через
+pairing (§5) и правится в настройках сервера. Публичные методы `Api` — 120:
+99 из них доступны по HTTP, 17 требуют нативного окна, 3 становятся локальными
+на клиенте, 1 внутренний.
+
+| Скоуп | Смысл | Методы |
+|---|---|---|
+| `read` | чтение библиотеки и diagnostics, ничего не меняет | `get_initial`, `poll`, `list_videos`, `get_video`, `get_thumb`, `get_thumbs`, `collections_list`, `platforms_list`, `tags_popular`, `duplicates`, `storages_list`, `storage_preview_detach`, `migrate_preview`, `repack_preview`, `adult_tab`, `legal_state`, `theme_list`, `language_list`, `ui_texts`, `data_api_status`, `data_api_meta`, `site_catalog`, `site_catalog_status`, `site_catalog_more`, `site_catalog_cancel`, `site_catalog_channels`, `site_catalog_clear` |
+| `watch` | байты медиа и воспроизведение: `/media`, `/subs`, `/hls` (методов `Api` не требует) | — (право только на байтовые маршруты) |
+| `queue` | добавление, очередь, закачка, восстановление в очередь; включает подтверждение 18+ | `add_start`, `add_confirm`, `add_close`, `enqueue`, `bulk_download`, `queue_start`, `queue_stop`, `queue_retry`, `sync_queue_new`, `repair_broken`, `legal_accept` |
+| `mark` | пометки строк: пользовательские поля, рейтинг, локальные теги | `save_fields`, `bulk_rating`, `bulk_tags` |
+| `sources` | хранилища, коллекции, скан, синк, перенос, переупаковка, проверка целостности, удаление строк из индекса | `collection_create`, `collection_rename`, `collection_delete`, `collection_edit`, `bulk_collection`, `bulk_remove_rows`, `dedupe_resolve`, `rebind_file`, `verify_start`, `verify_stop`, `start_scan`, `stop_scan`, `sync_start`, `sync_stop`, `refresh_meta_start`, `refresh_meta_stop`, `migrate_start`, `migrate_stop`, `repack_start`, `repack_stop`, `storage_add`, `storage_check`, `storage_detach`, `storage_enable`, `storage_forget`, `storage_restore`, `storage_set_default`, `storage_set_path` |
+| `mesh` | сеть участников: запросы файлов, зеркала каталогов, доверие, SAS, wormhole, диагностика канала | `mesh_request_video`, `mesh_fetch_video`, `mesh_fetch_stop`, `mesh_reject`, `peer_profile`, `nick_search`, `nick_probe`, `trust_op`, `trust_sas_begin`, `trust_sas_confirm`, `device_doctor`, `catalog_refresh`, `catalog_list`, `catalog_restore`, `catalog_restore_friend`, `catalog_forget`, `wormhole_send`, `wormhole_receive`, `wormhole_status` |
+| `accounts` | аккаунты и OAuth без нативного окна | `account_import`, `account_forget`, `oauth_status`, `oauth_forget` |
+| `server_config` | настройки программы и установка инструментов | `save_setting`, `adult_tab_show`, `adult_tab_hide`, `rotate_log_file`, `ffmpeg_start`, `ffmpeg_stop`, `wormhole_setup` |
+| `desktop` | нативные диалоги, окно, системный браузер — по HTTP не выполняются | `pick_folder`, `open_path`, `open_url`, `open_folder`, `open_file`, `open_log`, `close`, `browser_open`, `browser_open_system_browser`, `browser_address`, `browser_close`, `browser_add_from_address`, `account_login_start`, `account_login_stop`, `account_capture_now`, `account_visible`, `oauth_start` |
+
+Отдельно (не по HTTP):
+- `theme_set`, `font_set`, `language_set` — **локально на клиенте**
+  (`localStorage`), иначе клиент менял бы вид окна сервера;
+- `bind_window` — внутренний, не экспортируется.
+
+Взрослый гейт: `queue`-клиент подтверждает 18+ тем же диалогом (`legal_accept`);
+флаг вкладки (`adult_tab_show`) — `server_config`, т. е. решение видит
+сервер, и обхода гейта через клиент нет.
+
+---
+
+## 5. TLS, привязка, порт
+
+- TLS всегда: контекст из `app/mesh/channel.py:server_context()` (эфемерный
+  сертификат в памяти, на диск не оседает; TLS 1.3 минимум; SPKI-аттестация
+  `ATTEST_OID`).
+- Клиент проверяет отпечаток SPKI (SHA-256) до первого байта запроса: первый
+  контакт запоминает (TOFU), несовпадение = отказ и журнал. Для второго окна
+  Omnistash проверка своя (как `channel.verify_peer`); для браузера — то же
+  ожидание, но решение о доверии самоподписанного сертификата принимает
+  человек (предупреждение браузера), а подмену ключа ловит пин в `localStorage`.
+- Привязка: сервер показывает в окне короткий код (6 цифр или 4 слова — тот же
+  рендер, что `app/mesh/sas.py`); клиент вводит код → сервер выдаёт токен со
+  скоупами, клиент кладёт его в `localStorage` и пин.
+- Тормоз перебора: 5 неверных кодов с одного адреса → задержка и запись в
+  журнал аудита; количество токенов ограничено.
+- Порт вне зоны перехвата DPI: как `mesh_port` (рекомендуемая зона 444–1023,
+  по умолчанию не 80/443 и не 1024–65535). `serve_port` по умолчанию 1001
+  (рядом с mesh 1000).
+
+---
+
+## 6. Медиа и воспроизведение (HLS на лету)
+
+1. Проба: `ffprobe` дорожки видео/аудио — кодек, и позиция `moov`
+   (тот же приём, что `app/audio.py:416` для faststart).
+2. Если контейнер и кодек отдаются без ре-encode (H.264/AAC в mp4 или mkv) →
+   `ffmpeg -f hls -hls_time 4 -hls_playlist_type vod -c copy` в
+   `profile/hls_cache/<video_id>/` (плейлист + сегменты). Кеш инвалидируется
+   при repack, migrate, rebind, `files.missing` и `sha256`-изменении.
+3. Если кодек не годится для браузера (HEVC/VP9/AV1) → честный отказ:
+   «кодек <имя> — браузер не воспроизводит без ре-encode», и опция
+   `serve_hls_transcode` (по умолчанию выключена: CPU и качество).
+4. Аудио (.mp3/.m4a/.opus) — прямо через `/media` с `Range`, HLS не нужен.
+5. Субтитры: sidecar `.vtt`/`.srt` отдаётся как VTT; встроенные дорожки
+   извлекаются `ffmpeg -f webvtt` в кеш; если субтитров нет —
+   «субтитры не найдены» (не пустой трек).
+6. Ограничения отдачи: `serve_rate_mbit` (тот же `pacing.RateLimiter`),
+   `serve_watchers_max` — сколько зрителей одновременно; сверх лимита — 429 с
+   честной подписью.
+7. `hls.js` (MIT) лежит в `ui_src/vendor/hls.js` и вшивается в страницу
+   `/watch`: рантайм ничего не скачивает. Пункт в
+   `THIRD_PARTY_NOTICES.md` и `docs/LEGAL-REVIEW.md`.
+
+---
+
+## 7. Экспозиция (как сервер выходит наружу)
+
+`serve_enabled` — по умолчанию выключен. `serve_bind`:
+- `127.0.0.1` — по умолчанию, только этот компьютер;
+- `LAN` — включается явным согласием человека («что уходит наружу»);
+- `Tailscale`/`ZeroTier` — адрес из интерфейса, согласие то же;
+- `0.0.0.0` + allowlist CIDR/адресов — «обычный порт» открытого сервера,
+  требует allowlist и предупреждения zapret/DPI (тот же текст, что
+  `app/settings_schema.py:502-514`).
+
+Диалог согласия перечисляет, что уходит: подписи строк, обложки, длительности,
+размеры, байты медиа по запросу, журнал состояния (`poll`). Пути диска не
+уходят: `/media` отвечает по `file_id`, не путём. Предупреждение DPI: порт в
+зоне перехвата 1024–65535 и 80/443 — риск замедления/искажения трафика.
+
+Журнал аудита: `profile/serve_audit.log` — токен → метод → код результата →
+адрес; хвост обрезает `rotate_log_file`. Журнал не содержит токенов и путей.
+
+---
+
+## 8. UI клиента (что отличается от окна)
+
+- та же разметка и те же токены DESIGN-UI; никаких новых `@keyframes`;
+- тема/шрифт/язык — локальные (`localStorage`), подписи приходят из того же
+  словаря `app/i18n.py` через `ui_texts`;
+- вместо системного диалога папки — поле пути и `storage_check` (доступность
+  проверяет сервер);
+- нативные цели показываются с подписью «доступен только на сервере»
+  (не серой кнопкой); цели без скоупа — «не выдан скоуп <имя>»;
+- `/watch/<video_id>` — доступность и узкий экран по §7 DESIGN-UI;
+- заодно закрываем открытые пункты DESIGN-UI: №5 (табовая семантика строки
+  вкладок) и №25 (второй индикатор «где я»), и M13 (`queue_retry` с
+  `attempt_chain=True`).
+
+---
+
+## 9. Шаги исполнения (каждый — отдельный коммит, без push)
+
+Проверка каждого шага: `python tools/build_preview.py`,
+`python -m unittest discover -t . -s tests` (ожидается `OK (skipped=17)`),
+`node --check ui_src/app.js`.
+
+| Шаг | Что делает | Файлы | Коммит |
+|---|---|---|---|
+| **S0** | Транспорт в UI: `HttpApi` рядом с `apiBridge` (тот же контракт имён, `POST /api/<имя>`, Bearer, честные коды), `HTTP_METHODS`/`HTTP_DENIED` как единый список прав; `bridge()` выбирает pywebview → HTTP → mock; тест страницы переформулируется на «нет чужих хостов» | `ui_src/app.js`, `tests/test_ui_transport.py`, `tests/test_gui.py` | `feat(ui): HTTP-транспорт клиента …` |
+| **S1** | `omnistash.py --serve` + `app/http/`: `ThreadingHTTPServer` с TLS из `channel.server_context()`, обход `getfqdn`, токены в профиле (DPAPI-путь), скоупы, `/api/*` под гейтом, аудит; новые поля `serve_enabled`, `serve_bind`, `serve_port`, `serve_rate_mbit`, `serve_hls_transcode`, `serve_watchers_max` в схеме и подписи в i18n | `omnistash.py`, `app/http/*.py`, `app/settings_schema.py`, `app/i18n.py`, `tests/test_serve.py` | `feat(serve): HTTP-сервер рядом с окном …` |
+| **S2** | Байты: `/thumb/<video_id>` (ETag вместо data-URI), `/media/<file_id>` с `Range`/206/416/413 и честным 404 по `files.missing`, `/subs/<file_id>` (VTT) | `app/http/media.py`, `tests/test_serve_media.py` | `feat(serve): раздача обложек, байтов и субтитров …` |
+| **S3** | HLS-конвейер: ffprobe-проба кодекса и `moov`, `-c copy` в `profile/hls_cache/`, инвалидация по repack/migrate/rebind/missing, `serve_rate_mbit`, `serve_watchers_max`, откат по кодексу и `serve_hls_transcode` | `app/http/hls.py`, `tests/test_serve_hls.py` | `feat(serve): HLS на лету …` |
+| **S4** | `ui_src/watch.html` + `ui_src/watch.js` + `ui_src/vendor/hls.js`: HLS, субтитры, список файлов; доступность и узкий экран по §7 DESIGN-UI | `ui_src/watch.html`, `ui_src/watch.js`, `ui_src/vendor/hls.js`, `tests/test_ui_watch.py` | `feat(ui): страница воспроизведения клиента …` |
+| **S5** | Полная UI по HTTP: скоупы `queue`, `mark`, `sources`, `mesh`, `accounts`, `server_config`; локальные тема/язык; поле пути вместо `pick_folder`; честные подписи недоступных целей; DESIGN-UI №5 и №25; M13 `queue_retry(attempt_chain=True)` | `ui_src/app.js`, `ui_src/index.html`, `ui_src/app.css`, `tests/test_ui_http_scopes.py` | `feat(ui): клиентская UI по HTTP с скоупами …` |
+| **S6** | Экспозиция: `serve_bind` (loopback / LAN / Tailscale / 0.0.0.0+allowlist), диалог согласия «что уходит наружу», предупреждение zapret/DPI и зоны портов, pairing-код, тормоз перебора, лимиты | `app/http/pair.py`, `app/http/bind.py`, `app/gui.py`, `app/settings_schema.py`, `tests/test_serve_exposure.py` | `feat(serve): режимы экспозиции и привязка …` |
+| **S7** | Сборка и документы: режим сервера в exe и планировщике, строка дорожной карты **SV-C** в `README.md`, `THIRD_PARTY_NOTICES.md` + `docs/LEGAL-REVIEW.md` для `hls.js`, **и правка CI-workflow** (`.github/workflows/*.yml`, `.github/workflows/release.yml`) — шаг сборки клиентского бандла (`ui_src` + `vendor/hls.js` + `watch.*`) после проверочных шагов набора, с линтом пинов | `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `tools/build_client.py`, `README.md`, `THIRD_PARTY_NOTICES.md`, `docs/LEGAL-REVIEW.md`, `Omnistash.spec` | `build(ci): сборка клиентского решения …` |
+
+Порядок S0→S7 выбран так, чтобы каждый шаг был проверяем без следующего:
+S0 работает с mock-бэкендом (превью) и со «стуб-сервером» в тесте; S1–S3
+тестируются офлайн на loopback; S4–S5 видны в превью; S6 требует решения
+человека (согласие), S7 замыкает конвейер сборки.
+
+---
+
+## 10. Риски и «не делаем»
+
+| Риск / решение | Как отражается в коде |
+|---|---|
+| Самоподписанный эфемерный сертификат: браузер показывает предупреждение | Пин отпечатка в `localStorage` + pairing-код; текст объяснения честный, без «мы включили HTTPS, значит всё безопасно» |
+| Чужой `fetch` как источник supply chain | Только `location.origin`; `hls.js` лежит в репозитории, рантайм не скачивает |
+| Запись из HTTP-потоков в sqlite при живущей очереди | Пишущие операции идут тем же потоком, что в окне (`Api`-воркеры), читающие — свои соединения; тест на loopback с идущим сканом |
+| Ре-encode HEVC/VP9/AV1 жрёт CPU и качество | По умолчанию выключен (`serve_hls_transcode`), отказ с подписью кодека |
+| Открытый порт + DPI-перехват | Зона порта вне 1024–65535 и 80/443, предупреждение в подписи `serve_port` |
+| Перебор кода привязки | Тормоз после 5 ошибок, лимит токенов, запись в аудит |
+
+Не делаем в этом разделе: Linux/NAS-сервер (DPAPI остаётся, вне плана),
+обход блокировок через клиент, публичная экспозиция без явного согласия,
+ре-encode по умолчанию, второй владелец базы, `desktop`-цели по HTTP,
+выдуманные индикаторы прогресса.
