@@ -426,7 +426,9 @@
 </main>
 
 <footer class="foot">
-  <div class="foot-status" id="status">Готов.</div>
+  <!-- §7 (замена №17): статус-строка - live-регион (polite), AT читает
+      смену «Готов. / Работаю…», роль status. -->
+  <div class="foot-status" id="status" role="status" aria-live="polite">Готов.</div>
   <button class="link-btn" id="log-toggle">Журнал</button>
   <button class="link-btn" id="log-open"
           title="Открыть omnistash.log в ассоциированной программе">Файл журнала</button>
@@ -589,7 +591,9 @@
   </div>
 </div>
 
-<div id="toast" class="toast" hidden></div>
+<!-- §7 (замена №17): тост - live-регион; app.js переключает роль на alert
+     для отказа (polite не перебивает чтение, alert - срочное сообщение). -->
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
 <script>__JS__</script>
 </body>

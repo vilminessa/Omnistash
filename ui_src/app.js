@@ -319,13 +319,37 @@
     return text;
   }
 
+  /* prefers-reduced-motion (§4.3): человек или ОС просили без движения -
+     JS убирает tост сразу, не ждёт CSS-перехода (длительность обнулена,
+     таймаут был бы лишней задержкой). */
+  var reducedMotion = window.matchMedia &&
+    window.matchMedia("(prefers-reduced-motion: reduce)");
+  function motionReduced() { return !!(reducedMotion && reducedMotion.matches); }
+
   function toast(text, isError) {
     var el = $("toast");
-    el.textContent = text;
+    clearTimeout(toast._t);
+    clearTimeout(toast._hide);
+    // §7 (замена №17): live-регион - сообщение читается AT; отказ - alert,
+    // обычный тост - status (polite, не перебивает чтение).
+    el.setAttribute("role", isError ? "alert" : "status");
     el.className = "toast" + (isError ? " err" : "");
     el.hidden = false;
-    clearTimeout(toast._t);
-    toast._t = setTimeout(function () { el.hidden = true; }, 3800);
+    // §4.2: появление - opacity+translateY(-4px) за --dur-moderate-02.
+    // enter ставит стартовое состояние без перехода, следующий кадр - переход.
+    el.classList.add("enter");
+    requestAnimationFrame(function () { el.classList.remove("enter"); });
+    toast._t = setTimeout(function () {
+      // §4.2: уход - только opacity за --dur-fast-02 (--ease-exit). hidden
+      // гасит display, поэтому hidden ставим после перехода; при
+      // reduced-motion перехода нет - убираем сразу.
+      if (motionReduced()) { el.hidden = true; return; }
+      el.classList.add("gone");
+      toast._hide = setTimeout(function () {
+        el.classList.remove("gone");
+        el.hidden = true;
+      }, 130);   // чуть больше --dur-fast-02 (110ms), чтобы переход доиграл
+    }, 3800);
   }
 
   function debounce(fn, ms) {
@@ -3714,6 +3738,12 @@
       if (pos < 0) {
         dialogs.push({ overlay: overlay, opener: document.activeElement });
         dialogEnter(overlay);
+        // §4.2 (шаг 7): вход диалога - фон за --dur-slow-02, карточка за
+        // --dur-slow-01 (expressive). Уход молча: hidden гасит display и
+        // transition по скрытому узлу не играется; закрытие отвечает
+        // мгновенно (Escape и «Снять выбор» не ждут 240msFade).
+        overlay.classList.add("anim-in");
+        requestAnimationFrame(function () { overlay.classList.remove("anim-in"); });
       }
     });
   });

@@ -350,7 +350,12 @@ body {
   font: inherit;
   font-weight: 600;
   cursor: pointer;
-  transition: background var(--dur-fast-02) var(--ease-productive), border-color var(--dur-fast-02) var(--ease-productive), opacity var(--dur-fast-02) var(--ease-productive);
+  /* §4.2 (шаг 7): hover/press - переход из токенов, не литералом;
+     --dur-fast-01 для кнопки (наведение и нажатие читаются сразу). */
+  transition: background var(--dur-fast-01) var(--ease-productive),
+              border-color var(--dur-fast-01) var(--ease-productive),
+              color var(--dur-fast-01) var(--ease-productive),
+              opacity var(--dur-fast-01) var(--ease-productive);
 }
 
 .btn:hover:not(:disabled) { background: var(--hover); border-color: var(--accent); }
@@ -378,6 +383,8 @@ body {
   cursor: pointer;
   font-size: var(--fs-title);
   line-height: 1;
+  transition: background var(--dur-fast-01) var(--ease-productive),
+              color var(--dur-fast-01) var(--ease-productive);
 }
 .icon-btn:hover { background: var(--widget); color: var(--text); }
 
@@ -391,6 +398,7 @@ body {
   padding: 0;
   text-decoration: underline;
   text-underline-offset: 2px;
+  transition: color var(--dur-fast-01) var(--ease-productive);
 }
 
 /* ---------------------------- вкладки ---------------------------- */
@@ -413,6 +421,10 @@ body {
   padding: 9px 14px;
   cursor: pointer;
   border-bottom: 2px solid transparent;
+  /* §4.2: hover - цвет подписи, active - цвет + underline (два индикатора);
+     переход из токена, смена направления сортировки и active-состояние -
+     мгновенные данные, не веяние. */
+  transition: color var(--dur-fast-01) var(--ease-productive);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -466,6 +478,8 @@ body {
   cursor: pointer;
   color: var(--text);
   font-size: var(--fs-sm);
+  /* §4.2: боковая навигация - hover фон --hover из токена, переход fast-01. */
+  transition: background var(--dur-fast-01) var(--ease-productive);
 }
 
 .tree-item:hover { background: var(--hover); }
@@ -546,6 +560,10 @@ body {
   background: var(--surface);
   overflow: hidden;
   cursor: pointer;
+  /* §4.2 (шаг 7): hover - граница контрола + shadow-1 за fast-02;
+     transition только на границе/тени, layout не дёргается. */
+  transition: border-color var(--dur-fast-02) var(--ease-productive),
+              box-shadow var(--dur-fast-02) var(--ease-productive);
 }
 /* Плитка: hover - граница контрола + тень-1 (§4.2); выбранная остаётся
    --accent с outline (состояние выбора отличается от наведения). */
@@ -742,6 +760,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
      оставляет строку в accessibility tree (проверено на MDN/web.dev). */
   content-visibility: auto;
   contain-intrinsic-size: auto var(--row-h);
+  /* §4.2 (шаг 7): hover/selected - фон из токена за fast-02; box-shadow у
+     строк виртуального окна не анимируем (стоимость на 120+ рядов, §4.1). */
+  transition: background var(--dur-fast-02) var(--ease-productive);
 }
 
 /* hover и selected - разные фоны: наведённая строка и выбранная строка
@@ -903,7 +924,17 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   justify-content: center;
   z-index: 40;
   padding: var(--s-6);
+  /* §4.2 (шаг 7): затемнение фона входит за --dur-slow-02 (expressive).
+     Уход молча: hidden гасит display, transition по скрытому узлу не
+     играется - асимметрия входа и ухода честная (не выдуманный fade-out). */
+  transition: opacity var(--dur-slow-02) var(--ease-expressive);
 }
+/* Вход диалога рисует app.js (dialogWatcher по hidden): anim-in ставит
+   стартовое состояние без перехода, следующий кадр его снимает - переход
+   играется 0→1. transition:none в anim-in нужен, иначе класс анимирует
+   обратный ход 1→0. */
+.overlay.anim-in, .overlay.anim-in .card { transition: none; opacity: 0; }
+.overlay.anim-in .card { transform: translateY(8px); }
 
 .card {
   background: var(--surface);
@@ -915,6 +946,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* §4.2: карточка входит opacity + translateY(8px) за --dur-slow-01. */
+  transition: opacity var(--dur-slow-01) var(--ease-expressive),
+              transform var(--dur-slow-01) var(--ease-expressive);
 }
 
 .card-head { display: flex; align-items: center; gap: var(--s-4); padding: 12px 14px; border-bottom: 1px solid var(--line); }
@@ -981,6 +1015,12 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .mode-item input { margin-top: 3px; accent-color: var(--accent); }
 .mode-item span { display: flex; flex-direction: column; gap: var(--s-1); }
 .mode-item .muted { font-size: var(--fs-cap); }
+/* §4.2: выбор режима (pick-row в диалогах и mode-item в превью) - фон и
+   граница из токена, переход fast-01. */
+.pick-row, .mode-item {
+  transition: background var(--dur-fast-01) var(--ease-productive),
+              border-color var(--dur-fast-01) var(--ease-productive);
+}
 
 .stages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-3); }
 
@@ -1265,11 +1305,19 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   color: var(--text);
   padding: 9px 16px;
   border-radius: var(--radius);
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-2);
   z-index: 60;
   font-size: var(--fs-sm);
   max-width: 80vw;
+  /* §4.2 (шаг 7): появление - opacity + translateY(-4px) за --dur-moderate-02
+     (expressive), уход - только opacity за --dur-fast-02 (--ease-exit):
+     вход движением, уход затуханием (асимметрия). translateX(-50%) держит
+     центровку в обоих состояниях. */
+  transition: opacity var(--dur-fast-02) var(--ease-exit),
+              transform var(--dur-moderate-02) var(--ease-expressive);
 }
+.toast.enter { transition: none; opacity: 0; transform: translateX(-50%) translateY(-4px); }
+.toast.gone { opacity: 0; }
 .toast.err { border-color: var(--err); }
 
 /* Переключатель Библиотека/Каталог */
@@ -1277,7 +1325,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
    двумя индикаторами - тон --surface-2 + underline --accent (NN/g:
    состояние не только цветом; AT читает его через aria-checked). */
 .seg { display: flex; gap: 0; border: 1px solid var(--line); border-radius: var(--r-2); overflow: hidden; }
-.seg-btn { border: none; background: transparent; color: var(--muted); padding: 4px 10px; font-size: var(--fs-sm); cursor: pointer; height: var(--ctl-h); }
+.seg-btn { border: none; background: transparent; color: var(--muted); padding: 4px 10px; font-size: var(--fs-sm); cursor: pointer; height: var(--ctl-h);
+  transition: background var(--dur-fast-01) var(--ease-productive),
+              color var(--dur-fast-01) var(--ease-productive); }
 .seg-btn.active { background: var(--surface-2); color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
 .seg-btn:hover { color: var(--text); }
 /* Контролы каталога держат общую высоту --ctl-h: сегмент, режим, сортировка
@@ -1302,8 +1352,27 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 @keyframes cat-sweep { 0% { background-position: 200% 0; }
                        100% { background-position: -200% 0; } }
 @media (prefers-reduced-motion: reduce) {
-  /* Анимация не обязательна: счётчик карточек делает ход видимым и без неё. */
+  /* §4.3 (шаг 7): глобально - все «веяния» выключаются; смысл состояний
+     остаётся через цвет, underline, подпись и dot, не через движение
+     (WCAG SC 2.3.3). Существующий блок .scan-fill.indet остаётся. */
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
   .scan-fill.indet { animation: none; background: var(--widget); }
+  /* Пульс статуса - цикл-индикатор; без движения состояние читается dot + текстом. */
+  .status[data-s="downloading"]::before { animation: none; }
+  /* Стартовые состояния входа не прячут контент: без перехода видно сразу. */
+  .overlay.anim-in, .overlay.anim-in .card { opacity: 1; transform: none; }
+  .toast.enter { opacity: 1; transform: translateX(-50%); }
+  /* Центровка тоста держится и без движения. */
+  .toast { transform: translateX(-50%); }
+  .tile:hover, .row:hover { border-color: var(--line-strong); }
+  .btn:active { transform: none; }
+  /* Звёздочка наведённая — scale(1.15): движение. Состояние «выбрано» держится
+     подписью --warn и заполненными звёздами, наведение — тоже подписью. */
+  .star:hover { transform: none; }
 }
 /* Что показано и откуда: режим, источник карточек, страницы, ход сортировки -
    «тренды» и «каналы» не должны выглядеть перемешанными. */
