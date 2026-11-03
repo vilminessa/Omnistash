@@ -300,6 +300,23 @@ body {
   border-radius: 0 0 var(--r-2) var(--r-2);
 }
 
+/* Состояние HTTP-клиента: подложка --surface-2 и подпись --info (7.0:1),
+   баннер не анимируется - приходит через textContent и уходит молча. */
+#client-badge {
+  position: fixed;
+  top: 0; left: 50%;
+  transform: translateX(-50%);
+  z-index: 99;
+  background: var(--surface-2);
+  color: var(--info);
+  border: 1px solid var(--info-line);
+  border-top: 0;
+  font-size: var(--fs-cap);
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 0 0 var(--r-2) var(--r-2);
+}
+
 .muted { color: var(--muted); }
 .spacer { flex: 1 1 auto; }
 

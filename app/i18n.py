@@ -162,6 +162,35 @@ _TEXTS: dict = {
                            "en": "The adult site tab is hidden: confirm 18+"},
     "adult.site": {"ru": "Взрослая площадка", "en": "Adult site"},
     "adult.tab_note": {"ru": "Возрастной контент", "en": "Adult content"},
+
+    # ---- подписи HTTP-клиента (docs/SERVER-CLIENT.md S0) -------------------
+    # Причина отказа приходит со стороны сервера; когда тела ответа нет, UI
+    # показывает эту подпись по коду - без выдуманных данных.
+    "http.pairing": {"ru": "ключ доступа не принят - привязка не завершена",
+                     "en": "access key not accepted - pairing not completed"},
+    "http.no_token": {"ru": "ключ доступа не получен - привязка не завершена",
+                      "en": "access key not received - pairing not completed"},
+    "http.scope": {"ru": "право не выдано сервером",
+                   "en": "the server did not grant this right"},
+    "http.missing": {"ru": "не найдено", "en": "not found"},
+    "http.busy": {"ru": "на сервере уже выполняется другая операция",
+                  "en": "another operation is already running on the server"},
+    "http.too_large": {"ru": "слишком большой запрос для сервера",
+                       "en": "request is too large for the server"},
+    "http.rate": {"ru": "сервер ограничил отдачу (лимит скорости или зрителей)",
+                  "en": "the server limited delivery (rate or viewer limit)"},
+    "http.server": {"ru": "сервер ответил ошибкой",
+                    "en": "the server answered with an error"},
+    "http.bad_answer": {"ru": "неожиданный ответ сервера",
+                        "en": "unexpected answer from the server"},
+    "http.bad_json": {"ru": "сервер ответил не JSON",
+                      "en": "the server answered with non-JSON"},
+    "http.offline": {"ru": "сервер не отвечает",
+                     "en": "the server does not answer"},
+    "http.desktop": {"ru": "доступно только на сервере",
+                     "en": "available on the server only"},
+    "http.local": {"ru": "это локальная настройка клиента, серверу не передаётся",
+                   "en": "this is a local client setting, not sent to the server"},
 }
 
 _BY_KEY = dict(_TEXTS)

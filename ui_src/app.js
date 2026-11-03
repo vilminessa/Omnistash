@@ -236,10 +236,229 @@
   }
 
   /* ------------------------------------------------------------------ *
-   *  Мост к Python
+   *  Мост к Python: окно (pywebview) → HTTP-клиент (сервер) → превью (mock)
    * ------------------------------------------------------------------ */
 
   var mock = null;
+  var http = null;          // HTTP-клиент: страницу отдаёт сервер (--serve)
+  var httpProblem = { unpaired: false, shown: "" };
+
+  /* Что клиент говорит серверу по HTTP (docs/SERVER-CLIENT.md §4). Имена -
+     тот же фасад Api из app/gui.py, поэтому клиент не изобретает целей:
+     tests/test_ui_transport.py сверяет список с методом класса Api. Права
+     решает СЕРВЕР по скоупам токена - здесь только то, что вообще имеет
+     смысл по HTTP (99 целей из 120 публичных методов). */
+  var HTTP_METHODS = [
+    // read: чтение библиотеки и diagnostics
+    "adult_tab", "collections_list", "data_api_meta", "data_api_status",
+    "duplicates", "get_initial", "get_thumb", "get_thumbs", "get_video",
+    "language_list", "legal_state", "list_videos", "migrate_preview",
+    "platforms_list", "poll", "repack_preview", "site_catalog",
+    "site_catalog_cancel", "site_catalog_channels", "site_catalog_clear",
+    "site_catalog_more", "site_catalog_status", "storage_preview_detach",
+    "storages_list", "tags_popular", "theme_list", "ui_texts",
+    // queue: добавление, очередь, закачка (включает подтверждение 18+)
+    "add_close", "add_confirm", "add_start", "bulk_download", "enqueue",
+    "legal_accept", "queue_retry", "queue_start", "queue_stop",
+    "repair_broken", "sync_queue_new",
+    // mark: пометки строк
+    "bulk_rating", "bulk_tags", "save_fields",
+    // sources: хранилища, коллекции, скан, синк, перенос, целостность
+    "bulk_collection", "bulk_remove_rows", "collection_create",
+    "collection_delete", "collection_edit", "collection_rename",
+    "dedupe_resolve", "migrate_start", "migrate_stop", "rebind_file",
+    "refresh_meta_start", "refresh_meta_stop", "repack_start", "repack_stop",
+    "start_scan", "stop_scan", "storage_add", "storage_check",
+    "storage_detach", "storage_enable", "storage_forget", "storage_restore",
+    "storage_set_default", "storage_set_path", "sync_start", "sync_stop",
+    "verify_start", "verify_stop",
+    // mesh: сеть участников, доверие, wormhole
+    "catalog_forget", "catalog_list", "catalog_refresh", "catalog_restore",
+    "catalog_restore_friend", "device_doctor", "mesh_fetch_stop",
+    "mesh_fetch_video", "mesh_reject", "mesh_request_video", "nick_probe",
+    "nick_search", "peer_profile", "trust_op", "trust_sas_begin",
+    "trust_sas_confirm", "wormhole_receive", "wormhole_send",
+    "wormhole_status",
+    // accounts: аккаунты и OAuth без нативного окна
+    "account_forget", "account_import", "oauth_forget", "oauth_status",
+    // server_config: настройки программы и установка инструментов
+    "adult_tab_hide", "adult_tab_show", "ffmpeg_start", "ffmpeg_stop",
+    "rotate_log_file", "save_setting", "wormhole_setup"
+  ];
+
+  /* Нативные цели окна (диалог папки, проводник, системный браузер, окно
+     площадки, вход OAuth) по HTTP не выполняются: сервер не может открыть
+     диалог на чужой машине. Список держится отдельно, чтобы UI читал честную
+     подпись «доступен только на сервере» вместо молчаливого null. */
+  var HTTP_DESKTOP = [
+    "account_capture_now", "account_login_start", "account_login_stop",
+    "account_visible", "browser_add_from_address", "browser_address",
+    "browser_close", "browser_open", "browser_open_system_browser", "close",
+    "oauth_start", "open_file", "open_folder", "open_log", "open_path",
+    "open_url", "pick_folder"
+  ];
+
+  /* Предпочтения клиента применяются локально (localStorage, шаг S5) и не
+     уходят на сервер: иначе клиент менял бы вид окна сервера. */
+  var HTTP_LOCAL = ["theme_set", "font_set", "language_set"];
+
+  /* Внутренний метод моста окна (нужен для нативных диалогов) - не
+     экспортируется ни окну-клиенту, ни HTTP. */
+  var HTTP_INTERNAL = ["bind_window"];
+
+  function httpBaseUrl() {
+    /* HTTP-клиент включается ТОЛЬКО по метке сервера (window.OMNISTASH_HTTP),
+       которую ставит --serve: страница окна живёт строкой (about:), а превью
+       может подаваться обычным статическим сервером (file:// или 127.0.0.1) -
+       там выдуманные данные нужны, а «доступ к серверу» нет. Адрес берётся
+       только из метки или своего origin: чужого хоста здесь быть не может. */
+    var mark = window.OMNISTASH_HTTP;
+    if (!mark) return null;
+    return String(mark.base || location.origin).replace(/\/+$/, "");
+  }
+
+  function httpMode() {
+    return !!httpBaseUrl();
+  }
+
+  function httpToken() {
+    var mark = window.OMNISTASH_HTTP;
+    if (mark && mark.token) return String(mark.token);
+    try {
+      return localStorage.getItem("omnistash.token") || "";
+    } catch (err) {
+      // localStorage недоступен (изолированный контекст) - ключ не читается,
+      // и сервер ответит 401 с подписью про привязку.
+      return "";
+    }
+  }
+
+  function clientBadge(text) {
+    var badge = $("client-badge");
+    if (!badge) return;
+    badge.textContent = text || "";
+    badge.hidden = !text;
+  }
+
+  function httpProblemText(status, payload) {
+    /* Сервер называет причину сам (app/http отдаёт {error, code}); если тела
+       нет, подпись по коду ответа - честная, без выдуманных данных. */
+    var message = payload && payload.error ? String(payload.error) : "";
+    var code = (payload && payload.code) || "";
+    if (!message) {
+      if (status === 401) {
+        message = t("http.pairing", "ключ доступа не принят - привязка не завершена");
+        code = "pairing";
+      } else if (status === 403) {
+        message = t("http.scope", "право не выдано сервером");
+        code = "scope";
+      } else if (status === 404) {
+        message = t("http.missing", "не найдено");
+        code = "missing";
+      } else if (status === 409) {
+        message = t("http.busy", "на сервере уже выполняется другая операция");
+        code = "busy";
+      } else if (status === 413) {
+        message = t("http.too_large", "слишком большой запрос для сервера");
+        code = "too_large";
+      } else if (status === 429) {
+        message = t("http.rate", "сервер ограничил отдачу (лимит скорости или зрителей)");
+        code = "rate";
+      } else if (status >= 500) {
+        message = t("http.server", "сервер ответил ошибкой");
+        code = "server";
+      } else {
+        message = t("http.bad_answer", "неожиданный ответ сервера") +
+                  " (" + status + ")";
+        code = "http";
+      }
+    } else if (!code) {
+      code = status >= 500 ? "server" : "http";
+    }
+    return { error: message, code: code, status: status };
+  }
+
+  function httpPost(name, arg) {
+    if (httpProblem.unpaired) {
+      // Без ключа запросы не отправляем: 120 пустых ответов на каждые 500 мс
+      // не читаются как «данные пустые» - UI показывает причину привязки.
+      return Promise.resolve({
+        error: httpProblem.shown ||
+               t("http.no_token", "ключ доступа не получен - привязка не завершена"),
+        code: "pairing"
+      });
+    }
+    var headers = { "Content-Type": "application/json" };
+    var token = httpToken();
+    if (token) headers.Authorization = "Bearer " + token;
+    // Как с pywebview: аргумент без значения - пустой объект, чтобы метод
+    // без параметров не получил лишний позиционный null.
+    var body = (arg === undefined || arg === null) ? "{}" : JSON.stringify(arg);
+    var target = httpBaseUrl() + "/api/" + name;
+    return fetch(target, {
+      method: "POST", headers: headers, body: body, credentials: "same-origin"
+    }).then(function (res) {
+      return res.text().then(function (text) {
+        var payload = null;
+        if (text) {
+          try {
+            payload = JSON.parse(text);
+          } catch (err) {
+            payload = {
+              error: t("http.bad_json", "сервер ответил не JSON") +
+                     ": " + text.slice(0, 80),
+              code: "bad_json"
+            };
+          }
+        }
+        if (res.status >= 200 && res.status < 300) {
+          clientBadge("");            // привязка работает - баннер не нужен
+          return payload === null ? {} : payload;
+        }
+        var problem = httpProblemText(res.status, payload);
+        if (res.status === 401) {
+          httpProblem.unpaired = true;
+          httpProblem.shown = problem.error;
+          clientBadge(problem.error);
+        }
+        return problem;
+      });
+    }, function (err) {
+      // Соединение не открылось (сервер не запущен, порт занят): причина
+      // видна в подписи, молчаливого «пусто» нет.
+      return {
+        error: t("http.offline", "сервер не отвечает") +
+               ": " + ((err && err.message) ? err.message : String(err)),
+        code: "transport"
+      };
+    });
+  }
+
+  function httpApi() {
+    var api = {};
+    HTTP_METHODS.forEach(function (name) {
+      api[name] = function (arg) { return httpPost(name, arg); };
+    });
+    // Цель есть в интерфейсе, но по HTTP не выполняется: ответ с причиной,
+    // а не молчание - вызывающий код уже показывает res.error как тост.
+    HTTP_DESKTOP.forEach(function (name) {
+      api[name] = function () {
+        return Promise.resolve({
+          error: t("http.desktop", "доступно только на сервере"),
+          code: "desktop", target: name
+        });
+      };
+    });
+    HTTP_LOCAL.forEach(function (name) {
+      api[name] = function () {
+        return Promise.resolve({
+          error: t("http.local", "это локальная настройка клиента, серверу не передаётся"),
+          code: "local", target: name
+        });
+      };
+    });
+    return api;
+  }
 
   function bridge() {
     if (window.pywebview && window.pywebview.api) {
@@ -252,7 +471,7 @@
       }
       return window.pywebview.api;
     }
-    return mock;
+    return http || mock;
   }
 
   function call(name, arg) {
@@ -373,6 +592,13 @@
     call("poll", state.since).then(function (snap) {
       ticking = false;
       if (!snap) return;
+      if (snap.error) {
+        // Транспорт или права (HTTP-клиент): причину читает статус-строка.
+        // Снимок не выдумывается и не перерисовывается пустыми данными.
+        $("status").textContent = snap.error;
+        if (snap.code === "pairing") clientBadge(snap.error);
+        return;
+      }
       state.since = snap.log_cursor;
       applySnapshot(snap);
     }).catch(function (err) {
@@ -6471,7 +6697,7 @@
    * ------------------------------------------------------------------ */
 
   function installPreview() {
-    if (window.pywebview || mock) return;
+    if (window.pywebview || mock || http) return;
     var fixtures = {
       total: 5, by_status: { known: 3, downloaded: 2, queued: 0 },
       downloaded: 2, queued: 0, playlists: 1, channels: 2, files: 2, bytes: 512000000
@@ -6617,7 +6843,22 @@
       "toast.adult_denied": "18+ confirmation not received",
       "toast.adult_hidden": "The adult site tab is hidden: confirm 18+",
       "adult.site": "Adult site",
-      "adult.tab_note": "Adult content"
+      "adult.tab_note": "Adult content",
+      // Подписи HTTP-клиента - тот же текст, что в словаре app/i18n.py:
+      // превью переключает язык тем же словарём (tests/test_i18n.py).
+      "http.pairing": "access key not accepted - pairing not completed",
+      "http.no_token": "access key not received - pairing not completed",
+      "http.scope": "the server did not grant this right",
+      "http.missing": "not found",
+      "http.busy": "another operation is already running on the server",
+      "http.too_large": "request is too large for the server",
+      "http.rate": "the server limited delivery (rate or viewer limit)",
+      "http.server": "the server answered with an error",
+      "http.bad_answer": "unexpected answer from the server",
+      "http.bad_json": "the server answered with non-JSON",
+      "http.offline": "the server does not answer",
+      "http.desktop": "available on the server only",
+      "http.local": "this is a local client setting, not sent to the server"
     };
     var MOCK_LABELS_EN = {
       theme: { label: "Theme",
@@ -8330,8 +8571,9 @@
     bootOnce();
   }
 
-  /* Старт: ждём мост pywebview; если его нет через 2 с - рисуем превью.
-     Оба пути сходятся в bootOnce, поэтому окно не инициализируется дважды. */
+  /* Старт: ждём мост pywebview; если его нет через 2 с - сервер (HTTP) или
+     превью. Все пути сходятся в bootOnce, поэтому UI не инициализируется
+     дважды. */
   var booted = false;
 
   function bootOnce() {
@@ -8345,8 +8587,27 @@
     bootOnce();
   });
 
+  // Страницу отдаёт сервер (--serve): HTTP-клиент ставим сразу, выдуманные
+  // данные не нужны и не появляются.
+  if (!window.pywebview && httpMode()) {
+    http = httpApi();
+    if (!httpToken()) {
+      httpProblem.unpaired = true;
+      httpProblem.shown = t("http.no_token",
+                            "ключ доступа не получен - привязка не завершена");
+      clientBadge(httpProblem.shown);
+    }
+    bootOnce();
+  }
+
   var previewTimer = setTimeout(function () {
     if (window.pywebview) { bootOnce(); return; }
+    if (httpMode()) {
+      // Сервер оказался доступен позже старта - превью не ставим.
+      if (!http) http = httpApi();
+      bootOnce();
+      return;
+    }
     installPreview();   // выставит mock, сам вызовет boot()
   }, 2000);
 })();

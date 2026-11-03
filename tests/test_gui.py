@@ -382,7 +382,13 @@ class TestPage(GuiCase):
         self.assertNotIn("url(http", page)
         self.assertNotIn('src="http', page)
         self.assertNotIn('href="http', page)
-        self.assertNotIn("fetch(", page)
+        # HTTP-транспорт клиента (docs/SERVER-CLIENT.md S0): fetch разрешён,
+        # но адрес только свой - location.origin или относительный путь от
+        # сервера. Чужой хост в fetch - supply chain, поэтому проверяем
+        # конкретно его, а не сам вызов fetch.
+        self.assertNotRegex(page, r"fetch\(\s*['\"]https?://")
+        self.assertNotRegex(page, r"fetch\(\s*['\"]//")
+        self.assertIn("location.origin", page)
 
 
 class TestRefreshMeta(GuiCase):

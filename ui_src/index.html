@@ -9,6 +9,9 @@
 <body data-theme="dark">
 
 <div id="preview-badge" hidden>PREVIEW · данные вымышленные, pywebview не подключён</div>
+<!-- Состояние HTTP-клиента (docs/SERVER-CLIENT.md S0): подпись ставит JS по
+    ответу сервера. Пока привязка не завершена - баннер говорит причину. -->
+<div id="client-badge" role="status" aria-live="polite" hidden></div>
 
 <header class="head">
   <div class="brand">
