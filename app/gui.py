@@ -295,7 +295,8 @@ class Api:
         self._serve_server = serve_http.ServeServer(
             self, bind=self._serve_bind, port=self._serve_port,
             rate_bps=self._serve_limits[0], watchers_max=self._serve_limits[1],
-            log=self._log, language=self._ui_language)
+            log=self._log, settings=self._current_settings,
+            language=self._ui_language)
         self._serve_dpi_hinted = False   # подсказка про зону перехвата: раз
         # Аккаунт Google: окно входа живёт отдельно от главного.
         self._login_window = None
@@ -917,6 +918,10 @@ class Api:
         if summary.get("error"):
             return summary
         self._touch()
+        # HLS-кеш этих строк больше не годится: дорожки, из которых он был
+        # построен, убраны из индекса (файлы на диске не тронуты - кеш всё
+        # равно не читается без строки).
+        self._invalidate_hls(ids, "строка убрана из индекса")
         self._log(f"Убраны строки из индекса: {summary['removed']} из "
                   f"{len(ids)} (файлы на диске не тронуты)"
                   + (f", пропущено: {summary['gone']}" if summary["gone"] else ""))
@@ -1503,7 +1508,7 @@ class Api:
             self._serve_server = serve_http.ServeServer(
                 self, bind=bind, port=port, rate_bps=limits[0],
                 watchers_max=limits[1], log=self._log,
-                language=self._ui_language)
+                settings=self._current_settings, language=self._ui_language)
             self._serve_bind, self._serve_port = bind, port
             self._serve_limits = limits
             self._serve_dpi_hinted = False
@@ -1515,7 +1520,7 @@ class Api:
             self._serve_server = serve_http.ServeServer(
                 self, bind=self._serve_bind, port=self._serve_port,
                 rate_bps=limits[0], watchers_max=limits[1], log=self._log,
-                language=self._ui_language)
+                settings=self._current_settings, language=self._ui_language)
             self._serve_limits = limits
         if want:
             # Подсказка про зону перехвата DPI: тот же приём, что mesh-порт -
@@ -1552,6 +1557,28 @@ class Api:
                     "исключения её конфига.")
         except Exception:  # noqa: BLE001 - подсказка не должна валить
             pass
+
+    def _invalidate_hls(self, video_ids, reason: str) -> None:
+        """Сбросить HLS-кеш строк: дорожка, из которой он построен, изменилась.
+
+        Кеш - производные байты (перекладка в MPEG-TS), а не источник: перенос
+        между хранилищами, переупаковка по шаблону, перепривязка файла или
+        удаление строки делают старые сегменты негодными. Новый запрос клиента
+        перекладет заново по новой сигнатуре файла (http.hls.ready), поэтому
+        здесь только сброс - без перекладки в фоне. Молчание о сбросе не
+        «выдумывает» работу: строка в журнале появляется, когда кеш был.
+        """
+        for value in video_ids or []:
+            try:
+                key = int(value)
+            except (TypeError, ValueError):
+                continue
+            if key <= 0:
+                continue
+            serve_http.hls.invalidate(key, reason, log=self._log)
+            # Сессии плеера этого видео снимаем сразу: держать слот зрителя
+            # для строки, которой уже нет, - это враньё про лимит.
+            self._serve_server.drop_video(key)
 
     def _serve_state(self) -> dict:
         """Состояние доступа по HTTPS (приватное: публичную цель не изобретаем).
@@ -2062,6 +2089,9 @@ class Api:
         if result.get("error"):
             return result
         self._touch()
+        # Оставленная копия может быть не тем файлом, из которого кеш строился
+        # (и остальные файлы удалены с диска): сброс честнее «кеш совпал».
+        self._invalidate_hls([video_id], "дубликаты убраны с диска")
         self._log("Дубликаты: оставлена копия {kept} ({title}), удалено файлов "
                   "{n}".format(kept=result["kept"],
                                title=result.get("title") or "?",
@@ -2078,10 +2108,17 @@ class Api:
             video_id = int(request.get("video_id"))
         except (TypeError, ValueError, KeyError):
             return {"error": "Не выбран файл или видео"}
+        old_owner = self.db.conn.execute(
+            "SELECT video_id FROM files WHERE id=?", (file_id,)).fetchone()
         result = repo.rebind_file(self.db.conn, file_id, video_id)
         if result.get("error"):
             return result
         self._touch()
+        # Файл дорожки переехал между строками: кеш старого видео построен из
+        # файла, который теперь не его, а у нового видео дорожка другая.
+        self._invalidate_hls([video_id] + ([int(old_owner["video_id"])]
+                                           if old_owner else []),
+                             "файл перепривязан")
         self._log(f"Файл привязан вручную к «{result['title']}»")
         return result
 
@@ -2783,6 +2820,12 @@ class Api:
             self._log(summary)
             result = None
         finally:
+            # Часть файлов переехала даже при остановке посреди переноса: кеш
+            # строк из плана сбрасывается во всех случаях (перекладка
+            # восстановится по новой сигнатуре при запросе клиента).
+            self._invalidate_hls([item.get("video_id")
+                                  for item in (plan.get("files") or [])],
+                                 "файлы перенесены в другое хранилище")
             with self._lock:
                 self._migrate["running"] = False
                 self._migrate["summary"] = summary
@@ -2897,6 +2940,12 @@ class Api:
         except Exception as exc:  # noqa: BLE001 - фон не должен молча умереть
             self._log(f"Переупаковка упала: {exc}")
             self._finish_repack(f"Ошибка: {exc}", [str(exc)])
+        # Файлы переименованы (и при остановке посреди списка тоже): путь
+        # дорожки изменился, кеш этих строк больше не читается по старой
+        # сигнатуре - сбрасываем, перекладка восстановится по запросу.
+        self._invalidate_hls([item.get("video_id")
+                              for item in (plan.get("items") or [])],
+                             "файлы переупакованы по шаблону")
 
     def _finish_repack(self, summary: str, errors: list[str]) -> None:
         with self._lock:

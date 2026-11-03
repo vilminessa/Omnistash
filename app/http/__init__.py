@@ -5,14 +5,15 @@
 то, что решает «кто может спросить что»: скоупы (scopes), ключи доступа
 (tokens), журнал обращений (audit) и слушатель (server).
 
-Байтовые маршруты (/thumb, /media, /subs, /hls) - S2 и S3; привязка по
-короткому коду и режимы экспозиции - S6.
+Байтовые маршруты (/thumb, /media, /subs, /hls) - http.media и http.hls;
+привязка по короткому коду и режимы экспозиции - S6.
 """
 
 from __future__ import annotations
 
 from .audit import Audit
-from .media import Watchers, etag_for, parse_range, srt_to_vtt
+from .hls import HlsBuilder, HlsError, invalidate as hls_invalidate
+from .media import Viewers, etag_for, parse_range, srt_to_vtt
 from .scopes import (INTERNAL, LOCAL, NATIVE, SCOPES, SCOPE_OF, exposed,
                      is_internal, is_local, is_native, normalize_scopes,
                      scope_for)
@@ -25,4 +26,5 @@ __all__ = ["Audit", "ServeError", "ServeServer", "bind_address", "byte_route",
            "SCOPES", "SCOPE_OF", "NATIVE", "LOCAL", "INTERNAL", "scope_for",
            "exposed", "is_native", "is_local", "is_internal", "normalize_scopes",
            "TlsError", "context_from", "fingerprint", "material", "server_context",
-           "Watchers", "etag_for", "parse_range", "srt_to_vtt"]
+           "Viewers", "etag_for", "parse_range", "srt_to_vtt",
+           "HlsBuilder", "HlsError", "hls_invalidate"]

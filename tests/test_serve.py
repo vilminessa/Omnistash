@@ -492,10 +492,33 @@ class ServeCase(unittest.TestCase):
         try:
             handler = server._httpd.RequestHandlerClass
             self.assertEqual(handler.rate_bps, 1_000_000)
-            self.assertEqual(handler.watchers.limit, 3,
+            self.assertEqual(handler.viewers.limit, 3,
                              "serve_watchers_max не дошёл до обработчика")
-            # Счётчик один на весь сервер: новые соединения не получают своего.
-            self.assertIsInstance(handler.watchers, serve_media.Watchers)
+            # Лимит один на весь сервер: новые соединения не получают своего
+            # счётчика, и строитель HLS общий (иначе кеш перекладывался бы
+            # параллельно на каждое соединение).
+            self.assertIsInstance(handler.viewers, serve_media.Viewers)
+            self.assertIs(handler.hls_builder, server._hls_builder,
+                          "обработчик получил свой строитель кеша")
+        finally:
+            server.stop()
+
+    def test_settings_reach_the_handler(self):
+        """Настройки читаются при запросе: serve_hls_transcode живёт без перезапуска."""
+        seen: list[dict] = []
+
+        def settings():
+            seen.append({"serve_hls_transcode": True})
+            return seen[-1]
+
+        server = serve_http.ServeServer(FakeApi(), bind="127.0.0.1", port=0,
+                                        tokens=self.store, audit=self.journal,
+                                        settings=settings)
+        server.start()
+        try:
+            handler = server._httpd.RequestHandlerClass
+            self.assertEqual(handler.settings()["serve_hls_transcode"], True)
+            self.assertEqual(len(seen), 1, "настройки не читались при запросе")
         finally:
             server.stop()
 

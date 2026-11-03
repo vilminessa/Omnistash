@@ -12,7 +12,8 @@ TLS 1.3 минимум), отказ handshake не валит сервер, от
 
 Чем отличается от mesh-сервера: здесь права решает токен со скоупами, а не
 аттестация собеседника, и тело запроса - JSON. Байтовые маршруты (/thumb,
-/media, /subs, /hls) добавляются в S2 и S3; сейчас страница и /api/*.
+/media, /subs, /hls) - в http.media и http.hls: Range, зрители под одним
+лимитом, HLS-кеш с перекладкой по probe.
 
 Честность ответов: сервер называет причину сам ({error, code}); клиент, если
 тела нет, подписывает по коду ответа. Ни выдуманных пустых списков, ни
@@ -31,6 +32,7 @@ from .. import i18n
 from ..mesh import channel as channel_mod
 from ..mesh import pacing
 from ..ui import build_page
+from . import hls
 from . import media
 from . import scopes
 from . import tls
@@ -42,8 +44,8 @@ MAX_BODY_BYTES = 1_000_000
 CHUNK = 256 * 1024
 HANDSHAKE_TIMEOUT = channel_mod.HANDSHAKE_TIMEOUT
 
-# Байтовые маршруты (§3): путь -> (маршрут, id). `/hls` добавляется в S3,
-# сейчас он отвечает честным 501 «ещё не построен».
+# Байтовые маршруты (§3): путь -> (маршрут, id). `/hls/<id>/<имя>` -
+# плейлист и сегменты из кеша (http.hls, S3).
 BYTE_ROUTES = ("thumb", "media", "subs", "hls")
 
 
@@ -150,7 +152,9 @@ class _Handler(BaseHTTPRequestHandler):
     audit = None              # http.audit.Audit
     page = b""                # страница с меткой сервера (строится при старте)
     rate_bps = 0              # 0 = без ограничения отдачи
-    watchers = None           # http.media.Watchers (зрители, S2/S3)
+    viewers = None            # http.media.Viewers (зрители и сессии HLS, S2/S3)
+    hls_builder = None        # http.hls.HlsBuilder (кеш HLS, S3)
+    settings = staticmethod(lambda: {})     # настройки сервера (serve_hls_transcode)
     language = staticmethod(lambda: "ru")   # язык подписей сервера
     _head_only = False        # HEAD: заголовки без тела (плеер спрашивает Range)
 
@@ -334,9 +338,11 @@ class _Handler(BaseHTTPRequestHandler):
                 elif route == "subs":
                     media.send_subs(self, target)
                 else:
-                    # Конвейер HLS строится в S3: отказ называет причину, а не молчит.
-                    self.respond_problem(501, self.text("http.route_pending"),
-                                         "hls", target=target, route="hls")
+                    # /hls/<video_id>/<имя>: плейлист и сегменты из кеша (S3).
+                    # Право `watch` уже проверено выше; имя файла читается
+                    # только из кеша этого видео (http.hls.serve).
+                    video_id, _, rest = target.partition("/")
+                    hls.serve(self, video_id, rest)
                 return
             self._answer(404, {"error": self.text("http.missing"),
                                "code": "missing"}, name=path)
@@ -485,7 +491,7 @@ class ServeServer:
     def __init__(self, api, *, bind: str = "127.0.0.1", port: int = 1001,
                  rate_bps: int = 0, watchers_max: int = 0, log=None,
                  tokens: TokenStore | None = None, audit: Audit | None = None,
-                 language=None, page_marker: dict | None = None):
+                 settings=None, language=None, page_marker: dict | None = None):
         self._api = api
         self._bind = str(bind or "127.0.0.1")
         # 0 = системный порт (тесты и «порт не задан»); `port or 1001`
@@ -493,8 +499,16 @@ class ServeServer:
         self._port = 1001 if port is None else int(port)
         self._rate_bps = int(rate_bps or 0)
         self._watchers_max = int(watchers_max or 0)
-        self._watchers = media.Watchers(self._watchers_max)
+        # Один лимит зрителей на всё: раздачи /media держат место до конца,
+        # сессии /hls живут TTL (http.media.Viewers).
+        self._viewers = media.Viewers(self._watchers_max)
+        # Строитель HLS: замок на видео, второй зритель ждёт кеш, а не
+        # перекладывает файл параллельно с первым.
         self._log = log or (lambda message: None)
+        self._hls_builder = hls.HlsBuilder(log=self._log)
+        # Настройки читаются при каждом запросе HLS: `serve_hls_transcode`
+        # человек может включить, не перезапуская слушатель.
+        self._settings = settings or (lambda: {})
         # Реестр токенов и журнал читаются лениво - при первом старте: битый
         # файл токенов не должен ронять окно (Api строится до слушателя), а
         # отказ стартовать с неизвестными правами - виден в журнале.
@@ -543,10 +557,12 @@ class ServeServer:
             "audit": self._audit,
             "page": page,
             "rate_bps": self._rate_bps,
-            # Счётчик зрителей живёт вместе с сервером: обработчики новых
-            # соединений не получают своего счётчика (иначе лимит зрителей
-            # считался бы «на соединение»).
-            "watchers": self._watchers,
+            # Зрители и строитель кеша живут вместе с сервером: обработчики
+            # новых соединений не получают своих (иначе лимит зрителей
+            # считался бы «на соединение», а кеш перекладывался параллельно).
+            "viewers": self._viewers,
+            "hls_builder": self._hls_builder,
+            "settings": staticmethod(self._settings),
             "language": staticmethod(self._language),
         })
         httpd = _ServeServer((self._bind, self._port), handler)
@@ -600,3 +616,11 @@ class ServeServer:
         except TokenStoreError as exc:
             return {"error": str(exc), "tokens": [], "count": 0}
         return {"tokens": listed, "count": len(listed)}
+
+    def drop_video(self, video_id: int) -> None:
+        """Снять места этого видео у зрителей (строка убрана, файл переехал).
+
+        Без этого плеер числился бы зрителем до TTL сессии, даже когда видео
+        уже нет в индексе, и держал бы слот `serve_watchers_max`.
+        """
+        self._viewers.drop_video(int(video_id))

@@ -113,3 +113,15 @@ def serve_audit_path() -> Path:
     Не секрет: метки токенов и коды ответов, без значений токенов и путей.
     """
     return profile_dir() / "serve_audit.log"
+
+
+def hls_cache_dir() -> Path:
+    """Кеш HLS для клиента: profile/hls_cache/<video_id>/ (SV-C, S3).
+
+    Производные данные из библиотеки (перекладка в MPEG-TS), а не источник:
+    файл дорожки остаётся в хранилище, кеш можно сбросить в любой момент
+    (http.hls.invalidate), и он не содержит путей дисков наружу.
+    """
+    path = profile_dir() / "hls_cache"
+    path.mkdir(parents=True, exist_ok=True)
+    return path

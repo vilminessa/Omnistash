@@ -299,8 +299,24 @@ _TEXTS: dict = {
                          "en": "the browser cannot read this subtitle format"},
     "http.range": {"ru": "запрошенная часть файла не читается",
                    "en": "the requested byte range is not readable"},
-    "http.route_pending": {"ru": "этот маршрут ещё не построен (следующий шаг)",
-                           "en": "this route is not built yet (next step)"},
+    # Подписи HLS (§6, S3): отказ называет кодек или инструмент, а не молчит.
+    "http.hls_codec": {"ru": "браузер не играет этот кодек без перекодирования "
+                              "(включите «Перекодировать видео для браузера»)",
+                       "en": "the browser cannot play this codec without "
+                             "re-encoding (enable \"Transcode video for the browser\")"},
+    "http.hls_encoder": {"ru": "в сборке ffmpeg нет нужного энкодера",
+                         "en": "this ffmpeg build has no needed encoder"},
+    "http.hls_no_ffmpeg": {"ru": "ffmpeg не установлен - перекладка невозможна "
+                                  "(установка - кнопка в окне)",
+                           "en": "ffmpeg is not installed - remux is impossible "
+                                 "(install is a button in the window)"},
+    "http.hls_probe_failed": {"ru": "кодек файла не прочитан",
+                              "en": "the file codec was not read"},
+    "http.hls_failed": {"ru": "HLS не построен", "en": "HLS was not built"},
+    "http.hls_busy": {"ru": "перекладка этого видео уже идёт - подождите",
+                      "en": "remux of this video is already running - wait"},
+    "http.hls_segment": {"ru": "плейлист или сегмент не найдены в кеше",
+                         "en": "playlist or segment not found in the cache"},
 }
 
 _BY_KEY = dict(_TEXTS)

@@ -16,7 +16,7 @@
 | **клиент** | Браузер (или второе окно Omnistash), который не имеет доступа к базе и к папкам хранилищ: говорит с сервером по HTTPS и воспроизводит видео напрямую из байтов сервера. |
 | **скоуп** | Право на токене доступа (`read`, `watch`, `queue`, `mark`, `sources`, `mesh`, `accounts`, `server_config`, `desktop`). Сервер решает скоуп, клиент только честно показывает, что ему не выдано. |
 | **аттестация и пин** | Эфемерный сертификат из `app/mesh/channel.py` несёт расширение `ATTEST_OID` (SPKI, подписанное identity-ключом Ed25519); клиент запоминает отпечаток SPKI (SHA-256) по TOFU и отказывает при подмене. |
-| **HLS-конвейер** | Раздача видео для браузера: `ffprobe` определяет кодек и позицию `moov`, `ffmpeg -f hls ... -c copy` пишет плейлист и сегменты в кеш профиля, плеер читает их по обычным HTTP-запросам. Ре-encode по умолчанию выключен. |
+| **HLS-конвейер** | Раздача видео для браузера: `ffprobe` определяет кодек дорожки, `ffmpeg -f hls ... -c copy` пишет плейлист `index.m3u8` и сегменты `seg<N>.ts` в кеш профиля, плеер читает их по обычным HTTP-запросам. Ре-encode по умолчанию выключен. |
 | **честная подпись** | «не найден», «не получен», «не выдан», «доступен только на сервере» — как есть. Ни выдуманных 0→100 %, ни серой кнопки вместо объяснения (тот же принцип, что `docs/DESIGN-UI.md` §4.4 и §5.6). |
 
 Ограничения проекта, которые задают раздел: лицензия PolyForm Noncommercial
@@ -105,8 +105,9 @@
   зрителей одновременно, сверх лимита 429 с подписью (право `watch`);
 - `GET /subs/<file_id>` — WebVTT: sidecar `.vtt` как есть, `.srt` конвертится
   на лету, `.ass` и другие форматы — честный 415 с именем формата (право `watch`);
-- `GET /hls/<video_id>/master.m3u8` и сегменты — из кеша (§6), пока 501
-  «этот маршрут ещё не построен (следующий шаг)».
+- `GET /hls/<video_id>/index.m3u8` и `seg<N>.ts` — из кеша (§6); путь кеша
+  строится по id строки, чужое имя и `../` — честный 404 по подписи
+  (право `watch`);
 
 Никаких чужих хостов: HTTP включается только по метке сервера
 (`window.OMNISTASH_HTTP`), которую ставит `--serve` — страница окна живёт
@@ -179,22 +180,32 @@ pairing (§5) и правится в настройках сервера. Пуб
 
 ## 6. Медиа и воспроизведение (HLS на лету)
 
-1. Проба: `ffprobe` дорожки видео/аудио — кодек, и позиция `moov`
-   (тот же приём, что `app/audio.py:416` для faststart).
-2. Если контейнер и кодек отдаются без ре-encode (H.264/AAC в mp4 или mkv) →
+1. Проба: `ffprobe` дорожки видео/аудио — кодек. Позиция `moov` не проверяется:
+   HLS — новая перекладка в MPEG-TS, faststart для неё не нужен.
+2. Если кодек отдаётся без ре-encode (H.264 + AAC; без аудио — тоже copy) →
    `ffmpeg -f hls -hls_time 4 -hls_playlist_type vod -c copy` в
-   `profile/hls_cache/<video_id>/` (плейлист + сегменты). Кеш инвалидируется
-   при repack, migrate, rebind, `files.missing` и `sha256`-изменении.
+   `profile/hls_cache/<video_id>/`: ffmpeg пишет media-playlist `index.m3u8`
+   и сегменты `seg<N>.ts` (не `master.m3u8` — мы не сочиняем свой формат).
+   Кеш переиспользуется по сигнатуре файла (`size|mtime|sha256` в `meta.json`)
+   и сбрасывается хуками окна при repack, migrate, rebind и удалении строки;
+   второй плеер того же видео ждёт перекладку (замок на видео), а не строит
+   её параллельно.
 3. Если кодек не годится для браузера (HEVC/VP9/AV1) → честный отказ:
    «кодек <имя> — браузер не воспроизводит без ре-encode», и опция
-   `serve_hls_transcode` (по умолчанию выключена: CPU и качество).
+   `serve_hls_transcode` (по умолчанию выключена: CPU и качество); без
+   энкодера в сборке ffmpeg отказ называет энкодер, без ffmpeg или ffprobe —
+   «инструмент не установлен» / «кодек не прочитан».
 4. Аудио (.mp3/.m4a/.opus) — прямо через `/media` с `Range`, HLS не нужен.
-5. Субтитры: sidecar `.vtt`/`.srt` отдаётся как VTT; встроенные дорожки
-   извлекаются `ffmpeg -f webvtt` в кеш; если субтитров нет —
-   «субтитры не найдены» (не пустой трек).
+5. Субтитры: sidecar `.vtt` отдаётся как есть, `.srt` конвертится в VTT на
+   лету; извлечение встроенных дорожек (`ffmpeg -f webvtt`) — вне шага S3:
+   чужой формат назван 415 по имени, отсутствие названо «субтитры не
+   найдены» (не пустой трек).
 6. Ограничения отдачи: `serve_rate_mbit` (тот же `pacing.RateLimiter`),
-   `serve_watchers_max` — сколько зрителей одновременно; сверх лимита — 429 с
-   честной подписью.
+   `serve_watchers_max` — сколько зрителей одновременно, одним лимитом на
+   всё: раздача `/media` держит слот до конца раздачи, `/hls` занимает
+   сессию плеера (видео + адрес, TTL активности) — сегменты не плодят
+   зрителей, отказ по кодексу или инструменту слот не занимает. Сверх
+   лимита — 429 с честной подписью.
 7. `hls.js` (MIT) лежит в `ui_src/vendor/hls.js` и вшивается в страницу
    `/watch`: рантайм ничего не скачивает. Пункт в
    `THIRD_PARTY_NOTICES.md` и `docs/LEGAL-REVIEW.md`.
@@ -248,7 +259,7 @@ pairing (§5) и правится в настройках сервера. Пуб
 | **S0** | Транспорт в UI: `HttpApi` рядом с `apiBridge` (тот же контракт имён, `POST /api/<имя>`, Bearer, честные коды), `HTTP_METHODS`/`HTTP_DENIED` как единый список прав; `bridge()` выбирает pywebview → HTTP → mock; тест страницы переформулируется на «нет чужих хостов» | `ui_src/app.js`, `tests/test_ui_transport.py`, `tests/test_gui.py` | `feat(ui): HTTP-транспорт клиента …` |
 | **S1** | `omnistash.py --serve` + `app/http/`: `ThreadingHTTPServer` с TLS для браузера из `app/http/tls.py` (эфемерный ECDSA с SAN; Ed25519 остаётся для mesh), обход `getfqdn`, токены в профиле (DPAPI-путь), скоупы, `/api/*` под гейтом, аудит; новые поля `serve_enabled`, `serve_bind`, `serve_port`, `serve_rate_mbit`, `serve_hls_transcode`, `serve_watchers_max` в схеме и подписи в i18n | `omnistash.py`, `app/http/*.py`, `app/settings_schema.py`, `app/i18n.py`, `tests/test_serve.py` | `feat(serve): HTTP-сервер рядом с окном …` |
 | **S2** | Байты: `/thumb/<video_id>` (ETag вместо data-URI), `/media/<file_id>` с `Range`/206/416/413 и честным 404 по `files.missing`, `/subs/<file_id>` (VTT) | `app/http/media.py`, `tests/test_serve_media.py` | `feat(serve): раздача обложек, байтов и субтитров …` |
-| **S3** | HLS-конвейер: ffprobe-проба кодекса и `moov`, `-c copy` в `profile/hls_cache/`, инвалидация по repack/migrate/rebind/missing, `serve_rate_mbit`, `serve_watchers_max`, откат по кодексу и `serve_hls_transcode` | `app/http/hls.py`, `tests/test_serve_hls.py` | `feat(serve): HLS на лету …` |
+| **S3** | HLS-конвейер: ffprobe-проба кодекса, `-c copy` в `profile/hls_cache/` (ffmpeg пишет `index.m3u8` + `seg<N>.ts`), кеш по сигнатуре файла и замок на видео, инвалидация хуками по repack/migrate/rebind/удалению строки, `serve_rate_mbit`, `serve_watchers_max` (слоты раздачи и сессии плеера — одним лимитом), откат по кодексу и `serve_hls_transcode` | `app/http/hls.py`, `tests/test_serve_hls.py` | `feat(serve): HLS на лету …` |
 | **S4** | `ui_src/watch.html` + `ui_src/watch.js` + `ui_src/vendor/hls.js`: HLS, субтитры, список файлов; доступность и узкий экран по §7 DESIGN-UI | `ui_src/watch.html`, `ui_src/watch.js`, `ui_src/vendor/hls.js`, `tests/test_ui_watch.py` | `feat(ui): страница воспроизведения клиента …` |
 | **S5** | Полная UI по HTTP: скоупы `queue`, `mark`, `sources`, `mesh`, `accounts`, `server_config`; локальные тема/язык; поле пути вместо `pick_folder`; честные подписи недоступных целей; DESIGN-UI №5 и №25; M13 `queue_retry(attempt_chain=True)` | `ui_src/app.js`, `ui_src/index.html`, `ui_src/app.css`, `tests/test_ui_http_scopes.py` | `feat(ui): клиентская UI по HTTP с скоупами …` |
 | **S6** | Экспозиция: `serve_bind` (loopback / LAN / Tailscale / 0.0.0.0+allowlist), диалог согласия «что уходит наружу», предупреждение zapret/DPI и зоны портов, pairing-код, тормоз перебора, лимиты | `app/http/pair.py`, `app/http/bind.py`, `app/gui.py`, `app/settings_schema.py`, `tests/test_serve_exposure.py` | `feat(serve): режимы экспозиции и привязка …` |

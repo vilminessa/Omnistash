@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import re
 import threading
+import time
 
 CHUNK = 256 * 1024
 # Обложка и субтитры - файлы на порядок меньше дорожки; лимит нужен, чтобы
@@ -47,33 +48,68 @@ THUMB_MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
 RANGE = re.compile(r"(\d*)-(\d*)")
 
 
-class Watchers:
-    """Счётчик живых раздач медиа: сверх лимита - честный 429.
+class Viewers:
+    """Зрители сервера: живые раздачи (`/media`) и сессии плеера (`/hls`).
 
-    Считает именно раздачи (/media, позже /hls), а не все запросы: страница и
-    вызовы /api/* не должны съедать право на зрителей.
+    Один лимит на всё (`serve_watchers_max`): раздача держит место до конца
+    (`hold`/`release`), сессия плеера живёт TTL активности - сегменты HLS
+    короткие, и считать каждый сегмент «новым зрителем» было бы враньём про
+    лимит, а считать только плейлист - наоборот, «зритель ушёл» при живом
+    плеере. Сессии одного и того же (видео, адрес) не плодят места.
     """
 
-    def __init__(self, limit: int = 0):
+    def __init__(self, limit: int = 0, ttl: float = 300.0):
         self.limit = int(limit or 0)      # 0 = без лимита
-        self.active = 0
+        self.ttl = float(ttl)
+        self._held: set = set()
+        self._sessions: dict[tuple, float] = {}
         self._lock = threading.Lock()
 
-    def acquire(self) -> bool:
+    def hold(self, key) -> bool:
+        """Место на время раздачи (ключ ["media", file_id])."""
         with self._lock:
-            if self.limit and self.active >= self.limit:
+            self._prune(time.time())
+            if self.limit and self._total() >= self.limit:
                 return False
-            self.active += 1
+            self._held.add(tuple(key))
             return True
 
-    def release(self) -> None:
+    def release(self, key) -> None:
         with self._lock:
-            if self.active > 0:
-                self.active -= 1
+            self._held.discard(tuple(key))
+
+    def session(self, key, now: float | None = None) -> bool:
+        """Место плеера: тот же (видео, адрес) продлевает, чужой - занимает."""
+        stamp = now if now is not None else time.time()
+        with self._lock:
+            self._prune(stamp)
+            pair = tuple(key)
+            if pair in self._sessions:
+                self._sessions[pair] = stamp
+                return True
+            if self.limit and self._total() >= self.limit:
+                return False
+            self._sessions[pair] = stamp
+            return True
+
+    def drop_video(self, video_id: int) -> None:
+        """Снять места этого видео (строка удалена из индекса, кеш сброшен)."""
+        key_id = int(video_id)
+        with self._lock:
+            for pair in [p for p in self._sessions if p[1] == key_id]:
+                del self._sessions[pair]
+            self._held = {p for p in self._held if p[1] != key_id}
 
     def count(self) -> int:
         with self._lock:
-            return self.active
+            return self._total()
+
+    def _total(self) -> int:
+        return len(self._held) + len(self._sessions)
+
+    def _prune(self, now: float) -> None:
+        for pair in [p for p, stamp in self._sessions.items() if now - stamp > self.ttl]:
+            del self._sessions[pair]
 
 
 def etag_for(row) -> str:
@@ -252,9 +288,9 @@ def send_media(handler, file_id: str) -> None:
         handler.respond_problem(404, reason or handler.text("http.file_missing"),
                                 "missing", target=file_id, note=reason, route="media")
         return
-    if not handler.watchers.acquire():
+    if not handler.viewers.hold(["media", row["video_id"], file_id]):
         handler.respond_problem(429, handler.text("http.rate") +
-                                f" - максимум {handler.watchers.limit}",
+                                f" - максимум {handler.viewers.limit}",
                                 "rate", target=file_id, note="зрители", route="media")
         return
     try:
@@ -276,7 +312,7 @@ def send_media(handler, file_id: str) -> None:
                           extra, route="media", scope="watch", target=file_id,
                           status=206 if parts else 200)
     finally:
-        handler.watchers.release()
+        handler.viewers.release(["media", row["video_id"], file_id])
 
 
 def send_subs(handler, file_id: str) -> None:

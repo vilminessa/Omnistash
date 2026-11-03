@@ -299,9 +299,9 @@ class MediaCase(GuiCase):
         self.assertEqual(status, 404)
         self.assertIn("не найден", self.json_body(body).get("error", ""))
 
-    def test_watchers_limit_is_enforced_honestly(self):
+    def test_viewer_limit_is_enforced_honestly(self):
         """Сверх `serve_watchers_max` - честный 429, полоса не выдумывается."""
-        self.assertEqual(self.server._watchers.limit, 1)
+        self.assertEqual(self.server._viewers.limit, 1)
         vid = self.video("media-10", "большая дорожка")
         file_id = self.file(vid, "big.mp4", b"\x00" * (3 * 1024 * 1024), "video")
         held = socket.create_connection(("127.0.0.1", self.port), timeout=10)
@@ -309,8 +309,8 @@ class MediaCase(GuiCase):
         tls.sendall(f"GET /media/{file_id} HTTP/1.1\r\nHost: localhost\r\n"
                     f"Authorization: Bearer {self.viewer.value}\r\n\r\n".encode())
         # Клиент ничего не читает: буферы переполняются, обработчик висит в
-        # write - зритель занят.
-        self.assertTrue(wait_until(lambda: self.server._watchers.count() == 1,
+        # write - зритель занят (раздача держит слот до конца раздачи).
+        self.assertTrue(wait_until(lambda: self.server._viewers.count() == 1,
                                    timeout=6.0, message="раздача не держала зрителя"),
                         "раздача не держала зрителя - лимит проверялся бы на пустом месте")
         status, _, body = self.get(f"/media/{file_id}", token=self.viewer.value)
@@ -320,7 +320,7 @@ class MediaCase(GuiCase):
         self.assertIn(i18n.t("http.rate", "ru"), payload.get("error", ""))
         self.assertIn("максимум 1", payload.get("error", ""))
         tls.close()
-        self.assertTrue(wait_until(lambda: self.server._watchers.count() == 0,
+        self.assertTrue(wait_until(lambda: self.server._viewers.count() == 0,
                                    timeout=6.0, message="зритель не освобождён"),
                         "закрытое соединение оставило зрителя занятым навсегда")
         status, _, body = self.get(f"/media/{file_id}", token=self.viewer.value)
@@ -381,14 +381,42 @@ class MediaCase(GuiCase):
 
     # -- HLS (S3) ------------------------------------------------------------
 
-    def test_hls_route_says_it_is_not_built_yet(self):
+    def test_hls_route_reads_only_the_cache_of_this_video(self):
+        """Чужое имя и «../» не читаются: путь кеша строится по id строки."""
         vid = self.video("hls-1", "дорожка")
+        self.file(vid, "clip.mp4", b"0123456789", "video")
+        secret = self.dir / "secret.txt"
+        secret.write_text("секрет", encoding="utf-8")
+        status, _, body = self.get(f"/hls/{vid}/../../secret.txt",
+                                   token=self.viewer.value)
+        self.assertEqual(status, 404, self.json_body(body))
+        self.assertNotIn("секрет", body.decode("utf-8", errors="replace"))
+        # Плейлист пишет ffmpeg как media-playlist: `index.m3u8`, а не
+        # `master.m3u8` - чужое имя отказано по подписи, а не молча.
         status, _, body = self.get(f"/hls/{vid}/master.m3u8", token=self.viewer.value)
-        self.assertEqual(status, 501)
+        self.assertEqual(status, 404)
+        payload = self.json_body(body)
+        self.assertIn(i18n.t("http.hls_segment", "ru"), payload.get("error", ""),
+                      "неизвестное имя кеша должно быть названо, а не 404 вслепую")
+
+    def test_hls_refusal_names_the_reason_without_tools(self):
+        """Без ffmpeg/ffprobe или на битом файле - 400 с названной причиной.
+
+        Никакого «не получено» и пустого плейлиста: подпись говорит, какой
+        инструмент не найден или почему кодек не прочитан.
+        """
+        vid = self.video("hls-2", "битая дорожка")
+        self.file(vid, "clip.mp4", bytes(range(256)), "video")
+        status, _, body = self.get(f"/hls/{vid}/index.m3u8", token=self.viewer.value)
+        self.assertEqual(status, 400, self.json_body(body))
         payload = self.json_body(body)
         self.assertEqual(payload.get("code"), "hls")
-        self.assertEqual(payload.get("error"), i18n.t("http.route_pending", "ru"),
-                         "непостроенный маршрут обязан назвать причину, а не молчать")
+        error = payload.get("error", "")
+        self.assertTrue(error, "отказ без подписи - молчание")
+        self.assertTrue(any(marker in error for marker in
+                            ("ffmpeg", "ffprobe", "кодек", "не прочитан",
+                             "не установлен", "HLS")),
+                        f"причина отказа не названа инструментом или кодексом: {error!r}")
 
     # -- журнал -------------------------------------------------------------
 
@@ -474,22 +502,46 @@ class TestMediaHelpers(unittest.TestCase):
         self.assertNotIn("мусор", out)
         self.assertIn("ok", out)
 
-    def test_watchers_counter(self):
-        limit = serve_media.Watchers(2)
-        self.assertTrue(limit.acquire())
-        self.assertTrue(limit.acquire())
-        self.assertFalse(limit.acquire(), "третий зритель принят при лимите 2")
-        limit.release()
-        self.assertTrue(limit.acquire())
+    def test_viewers_one_limit_for_slots_and_sessions(self):
+        """Раздача держит слот до конца, сессия плеера живёт TTL, лимит один."""
+        limit = serve_media.Viewers(2, ttl=10)
+        self.assertTrue(limit.hold(["media", 1, 5]))
+        self.assertTrue(limit.session(["hls", 2, "127.0.0.1"]))
+        self.assertFalse(limit.hold(["media", 3, 7]),
+                         "третье место принято при лимите 2")
+        # Тот же плеер (видео + адрес) продлевает сессию, а не плодит место:
+        # сегменты HLS короткие, и каждый сегмент «новым зрителем» - враньё.
+        self.assertTrue(limit.session(["hls", 2, "127.0.0.1"]))
         self.assertEqual(limit.count(), 2)
-        no_limit = serve_media.Watchers(0)
-        for _ in range(5):
-            self.assertTrue(no_limit.acquire(), "0 должен означать без лимита")
+        limit.release(["media", 1, 5])
+        self.assertTrue(limit.session(["hls", 4, "127.0.0.1"]))
 
-    def test_watchers_release_never_goes_negative(self):
-        limit = serve_media.Watchers(1)
-        limit.release()
-        self.assertEqual(limit.count(), 0, "счётчик не уходит в минус при лишнем release")
+    def test_viewer_sessions_expire_by_ttl(self):
+        limit = serve_media.Viewers(1, ttl=10)
+        self.assertTrue(limit.session(["hls", 1, "a"], now=100))
+        self.assertFalse(limit.session(["hls", 2, "b"], now=105),
+                         "второй плеер принят, пока первый числится зрителем")
+        self.assertTrue(limit.session(["hls", 2, "b"], now=111),
+                        "TTL истёк - слот обязан освободиться без ожидания")
+
+    def test_viewer_release_never_goes_negative_and_drop_video_frees_slots(self):
+        limit = serve_media.Viewers(2, ttl=300)
+        limit.release(["media", 1, 5])       # лишнего release - без минуса
+        self.assertEqual(limit.count(), 0)
+        self.assertTrue(limit.hold(["media", 9, 3]))
+        self.assertTrue(limit.session(["hls", 7, "a"], now=0))
+        self.assertEqual(limit.count(), 2)
+        limit.drop_video(7)                  # сессия удалённой строки снята
+        limit.drop_video(9)                  # и слот раздачи этого видео
+        self.assertEqual(limit.count(), 0,
+                         "строка удалена из индекса, а зрители её остались")
+
+    def test_viewers_zero_limit_means_no_limit(self):
+        limit = serve_media.Viewers(0)
+        for index in range(5):
+            self.assertTrue(limit.hold(["media", index, index]),
+                            "0 должен означать без лимита")
+            self.assertTrue(limit.session(["hls", index, "a"], now=0))
 
     def test_mime_tables_cover_player_formats(self):
         self.assertEqual(serve_media.mime_for("a.mkv", serve_media.MEDIA_MIME, "?"),
@@ -505,14 +557,16 @@ class TestMediaHelpers(unittest.TestCase):
         self.assertEqual(serve_http.byte_route("/media/12"), ("media", "12"))
         self.assertEqual(serve_http.byte_route("/thumb/7"), ("thumb", "7"))
         self.assertEqual(serve_http.byte_route("/subs/9"), ("subs", "9"))
-        self.assertEqual(serve_http.byte_route("/hls/5/master.m3u8"),
-                         ("hls", "5/master.m3u8"))
+        self.assertEqual(serve_http.byte_route("/hls/5/index.m3u8"),
+                         ("hls", "5/index.m3u8"))
         self.assertEqual(serve_http.byte_route("/api/poll"), ("", "/api/poll"))
         self.assertEqual(serve_http.byte_route("/nope"), ("", "/nope"))
 
     def test_route_signatures_exist_in_both_languages(self):
         for key in ("http.thumb_missing", "http.file_missing", "http.subs_missing",
-                    "http.subs_format", "http.range", "http.route_pending"):
+                    "http.subs_format", "http.range", "http.hls_codec",
+                    "http.hls_encoder", "http.hls_no_ffmpeg", "http.hls_probe_failed",
+                    "http.hls_failed", "http.hls_busy", "http.hls_segment"):
             self.assertTrue(i18n.has(key), f"{key} нет в словаре")
             self.assertTrue(i18n.t(key, "ru"), f"{key} без русской подписи")
             en = i18n.t(key, "en")
