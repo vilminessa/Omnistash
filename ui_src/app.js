@@ -3192,24 +3192,34 @@
           } else if (action === "mesh-stop") {
             call("mesh_fetch_stop");
           } else if (action === "reject") {
-            if (!meshFileInfo(data)) {
+            var meshCopy = meshFileInfo(data);
+            if (!meshCopy) {
               toast("Это не mesh-копия - отзывать нечего", true);
               return;
             }
-            var warn = "Отозвать этот файл?\n\n" +
+            // Разрушительное действие карточки (§3.8, тот же механизм, что у
+            // правил и 18+): диалог называет файл и дефолт - отказ. Native
+            // confirm не показывает, какой именно файл сгинет с диска.
+            legalDialog(
+              "Отозвать mesh-копию?",
+              "Отозвать этот файл?\n\n" +
               "• его хеш уйдёт в стоп-лист - манифесты с ним программа " +
               "больше не примет;\n" +
               "• сам файл удаляется с диска;\n" +
-              "• строка станет «упавшей» - «Повторить» пойдёт с площадки.";
-            if (!confirm(warn)) return;
-            call("mesh_reject", { id: data.id }).then(function (res) {
-              if (!res) return;
-              if (res.error) { toast(res.error, true); return; }
-              toast(res.removed
-                ? "Отозвано: хеш в стоп-листе, файл удалён"
-                : "Отозвано, но файл удалить не удалось (см. журнал)");
-              openDetail(data.id);
-              renderGrid();
+              "• строка станет «упавшей» - «Повторить» пойдёт с площадки.\n\n" +
+              "Файл: " + ((meshCopy.file && meshCopy.file.path) || data.title || ""),
+              "Подтверждаю: отозвать файл (хеш в стоп-лист, файл удалится с диска)"
+            ).then(function (ok) {
+              if (!ok) { toast("Отзыв файла отменён", true); return; }
+              call("mesh_reject", { id: data.id }).then(function (res) {
+                if (!res) return;
+                if (res.error) { toast(res.error, true); return; }
+                toast(res.removed
+                  ? "Отозвано: хеш в стоп-листе, файл удалён"
+                  : "Отозвано, но файл удалить не удалось (см. журнал)");
+                openDetail(data.id);
+                renderGrid();
+              });
             });
           } else if (action === "source" && data.webpage_url) {
             call("open_url", data.webpage_url);
@@ -3595,6 +3605,99 @@
       overlay.hidden = false;
     });
   }
+
+  /* ------------------------------------------------------------------ *
+   *  Диалоги: ловушка фокуса, Escape и возврат фокуса (APG Dialog (Modal),
+   *   §3.6, замена №6). Оверлеи открываются и закрываются атрибутом hidden
+   *   (~20 мест в app.js), поэтому стек диалогов ведётся по MutationObserver
+   *   на hidden, а не обходом всех мест: вложенный диалог (legalDialog поверх
+   *   «Операций…») лежит верхним и Tab/Escape работают по верхнему. Имя
+   *   диалога - aria-labelledby в разметке.
+   * ------------------------------------------------------------------ */
+
+  var dialogs = [];   // [{ overlay, opener }], нижний первым
+  var dialogFocusables = "a[href], button:not([disabled]), select:not([disabled])," +
+    " input:not([disabled]), textarea, [tabindex]:not([tabindex='-1'])";
+
+  function dialogTargets(root) {
+    // Скрытые контролы (hidden, disabled, display:none) не в обходе:
+    // Tab не должен вести к цели, которой человек не видит.
+    return Array.prototype.filter.call(
+      root.querySelectorAll(dialogFocusables),
+      function (el) { return el.offsetParent !== null; });
+  }
+
+  function dialogTop() {
+    return dialogs.length ? dialogs[dialogs.length - 1] : null;
+  }
+
+  /* Выход диалога: сначала отказ («-decline»/«-later» - дефолт по §3.8),
+     потом крестик. Кнопка сама решает, можно ли закрыть: перенос и
+     переупаковка отказывают, пока процесс идёт. */
+  function dialogExit(overlay) {
+    return overlay.querySelector('[id$="-decline"], [id$="-later"]') ||
+      overlay.querySelector('[id$="-close"]');
+  }
+
+  function dialogEnter(overlay) {
+    var exit = dialogExit(overlay);
+    var target = exit && exit.offsetParent !== null
+      ? exit                      // отказ - безопасное значение по умолчанию
+      : dialogTargets(overlay)[0];
+    if (target) target.focus();
+    // Иначе диалог остаётся без цели фокуса: кольца не видно, AT читает фон.
+  }
+
+  function dialogLeave(entry) {
+    var opener = entry.opener;
+    // Инициатор мог исчезнуть (перерисовка окна прокрутки, смена вкладки):
+    // focus() по снятому узлу переносит фокус на body и обрывает обход.
+    if (!opener || !document.body.contains(opener) || opener.offsetParent === null) return;
+    opener.focus();
+  }
+
+  var dialogWatcher = new MutationObserver(function (records) {
+    records.forEach(function (rec) {
+      var overlay = rec.target;
+      var pos = dialogs.findIndex(function (d) { return d.overlay === overlay; });
+      if (overlay.hidden) {
+        if (pos >= 0) dialogLeave(dialogs.splice(pos, 1)[0]);
+        return;
+      }
+      if (pos < 0) {
+        dialogs.push({ overlay: overlay, opener: document.activeElement });
+        dialogEnter(overlay);
+      }
+    });
+  });
+  Array.prototype.forEach.call(document.querySelectorAll(".overlay"), function (overlay) {
+    dialogWatcher.observe(overlay, { attributes: true, attributeFilter: ["hidden"] });
+  });
+
+  document.addEventListener("keydown", function (ev) {
+    var top = dialogTop();
+    if (!top) return;
+    if (ev.key === "Escape") {
+      var exit = dialogExit(top.overlay);
+      if (!exit || exit.offsetParent === null || exit.disabled) return;  // выхода нет - Escape молчит
+      ev.preventDefault();
+      exit.click();   // обработчик кнопки решает, закрывать ли окно
+      return;
+    }
+    if (ev.key !== "Tab") return;
+    var list = dialogTargets(top.overlay);
+    if (!list.length) { ev.preventDefault(); return; }
+    var cur = document.activeElement;
+    if (!top.overlay.contains(cur)) {   //innerHTML перерисован во время открытого диалога
+      ev.preventDefault();
+      list[0].focus();
+      return;
+    }
+    var first = list[0];
+    var last = list[list.length - 1];
+    if (ev.shiftKey && cur === first) { ev.preventDefault(); last.focus(); }
+    else if (!ev.shiftKey && cur === last) { ev.preventDefault(); first.focus(); }
+  });
 
   function bindSettings() {
     // LEG-1: правила не принимались - спросить один раз при открытии

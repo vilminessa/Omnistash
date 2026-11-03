@@ -434,9 +434,12 @@
 </footer>
 <pre id="log" class="log" hidden readonly></pre>
 
-<!-- Карточка видео -->
+<!-- Карточка видео. Диалог (APG Dialog (Modal), §3.6): имя через
+     aria-labelledby, ловушка фокуса/Escape/возврат фокуса - в app.js
+     (замена №6: раньше aria-modal без имени, без ловушки и без Escape). -->
 <div class="overlay" id="detail-overlay" hidden>
-  <div class="card detail-card" role="dialog" aria-modal="true">
+  <div class="card detail-card" role="dialog" aria-modal="true"
+       aria-labelledby="detail-title">
     <div class="card-head">
       <div class="card-title" id="detail-title">—</div>
       <button class="icon-btn" id="detail-close" aria-label="Закрыть">✕</button>
@@ -449,7 +452,7 @@
      -> C (поэтапное создание в БД) -> D (итог и выбор контента).
      Разметку фаз рисует app.js по add_flow из poll(). -->
 <div class="overlay" id="add-overlay" hidden>
-  <div class="card" role="dialog" aria-modal="true">
+  <div class="card" role="dialog" aria-modal="true" aria-labelledby="add-title">
     <div class="card-head">
       <div class="card-title" id="add-title">Добавить источник</div>
       <button class="icon-btn" id="add-close" aria-label="Закрыть">✕</button>
@@ -460,7 +463,7 @@
 
 <!-- Пометки для группы строк: теги, рейтинг, «просмотрено» -->
 <div class="overlay" id="mark-overlay" hidden>
-  <div class="card" role="dialog" aria-modal="true">
+  <div class="card" role="dialog" aria-modal="true" aria-labelledby="mark-title">
     <div class="card-head">
       <div class="card-title" id="mark-title">Пометить</div>
       <button class="icon-btn" id="mark-close" aria-label="Закрыть">✕</button>
@@ -471,7 +474,7 @@
 
 <!-- M17: массовые операции над выбранной группой или папкой целиком -->
 <div class="overlay" id="bulk-overlay" hidden>
-  <div class="card" role="dialog" aria-modal="true">
+  <div class="card" role="dialog" aria-modal="true" aria-labelledby="bulk-title">
     <div class="card-head">
       <div class="card-title" id="bulk-title">Операции над группой</div>
       <button class="icon-btn" id="bulk-close" aria-label="Закрыть">✕</button>
@@ -482,9 +485,9 @@
 
 <!-- Переупаковка: превью -> переименование с отменой -> итог -->
 <div class="overlay" id="repack-overlay" hidden>
-  <div class="card" role="dialog" aria-modal="true">
+  <div class="card" role="dialog" aria-modal="true" aria-labelledby="repack-title">
     <div class="card-head">
-      <div class="card-title">Переупаковка по шаблону</div>
+      <div class="card-title" id="repack-title">Переупаковка по шаблону</div>
       <button class="icon-btn" id="repack-close" aria-label="Закрыть">✕</button>
     </div>
     <div class="card-body" id="repack-body"></div>
@@ -493,9 +496,9 @@
 
 <!-- Перенос между хранилищами: превью -> копия с проверкой -> итог -->
 <div class="overlay" id="migrate-overlay" hidden>
-  <div class="card" role="dialog" aria-modal="true">
+  <div class="card" role="dialog" aria-modal="true" aria-labelledby="migrate-title">
     <div class="card-head">
-      <div class="card-title">Перенос в другое хранилище</div>
+      <div class="card-title" id="migrate-title">Перенос в другое хранилище</div>
       <button class="icon-btn" id="migrate-close" aria-label="Закрыть">✕</button>
     </div>
     <div class="card-body" id="migrate-body"></div>
@@ -504,9 +507,9 @@
 
 <!-- Сверка: копии файлов и «похоже на переезд» -->
 <div class="overlay" id="dedupe-overlay" hidden>
-  <div class="card" role="dialog" aria-modal="true">
+  <div class="card" role="dialog" aria-modal="true" aria-labelledby="dedupe-title">
     <div class="card-head">
-      <div class="card-title">Сверка и дубликаты</div>
+      <div class="card-title" id="dedupe-title">Сверка и дубликаты</div>
       <button class="icon-btn" id="dedupe-close" aria-label="Закрыть">✕</button>
     </div>
     <div class="card-body" id="dedupe-body"></div>
@@ -515,9 +518,9 @@
 
 <!-- Установка ffmpeg: автопредложение при запуске (по согласию) и по кнопке (GPL не вшиваем) -->
 <div class="overlay" id="ffmpeg-overlay" hidden>
-  <div class="card" role="dialog" aria-modal="true">
+  <div class="card" role="dialog" aria-modal="true" aria-labelledby="ffmpeg-title">
     <div class="card-head">
-      <div class="card-title">Установка FFmpeg</div>
+      <div class="card-title" id="ffmpeg-title">Установка FFmpeg</div>
       <button class="icon-btn" id="ffmpeg-close" aria-label="Закрыть">✕</button>
     </div>
     <div class="card-body" id="ffmpeg-body"></div>
@@ -526,9 +529,9 @@
 
 <!-- Участники: мой профиль (ник, отпечаток) и поиск по нику (DHT) -->
 <div class="overlay" id="peer-overlay" hidden>
-  <div class="card" role="dialog" aria-modal="true">
+  <div class="card" role="dialog" aria-modal="true" aria-labelledby="peer-title">
     <div class="card-head">
-      <div class="card-title">Участники</div>
+      <div class="card-title" id="peer-title">Участники</div>
       <button class="icon-btn" id="peer-close" aria-label="Закрыть">✕</button>
     </div>
     <div class="card-body" id="peer-body"></div>
@@ -537,7 +540,7 @@
 
 <!-- Правила использования (LEG-1/LEG-3): явное согласие человека -->
 <div class="overlay" id="legal-overlay" hidden>
-  <div class="card" role="dialog" aria-modal="true">
+  <div class="card" role="dialog" aria-modal="true" aria-labelledby="legal-title">
     <div class="card-head">
       <div class="card-title" id="legal-title">Правила использования</div>
     </div>
@@ -557,9 +560,9 @@
 
 <!-- Вход в Google: куки снимаются сами, копия шифруется (DPAPI) -->
 <div class="overlay" id="account-overlay" hidden>
-  <div class="card" role="dialog" aria-modal="true">
+  <div class="card" role="dialog" aria-modal="true" aria-labelledby="account-title">
     <div class="card-head">
-      <div class="card-title">Вход в Google</div>
+      <div class="card-title" id="account-title">Вход в Google</div>
       <button class="icon-btn" id="account-close" aria-label="Закрыть">✕</button>
     </div>
     <div class="card-body" id="account-body"></div>
@@ -568,9 +571,9 @@
 
 <!-- Стартовый выбор хранилища: показывается, пока их нет ни одного -->
 <div class="overlay" id="storage-overlay" hidden>
-  <div class="card" role="dialog" aria-modal="true">
+  <div class="card" role="dialog" aria-modal="true" aria-labelledby="storage-title">
     <div class="card-head">
-      <div class="card-title">Где хранить видео?</div>
+      <div class="card-title" id="storage-title">Где хранить видео?</div>
     </div>
     <div class="card-body">
       <p>Omnistash индексирует и скачивает в <b>папки-хранилища</b>. Укажите

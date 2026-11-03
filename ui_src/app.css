@@ -893,11 +893,17 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .card-head { display: flex; align-items: center; gap: var(--s-4); padding: 12px 14px; border-bottom: 1px solid var(--line); }
 .card-title { font-weight: 700; font-size: var(--fs-lg); flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-body { padding: 14px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
-.card-actions { display: flex; gap: var(--s-3); justify-content: flex-end; padding-top: 6px; }
-
+/* Ряд действий диалога (§3.6): компактная цель --ctl-h и --gap-cta между
+   соседними целями; первичная кнопка в DOM слева - её кладёт первым app.js.
+   padding 6px переезжает на шкалу (--s-2), как остальные литералы шага 5. */
+.card-actions { display: flex; gap: var(--gap-cta); justify-content: flex-end; padding-top: var(--s-2); }
+.card-actions .btn { min-height: var(--ctl-h); }
+/* select хранилища в карточке: та же высота ряда и не обрезанная подпись. */
+.card-actions select { height: var(--ctl-h); min-width: 170px; }
+/* Мета карточки (§3.6): числа read tabular - ширина цифр стабильна. */
 .kv { display: grid; grid-template-columns: 170px 1fr; gap: 6px 12px; font-size: var(--fs-sm); }
 .kv dt { color: var(--muted); }
-.kv dd { margin: 0; word-break: break-word; user-select: text; }
+.kv dd { margin: 0; word-break: break-word; user-select: text; font-variant-numeric: var(--nums); }
 
 .json {
   background: var(--bg);
