@@ -73,8 +73,24 @@ SCOPE_OF: dict[str, str] = {
     # server_config: настройки программы и установка инструментов
     "adult_tab_hide": "server_config", "adult_tab_show": "server_config",
     "ffmpeg_start": "server_config", "ffmpeg_stop": "server_config",
-    "rotate_log_file": "server_config", "save_setting": "server_config",
-    "wormhole_setup": "server_config",
+    "rotate_log_file": "server_config", "wormhole_setup": "server_config",
+    "save_setting": "server_config",
+    # S6: состояние доступа, ключи и привязка - право server_config. Значение
+    # кода привязки и согласие наружу решаются только на сервере (WINDOW_ONLY).
+    "serve_state": "server_config", "serve_pair_status": "server_config",
+    "serve_token_revoke": "server_config",
+    "serve_pair_begin": "server_config", "serve_consent_accept": "server_config",
+}
+
+# Цели, которые выполняет только человек в окне сервера (docs/SERVER-CLIENT.md
+# §5, §7): значение одноразового кода привязки и согласие «что уходит наружу»
+# не могут отдать или принять удалённые руки, даже с правом server_config.
+# Клиент подписывает их до запроса, сервер отказывает второй раз (app/gui.py
+# различает окно и HTTP через app/http/context.py) - молчания нет ни там, ни там.
+WINDOW_ONLY = frozenset({"serve_pair_begin", "serve_consent_accept"})
+WINDOW_REASON = {
+    "serve_pair_begin": "http.pair_code_local",
+    "serve_consent_accept": "http.expose_consent",
 }
 
 # Нативные цели окна (диалог папки, проводник, системный браузер, окно
@@ -116,6 +132,16 @@ def is_local(name: str) -> bool:
 
 def is_internal(name: str) -> bool:
     return name in INTERNAL
+
+
+def is_window_only(name: str) -> bool:
+    """Цель выполняется только человеком в окне сервера (§5, §7, S6)."""
+    return name in WINDOW_ONLY
+
+
+def window_reason(name: str) -> str:
+    """Ключ подписи отказа для цели окна ("" - цель не «оконная»)."""
+    return WINDOW_REASON.get(name, "")
 
 
 def normalize_scopes(scopes) -> tuple:

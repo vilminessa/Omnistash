@@ -47,6 +47,7 @@ from cryptography.x509 import IPAddress, SubjectAlternativeName
 from app import i18n, settings_schema, ui as serve_ui
 from app.gui import Api
 from app.http import audit as serve_audit
+from app.http import bind as serve_bind
 from app.http import media as serve_media
 from app.http import scopes as serve_scopes
 from app.http import server as serve_http
@@ -732,12 +733,12 @@ class TestServeTlsMaterial(unittest.TestCase):
         self.assertIsInstance(cert.public_key(), Ed25519PublicKey,
                               "mesh-канал сменил Ed25519: аттестация SPKI сломалась бы")
 
-    def test_bind_address_never_opens_outward_in_s1(self):
-        """Случайный текст в настройке не должен привязать порт наружу."""
+    def test_bind_address_never_opens_outward_without_consent(self):
+        """Случайный текст и режим наружу без согласия - только loopback (S6)."""
         for value in ("loopback", "localhost", "127.0.0.1", "", None,
                       "0.0.0.0", "lan", "192.168.1.5"):
             self.assertEqual(serve_http.bind_address(value), "127.0.0.1",
-                             f"{value}: S1 не имеет права слушать не loopback")
+                             f"{value}: без согласия слушать не loopback нельзя")
 
 
 class TestTokenStore(unittest.TestCase):
@@ -1090,10 +1091,21 @@ class TestServeSettingsCard(unittest.TestCase):
                 self.assertFalse(any(char in "абвгдежзийклмнопрстуфхцчшщэюя"
                                      for char in value), f"{key}: en с кириллицей")
 
-    def test_bind_choice_has_only_loopback_in_s1(self):
+    def test_bind_choice_offers_modes_but_not_outward_without_consent(self):
+        """S6: список режимов есть, но без согласия адрес остаётся loopback."""
         choices = settings_schema.field("serve_bind")["choices"]
-        self.assertEqual([pair[0] for pair in choices], ["loopback"],
-                         "S1 не имеет права предлагать выход наружу (это S6)")
+        self.assertEqual([pair[0] for pair in choices],
+                         ["loopback", "lan", "tailscale", "wildcard"],
+                         "режимы экспозиции (§7) разошлись со списком схемы")
+        self.assertEqual(settings_schema.field("serve_bind")["default"], "loopback",
+                         "выход наружу не должен быть значением по умолчанию")
+        for mode in ("lan", "tailscale", "wildcard"):
+            refused = serve_bind.resolve(mode, False, "")
+            self.assertEqual(refused["address"], "127.0.0.1",
+                             f"{mode}: без согласия слушатель обязан остаться "
+                             f"на этом компьютере")
+            self.assertTrue(refused["error"],
+                            f"{mode}: отказ без согласия должен быть назван причиной")
 
     def test_server_signatures_exist_in_both_languages(self):
         for key in ("http.scope_denied", "http.post_only", "http.bad_body",

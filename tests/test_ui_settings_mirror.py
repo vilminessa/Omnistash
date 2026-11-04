@@ -25,8 +25,9 @@ from app import i18n, settings, settings_schema
 SRC = Path(__file__).resolve().parent.parent
 JS = SRC / "ui_src" / "app.js"
 
-# Поля, которые рисует код окна (виджет аккаунта, кнопка действия, хранилища).
-WIDGET_TYPES = {"account", "action", "storages"}
+# Поля, которые рисует код окна (виджет аккаунта, кнопка действия, хранилища,
+# виджет доступа по HTTPS S6).
+WIDGET_TYPES = {"account", "action", "storages", "serve"}
 
 ENTRY = re.compile(r"\{[^{}]*\}", re.S)          # один объект поля внутри списка
 FIELD = re.compile(r'(key|type|section|label|hidden):\s*("[^"]*"|true|false)')
@@ -201,7 +202,7 @@ class TestSettingsMirror(unittest.TestCase):
         hidden_backend = {field["key"] for field in settings_schema.FIELDS
                           if field.get("hidden")}
         widgets = {"_storages", "_refresh_meta", "_peers", "_ffmpeg",
-                   "_google_account"}
+                   "_google_account", "_serve_access"}
         for key in widgets:
             self.assertIn(key, all_mirror, f"{key}: виджет пропал из превью")
         shown = set(self.schema) | widgets | hidden_backend

@@ -243,16 +243,28 @@ class TestCssPaletteMatchesRegistry(unittest.TestCase):
             "themes.row_px (ROW_MIN/ROW_FACTOR)")
 
     def test_mono_stack_from_registry(self):
-        """Журнал и JSON читаются моноширинным стеком из реестра тем.
+        """Журнал, JSON и блок кода привязки читаются стеком из реестра тем.
 
-        Литерал стека в двух правилах - второй источник правды: реестр
-        меняется, а окно остаётся на прежнем шрифте.
+        Литерал стека вне объявления `--mono` - второй источник правды: реестр
+        меняется, а окно остаётся на прежнем шрифте. Число потребителей
+        переменной не фиксируем: UI добавляет новые моноправила (S6 - код
+        привязки), и жёсткий счётчик ловил бы рост, а не расхождение со стеком.
         """
         root = _css_block(self.css, ":root")
         self.assertEqual(root.get("--mono"), themes.font_stack("mono"),
                          "--mono в app.css расходится с реестром стеков")
-        self.assertEqual(len(re.findall(r"var\(--mono\)", _clean(self.css))), 2,
-                         "журнал и JSON должны брать стек из переменной")
+        clean = _clean(self.css)
+        self.assertGreaterEqual(len(re.findall(r"var\(--mono\)", clean)), 2,
+                                "журнал и JSON должны брать стек из переменной")
+        for selector in (".log", ".json", ".serve-code"):
+            block = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", clean)
+            self.assertTrue(block, f"в app.css нет блока {selector!r}")
+            self.assertIn("var(--mono)", block.group(1),
+                          f"{selector}: стек написан литералом вместо --mono")
+        self.assertNotRegex(re.sub(r"--[a-z0-9-]+\s*:[^;]+;", "", clean),
+                            r"Consolas|Cascadia|Segoe UI Mono",
+                            "литерал моноширинного стека вне :root - окно "
+                            "осталось бы на прежнем шрифте при смене реестра")
 
     def test_scale_tokens_defined_in_root(self):
         """Токены отступов/радиуса/типографики/веяния объявлены в :root (§2.4-2.7)."""

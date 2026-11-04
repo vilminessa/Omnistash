@@ -266,6 +266,10 @@
       if (res.adult_site) state.adultLabel = res.adult_site;
       applyLanguage();
       renderSettings();
+      // Строка прав и подписи недоступных целей пересказываются на новом
+      // языке: они строились словарём предыдущего языка (§8, §4).
+      accessBand(httpProblem.shown);
+      applyAccess();
     });
   }
 
@@ -305,7 +309,7 @@
      тот же фасад Api из app/gui.py, поэтому клиент не изобретает целей:
      tests/test_ui_transport.py сверяет список с методом класса Api. Права
      решает СЕРВЕР по скоупам токена - здесь только то, что вообще имеет
-     смысл по HTTP (99 целей из 120 публичных методов). */
+     смысл по HTTP: остальные цели - нативные, локальные и внутренние. */
   var HTTP_METHODS = [
     // read: чтение библиотеки и diagnostics
     "adult_tab", "collections_list", "data_api_meta", "data_api_status",
@@ -341,7 +345,12 @@
     "account_forget", "account_import", "oauth_forget", "oauth_status",
     // server_config: настройки программы и установка инструментов
     "adult_tab_hide", "adult_tab_show", "ffmpeg_start", "ffmpeg_stop",
-    "rotate_log_file", "save_setting", "wormhole_setup"
+    "rotate_log_file", "save_setting", "wormhole_setup",
+    // S6: состояние доступа, ключи и привязка. serve_pair_begin и
+    // serve_consent_accept выполняются только окном сервера (WINDOW_ONLY):
+    // цель названа подписью до запроса, сервер отказывает второй раз.
+    "serve_state", "serve_pair_status", "serve_token_revoke",
+    "serve_pair_begin", "serve_consent_accept"
   ];
 
   /* Нативные цели окна (диалог папки, проводник, системный браузер, окно
@@ -419,7 +428,21 @@
     "adult_tab_hide": "server_config", "adult_tab_show": "server_config",
     "ffmpeg_start": "server_config", "ffmpeg_stop": "server_config",
     "rotate_log_file": "server_config", "save_setting": "server_config",
-    "wormhole_setup": "server_config"
+    "wormhole_setup": "server_config",
+    "serve_state": "server_config", "serve_pair_status": "server_config",
+    "serve_token_revoke": "server_config", "serve_pair_begin": "server_config",
+    "serve_consent_accept": "server_config"
+  };
+
+  /* Цели, которые выполняет только человек в окне сервера (S6, §5, §7):
+     значение одноразового кода привязки и согласие «что уходит наружу».
+     Зеркало app/http/scopes.py:WINDOW_ONLY и WINDOW_REASON - подпись отказа
+     та же, что выдаёт сервер, поэтому клиент называет причину до запроса, а
+     не отправляет вызов, который ему всё равно откажут. */
+  var HTTP_WINDOW_ONLY = ["serve_pair_begin", "serve_consent_accept"];
+  var HTTP_WINDOW_KEYS = {
+    serve_pair_begin: "http.pair_code_local",
+    serve_consent_accept: "http.expose_consent"
   };
 
   /* Права байтовых маршрутов: зеркало app/http/server.py:route_scope.
@@ -551,6 +574,12 @@
           httpProblem.unpaired = true;
           httpProblem.shown = problem.error;
           clientBadge(problem.error);
+          // Ключ перестал читаться (отозван или не принят): строка прав и
+          // поле кода обязаны назвать причину, а не оставить «права выданы»
+          // из предыдущего чтения (§4, §5).
+          state.scopes = null;
+          accessBand(problem.error);
+          applyAccess();
         }
         return problem;
       });
@@ -607,6 +636,17 @@
     if (HTTP_DESKTOP.indexOf(name) >= 0) {
       return t("http.desktop", "доступно только на сервере");
     }
+    var windowKey = HTTP_WINDOW_KEYS[name];
+    if (windowKey) {
+      // Цель выполняется только человеком в окне сервера (§5, §7): подпись
+      // та же, что выдаёт сервер при вызове по HTTP.
+      if (windowKey === "http.pair_code_local") {
+        return t("http.pair_code_local",
+                 "код привязки показан в окне сервера: по HTTP его значение не отдаётся");
+      }
+      return t("http.expose_consent",
+               "согласие «что уходит наружу» принимает человек на сервере: по HTTP не принимается");
+    }
     var scope = HTTP_SCOPE_OF[name];
     if (!scope) return "";
     if (!state.scopes) return "";
@@ -633,6 +673,7 @@
     if (!httpMode()) {
       band.hidden = true;
       band.textContent = "";
+      syncPairBox();
       return;
     }
     var text = problem || "";
@@ -650,12 +691,36 @@
     }
     band.textContent = text;
     band.hidden = !text;
+    syncPairBox();
+  }
+
+  /* Поле кода привязки вне карточки (§5): пока привязка не завершена,
+     карточка настроек не читается (get_initial требует права), и клиенту
+     негде было бы ввести код. Блок виден ровно когда ключа нет или он
+     отозван/не принят; причину называет подпись, а не пустое поле. */
+  function syncPairBox() {
+    var box = $("pair-box");
+    if (!box) return;
+    var need = httpMode() && (httpProblem.unpaired || !httpToken());
+    box.hidden = !need;
+    var caption = $("pair-caption");
+    if (caption) {
+      caption.textContent = need
+        ? (httpProblem.shown ||
+           t("http.no_token", "ключ доступа не получен - привязка не завершена"))
+        : "";
+    }
+    var field = $("pair-code-out");
+    if (field && need) {
+      field.setAttribute("aria-label",
+        t("pair.code.label", "Код привязки (6 цифр или 4 слова)"));
+    }
   }
 
   var ACCESS_CONTAINERS = ".toolbar, .storage-actions, .storage-toolbar, " +
     ".browser-line, .card-actions, .notice, .settings, .account-list, .field";
 
-  function accessNote(box, scopes, native) {
+  function accessNote(box, scopes, native, windowText) {
     var parts = [];
     if (scopes.length) {
       parts.push(t("access.missing", "не выдано:") + " " + scopes.join(" · "));
@@ -665,6 +730,7 @@
                    "часть целей доступна только на сервере: диалог папки, " +
                    "проводник, окно площадки, вход в аккаунт"));
     }
+    if (windowText) parts.push(windowText);
     if (!parts.length) return;
     var note = document.createElement("span");
     note.className = "access-note";
@@ -676,7 +742,8 @@
   function clearAccess() {
     Array.prototype.forEach.call(document.querySelectorAll(".access-note"),
       function (note) { note.remove(); });
-    Array.prototype.forEach.call(document.querySelectorAll("[data-need], [data-native]"),
+    Array.prototype.forEach.call(
+      document.querySelectorAll("[data-need], [data-native], [data-window]"),
       function (el) {
         if (el.dataset.tip !== undefined) el.title = el.dataset.tip;
         el.classList.remove("no-access");
@@ -693,13 +760,16 @@
     if (!httpMode()) { clearAccess(); return; }
     Array.prototype.forEach.call(document.querySelectorAll(".access-note"),
       function (note) { note.remove(); });
-    var boxes = new Map();   // контейнер -> {scopes: [], native: bool}
-    Array.prototype.forEach.call(document.querySelectorAll("[data-need], [data-native]"),
+    var boxes = new Map();   // контейнер -> {scopes: [], native, window: ""}
+    Array.prototype.forEach.call(
+      document.querySelectorAll("[data-need], [data-native], [data-window]"),
       function (el) {
         var scope = el.dataset.need || "";
         var native = el.dataset.native || "";
+        var windowOnly = el.dataset.window || "";
         var reason = "";
         if (native) reason = t("http.desktop", "доступно только на сервере");
+        else if (windowOnly) reason = accessReason(windowOnly);
         else if (scope && state.scopes && state.scopes.indexOf(scope) < 0) {
           reason = scopeDenied(scope);
         }
@@ -714,13 +784,14 @@
         if (!reason) return;
         var box = el.closest(ACCESS_CONTAINERS) || el.parentElement;
         if (!box) return;
-        var entry = boxes.get(box) || { scopes: [], native: false };
+        var entry = boxes.get(box) || { scopes: [], native: false, window: "" };
         if (scope && entry.scopes.indexOf(scope) < 0) entry.scopes.push(scope);
         if (native) entry.native = true;
+        if (windowOnly) entry.window = reason;
         boxes.set(box, entry);
       });
     boxes.forEach(function (entry, box) {
-      accessNote(box, entry.scopes, entry.native);
+      accessNote(box, entry.scopes, entry.native, entry.window);
     });
   }
 
@@ -729,7 +800,7 @@
   document.addEventListener("click", function (event) {
     if (!httpMode()) return;
     var el = event.target && event.target.closest
-      ? event.target.closest("[data-need], [data-native]") : null;
+      ? event.target.closest("[data-need], [data-native], [data-window]") : null;
     if (!el || el.getAttribute("aria-disabled") !== "true") return;
     event.preventDefault();
     event.stopPropagation();
@@ -810,15 +881,13 @@
 
   function call(name, arg) {
     // Цель, которой этому ключу не выдано (или которая возможна только на
-    // сервере), не уходит по сети: ответ с причиной тот же, что дал бы
-    // сервер, и UI показывает его как тост (§4, §8).
+    // сервере / только в окне сервера), не уходит по сети: ответ с причиной
+    // тот же, что дал бы сервер, и UI показывает его как тост (§4, §8, §5).
     var blocked = accessReason(name);
     if (blocked) {
-      return Promise.resolve({
-        error: blocked,
-        code: HTTP_DESKTOP.indexOf(name) >= 0 ? "desktop" : "scope",
-        target: name
-      });
+      var kind = HTTP_DESKTOP.indexOf(name) >= 0 ? "desktop"
+        : HTTP_WINDOW_KEYS[name] ? "window" : "scope";
+      return Promise.resolve({ error: blocked, code: kind, target: name });
     }
     var api = bridge();
     if (!api || typeof api[name] !== "function") return Promise.resolve(null);
@@ -4149,11 +4218,19 @@
         ' data-key="' + field.key + '" aria-checked="' + (value ? "true" : "false") +
         '"' + (value ? " checked" : "") + "><span>включено</span></label>";
     } else if (field.type === "choice") {
-      control = '<select data-key="' + field.key + '">' +
+      control = '<select data-key="' + field.key + '" data-prev="' +
+        esc(value) + '">' +
         field.choices.map(function (pair) {
           return '<option value="' + esc(pair[0]) + '"' +
             (value === pair[0] ? " selected" : "") + ">" + esc(pair[1]) + "</option>";
         }).join("") + "</select>";
+      if (field.key === "serve_bind" && httpMode()) {
+        // Клиент может выбрать режим наружу (право server_config), но согласие
+        // принимает только человек на сервере: без него сервер остаётся на
+        // этом компьютере и называет причину в состоянии доступа (§7).
+        control += '<div class="field-hint">' + esc(t("http.expose_consent",
+          "согласие «что уходит наружу» принимает человек на сервере: по HTTP не принимается")) + "</div>";
+      }
       if (field.key === "transcode") {
         // Живая пометка: без ffmpeg перекодировки нет вовсе; какие кодеки
         // есть в конкретной сборке - уточняет refreshTranscodeField().
@@ -4178,6 +4255,11 @@
       control = '<input type="text" data-key="' + field.key + '" value="' +
         esc(value) + '"><button class="btn ghost" data-browse="' + field.key +
         '" data-native="pick_folder" title="Выбрать папку в проводнике сервера">…</button>';
+    } else if (field.type === "serve") {
+      // Виджет доступа по HTTPS (S6): состояние слушателя, согласие, код
+      // привязки и список ключей. Значение кода отдаёт только окно сервера,
+      // согласие принимает тоже только человек на сервере (§5, §7).
+      control = serveWidget();
     } else if (field.type === "action") {
       // Поле-кнопка (transient): значение не читаем, действие - по data-action.
       // Спан состояния у каждого действия свой - их несколько в карточке.
@@ -4322,6 +4404,339 @@
       '<button class="btn ghost" id="storage-check" data-need="sources">' +
       esc(t("storage.check.label", "Проверить доступность")) + "</button>" +
       "</div></div>";
+  }
+
+  /* ------------------------------------------------------------------ *
+   *  Виджет доступа по HTTPS (docs/SERVER-CLIENT.md §5, §7, шаг S6)
+   *
+   *  Показывает, поднят ли слушатель, куда, принято ли согласие, активен ли
+   *  код привязки и сколько ключей живёт. Ни значений токенов, ни значений
+   *  кодов здесь нет: код отдаёт только окно сервера (serve_pair_begin), а
+   *  согласие принимает только человек на сервере (serve_consent_accept).
+   * ------------------------------------------------------------------ */
+
+  var serveSnap = null;      // последний serve_state (null - не прочитан)
+  var pairShown = null;      // показанный код: только окно сервера (§5)
+
+  function minutesLeft(epochSeconds) {
+    var left = Number(epochSeconds || 0) - Date.now() / 1000;
+    return left > 0 ? Math.max(1, Math.round(left / 60)) : 0;
+  }
+
+  function serveWidget() {
+    var client = httpMode();
+    var actions = '<button class="btn ghost" id="serve-refresh-btn" ' +
+      'data-need="server_config">' +
+      esc(t("serve.refresh", "Прочитать состояние доступа")) + "</button>";
+    if (client) {
+      // Клиент не имеет окна сервера: код показывает окно, клиент вводит его
+      // и получает ключ (POST /pair - без ключа, это и есть получение права).
+      actions += ' <input type="text" id="pair-code" autocomplete="off" placeholder="' +
+        esc(t("pair.code.ph", "код из окна сервера…")) + '" aria-label="' +
+        esc(t("pair.code.label", "Код привязки (6 цифр или 4 слова)")) + '">' +
+        ' <button class="btn primary" id="pair-btn">' +
+        esc(t("pair.submit", "Привязать этот браузер")) + "</button>";
+    } else {
+      actions += ' <button class="btn ghost" id="serve-code-btn" ' +
+        'data-window="serve_pair_begin">' +
+        esc(t("pair.begin", "Показать код привязки")) + "</button>";
+      actions += ' <button class="btn ghost" id="serve-consent-btn">' +
+        esc(t("expose.title", "Что уходит наружу")) + "</button>";
+    }
+    return '<div class="serve-box" data-serve-access>' +
+      '<div class="notice" id="serve-state" role="status" aria-live="polite">' +
+      esc(t("serve.pending", "состояние доступа не прочитано - нажмите «Прочитать состояние»")) +
+      "</div>" +
+      '<div class="field-hint">' + esc(t("pair.note",
+        "Код показывает окно сервера; права выдаёт сервер по пресету в " +
+        "настройках; код одноразовый и истёкший код не примется")) + "</div>" +
+      '<div class="card-actions">' + actions + "</div>" +
+      '<div class="serve-code" id="serve-code" role="status" aria-live="polite" hidden></div>' +
+      '<div class="account-list" id="serve-keys"></div>' +
+      "</div>";
+  }
+
+  function serveCaption(state) {
+    var parts = [];
+    parts.push(state.running ? t("pair.running", "слушатель поднят")
+                             : t("pair.down", "слушатель не поднят"));
+    if (state.url) parts.push(t("pair.address", "слушает:") + " " + state.url);
+    parts.push(t("pair.mode", "режим:") + " " + (state.mode || "loopback"));
+    parts.push(state.consent ? t("pair.consent_on", "согласие принято")
+                             : t("pair.consent_off", "согласия нет"));
+    if (state.mode === "wildcard" && !state.allowlist) {
+      parts.push(t("pair.allow_none", "allowlist пуст"));
+    }
+    if (state.note) parts.push(state.note);
+    if (state.problem) parts.push(state.problem);
+    if (state.error) parts.push(state.error);
+    parts.push(t("pair.keys", "Ключи доступа") + ": " +
+      (state.count || 0));
+    var pairing = state.pairing || {};
+    if (pairing.error) parts.push(pairing.error);
+    if (pairing.active) {
+      parts.push(t("pair.code.active", "код активен") + " · " +
+        t("pair.code.expires", "истекает через") + " " +
+        minutesLeft(pairing.expires_at) + " мин");
+    } else {
+      parts.push(t("pair.code.none", "код не показан"));
+    }
+    if (pairing.wrong_attempts) {
+      parts.push(t("pair.attempts", "неверных попыток привязки:") + " " +
+        pairing.wrong_attempts);
+    }
+    return parts.join(" · ");
+  }
+
+  function renderServeKeys(tokens) {
+    var box = $("serve-keys");
+    if (!box) return;
+    if (!tokens || !tokens.length) {
+      box.innerHTML = '<div class="muted">' +
+        esc(t("pair.keys_none", "ключей не выдано")) + "</div>";
+      return;
+    }
+    box.innerHTML = tokens.map(function (item) {
+      // Метка, скоупы и дата - публичные (Token.public); значения токена нет.
+      return '<div class="account-row">' +
+        '<span class="muted">' + esc(item.label || item.id) + "</span>" +
+        '<span class="muted">' + esc((item.scopes || []).join(" · ")) + "</span>" +
+        '<span class="muted">· ' + esc(item.created_at || "") + "</span>" +
+        '<span class="spacer"></span>' +
+        '<button class="link-btn" data-need="server_config" data-token-revoke="' +
+        esc(item.id) + '">' + esc(t("pair.revoke", "отозвать")) + "</button></div>";
+    }).join("");
+  }
+
+  function renderServeCode() {
+    var box = $("serve-code");
+    if (!box) return;
+    if (!pairShown) {
+      box.hidden = true;
+      box.textContent = "";
+      return;
+    }
+    var fmt = pairShown.format === "words"
+      ? t("pair.code.words", "4 слова") : t("pair.code.digits", "6 цифр");
+    box.hidden = false;
+    box.textContent = pairShown.code + " · " + fmt + " · " +
+      t("pair.code.expires", "истекает через") + " " +
+      minutesLeft(pairShown.expires_at) + " мин · " +
+      t("access.granted", "права ключа:") + " " +
+      (pairShown.scopes || []).join(" · ");
+  }
+
+  function renderServeState(snap, problem) {
+    var box = $("serve-state");
+    if (!box) return;
+    var text = problem || (snap && snap.error) || "";
+    if (!snap && !text) {
+      text = t("serve.pending",
+               "состояние доступа не прочитано - нажмите «Прочитать состояние»");
+    }
+    serveSnap = text && !snap ? null : snap;
+    box.textContent = snap ? serveCaption(snap) : text;
+    renderServeKeys((snap && snap.tokens) || []);
+    renderServeCode();
+    applyAccess();
+  }
+
+  function readServeState() {
+    return call("serve_state").then(function (res) {
+      if (!res) return null;
+      if (res.error) {
+        // Отказ назван: пустого «ноль ключей» и «не поднят» из молчания нет.
+        renderServeState(null, res.error);
+        toast(res.error, true);
+        return null;
+      }
+      renderServeState(res, "");
+      return res;
+    });
+  }
+
+  /* Текст и галка диалога согласия (§7): список того, что уходит наружу, и
+     предупреждение про зону перехвата DPI. Возвращает Promise<boolean>. */
+  function exposeDialog() {
+    var text = t("expose.text",
+      "Слушатель за пределами этого компьютера отдаёт: подписи строк " +
+      "библиотеки, обложки, длительности, размеры, счётчики состояния " +
+      "(poll) и байты медиа по запросу клиента; журнал обращений пишется " +
+      "на сервере. Пути дисков наружу не уходят: байты раздаются по id " +
+      "строки и id файла. Доступ решают скоупы на ключе, который выдал " +
+      "привязка; перебор кода затормозен; число ключей ограничено.") +
+      "\n\n" + t("expose.dpi",
+      "Порт в зоне перехвата DPI (1024-65535, а также 80/443): трафик может " +
+      "замедляться или искажаться. Держите порт вне зоны (рекомендуем " +
+      "444-1023, по умолчанию 1001); выключать DPI-утилиту не нужно.");
+    return legalDialog(t("expose.title", "Что уходит наружу"), text,
+                       t("expose.check", "Согласие «что уходит наружу» принято"));
+  }
+
+  /* Согласие «что уходит наружу» (§7): принимает его только человек на
+     сервере; по HTTP цель подписана как оконная и не отправляется. */
+  function consentDialog() {
+    exposeDialog().then(function (accepted) {
+      call("serve_consent_accept", { accept: accepted }).then(function (res) {
+        if (!res) return;
+        if (res.error) { toast(res.error, true); return; }
+        renderServeState(res.serve || null, res.problem || "");
+        toast(accepted
+          ? t("expose.check", "Согласие «что уходит наружу» принято")
+          : t("expose.denied",
+              "Согласие не принято - доступ наружу не включается"));
+        if (res.problem) toast(res.problem, true);
+        var select = document.querySelector(
+          '#settings-body select[data-key="serve_bind"]');
+        if (select) select.dataset.prev = select.value;
+      });
+    });
+  }
+
+  /* Одноразовый код привязки показывает окно сервера (§5). Значение кода не
+     уходит по HTTP: удалённые руки с server_config не получают права, которое
+     человек показывает одному клиенту. */
+  function showPairCode() {
+    call("serve_pair_begin", { format: "digits" }).then(function (res) {
+      if (!res) return;
+      if (res.error) {
+        // Причина названа: «слушатель не поднят», «реестр не открыт», битый
+        // пресет - а не пустой код и не молчание.
+        toast(res.error, true);
+        pairShown = null;
+        renderServeCode();
+        return;
+      }
+      pairShown = res;
+      renderServeCode();
+      toast(t("pair.code.label", "Код привязки (6 цифр или 4 слова)") +
+            ": " + res.code);
+    });
+  }
+
+  /* Привязка клиента (S6): POST /pair без ключа - сервер выдаёт токен со
+     скоупами пресета. Клиент кладёт ключ в localStorage и перечитывает
+     свои права (GET /whoami), а не выдумывает «доступ есть». */
+  function pairThisBrowser(rawCode) {
+    var code = String(rawCode || "").trim();
+    if (!code) {
+      toast(t("http.pair_empty", "код привязки не введён"), true);
+      return;
+    }
+    var base = httpBaseUrl();
+    if (!base) {
+      toast(t("http.no_server", "страница открыта не сервером - привязка невозможна"), true);
+      return;
+    }
+    fetch(base + "/pair", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify([{ code: code }]),
+      credentials: "same-origin"
+    }).then(function (res) {
+      return res.text().then(function (text) {
+        var payload = null;
+        if (text) {
+          try {
+            payload = JSON.parse(text);
+          } catch (err) {
+            payload = { error: t("http.bad_json", "сервер ответил не JSON") +
+                        ": " + text.slice(0, 80), code: "bad_json" };
+          }
+        }
+        if (res.status >= 200 && res.status < 300 && payload && payload.token) {
+          try {
+            localStorage.setItem("omnistash.token", payload.token);
+          } catch (err) {
+            toast(t("prefs.local.denied",
+                    "localStorage недоступен - настройка клиента не сохранится"), true);
+            return;
+          }
+          httpProblem.unpaired = false;
+          httpProblem.shown = "";
+          clientBadge("");
+          toast(t("pair.pairing", "ключ принят - права:") + " " +
+                (payload.scopes || []).join(" · "));
+          // Права перечитываются, карточка рисуется заново: до привязки
+          // get_initial был отказан, и настроек не было видно (§8).
+          fetchAccess().then(function () {
+            loadInitial();
+            return readServeState();
+          });
+          return;
+        }
+        var problem = httpProblemText(res.status, payload);
+        if (res.status === 429) {
+          // Перебор затормозен: названы и причина, и сколько ждать (§5).
+          toast(problem.error + " · " + t("http.pair_throttle",
+                                          "слишком много неверных попыток с этого адреса - подождите") +
+                " (" + (payload && payload.retry_in ? payload.retry_in : 0) + " с)", true);
+          return;
+        }
+        toast(problem.error, true);
+      });
+    }, function (err) {
+      toast(t("http.offline", "сервер не отвечает") + ": " +
+            ((err && err.message) ? err.message : String(err)), true);
+    });
+  }
+
+  function bindPairBox() {
+    // Поле кода живёт в разметке страницы (§5): привязка не требует права,
+    // поэтому вход доступен до чтения схемы карточки.
+    var btn = $("pair-btn-out");
+    if (btn) {
+      btn.addEventListener("click", function () {
+        pairThisBrowser($("pair-code-out") ? $("pair-code-out").value : "");
+      });
+    }
+    var field = $("pair-code-out");
+    if (field) {
+      field.setAttribute("aria-label",
+        t("pair.code.label", "Код привязки (6 цифр или 4 слова)"));
+      field.addEventListener("keydown", function (event) {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        pairThisBrowser(field.value);
+      });
+    }
+    syncPairBox();
+  }
+
+  function bindServeActions() {
+    var refresh = $("serve-refresh-btn");
+    if (refresh) refresh.addEventListener("click", readServeState);
+    var codeBtn = $("serve-code-btn");
+    if (codeBtn) codeBtn.addEventListener("click", showPairCode);
+    var consentBtn = $("serve-consent-btn");
+    if (consentBtn) consentBtn.addEventListener("click", consentDialog);
+    var pairBtn = $("pair-btn");
+    if (pairBtn) {
+      pairBtn.addEventListener("click", function () {
+        pairThisBrowser($("pair-code") ? $("pair-code").value : "");
+      });
+    }
+    var keys = $("serve-keys");
+    if (keys) {
+      // Delegated: список ключей перестроится после каждого чтения состояния,
+      // и кнопки, связанные один раз, потеряли бы обработчик - отзыв
+      // перестал бы работать после первого обновления.
+      keys.addEventListener("click", function (event) {
+        var btn = event.target && event.target.closest
+          ? event.target.closest("[data-token-revoke]") : null;
+        if (!btn) return;
+        call("serve_token_revoke", { id: btn.dataset.tokenRevoke })
+          .then(function (res) {
+            if (!res) return;
+            if (res.error) { toast(res.error, true); return; }
+            // «Ключ не найден» - тоже отказ подписью, а не тихий успех.
+            toast(t("http.tokens_revoked", "ключ отозван") + " (" + res.revoked + ")");
+            readServeState();
+          });
+      });
+    }
+
+    renderServeState(serveSnap, "");
   }
 
   // Диалог согласия (LEG): явная галка человека - без неё «Принять»
@@ -4492,6 +4907,36 @@
             applyAccess();
             return;
           }
+          // Экспозиция по HTTPS (S6, §7): выбор режима наружу требует согласия
+          // человека на сервере. В окне спрашиваем диалог «Что уходит наружу»
+          // ДО сохранения; отказ - значение остаётся прежним (select вернулся
+          // на прежнее), причина читается подписью. Клиент согласие принять не
+          // может (цель оконная): он меняет режим настройкой, а сервер остаётся
+          // на этом компьютере и называет причину в состоянии доступа.
+          if (key === "serve_bind" && value !== "loopback" && !httpMode()) {
+            var previous = input.dataset.prev || "loopback";
+            exposeDialog().then(function (accepted) {
+              if (!accepted) {
+                input.value = previous;
+                toast(t("expose.denied",
+                        "Согласие не принято - доступ наружу не включается"));
+                return;
+              }
+              call("serve_consent_accept", { accept: true }).then(function (res) {
+                if (!res) return;
+                if (res.error) {
+                  input.value = previous;
+                  toast(res.error, true);
+                  return;
+                }
+                saveSetting(key, value);
+                input.dataset.prev = value;
+                renderServeState(res.serve || null, res.problem || "");
+                if (res.problem) toast(res.problem, true);
+              });
+            });
+            return;
+          }
           // Согласие на mesh: включение - явное действие с объяснением,
           // что уходит наружу (адрес и id запрашиваемых видео).
           if (key === "mesh_enabled" && value) {
@@ -4554,6 +4999,9 @@
           }
         });
       });
+
+    // Виджет доступа по HTTPS (S6): состояние, согласие, код привязки, ключи.
+    bindServeActions();
 
     /* Кнопка «…» у поля пути: проводник сервера. На клиенте эта цель
        нативная (сервер не открывает диалог на чужой машине): поле пути
@@ -7292,12 +7740,12 @@
     });
   }
 
-  function boot() {
-    bind();
-    // Права ключа читаем до первого рисования: недоступные цели подписываются
-    // сразу, а не после 403 на кнопке (§4, §8).
-    fetchAccess();
-    call("get_initial").then(function (data) {
+  /* Снимок карточки и вида: отдельно от boot, потому что после удачной
+     привязки прав стало больше - карточка без get_initial не рисуется, и
+     клиент, привязавшийся позже, остался бы с пустой карточкой
+     («настроек нет») вместо схемы (§8). */
+  function loadInitial() {
+    return call("get_initial").then(function (data) {
       if (!data) return;
       state.settings = data.settings || {};
       state.schema = data.schema || [];
@@ -7322,6 +7770,15 @@
       syncLanguage();
       syncAdultTab();
     });
+  }
+
+  function boot() {
+    bind();
+    bindPairBox();      // поле кода привязки: доступно без права (§5)
+    // Права ключа читаем до первого рисования: недоступные цели подписываются
+    // сразу, а не после 403 на кнопке (§4, §8).
+    fetchAccess();
+    loadInitial();
     setInterval(tick, POLL_MS);
     tick();
   }
@@ -7422,6 +7879,8 @@
       // SV-C S1: доступ по HTTPS - те же ключи и значения по умолчанию, что
       // в app/settings_schema.py (слушатель по умолчанию выключен).
       serve_enabled: false, serve_bind: "loopback", serve_port: 1001,
+      serve_expose_consent: false, serve_allowlist: "",
+      serve_pair_scope: "viewer", serve_pair_minutes: 3,
       serve_rate_mbit: 10, serve_watchers_max: 4, serve_hls_transcode: false,
       output_template: "%(channel)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s",
       quality: "high", subtitles: "none", transcode: "none",
@@ -7531,7 +7990,61 @@
       "storage.add.label": "+ Add folder",
       "storage.check.label": "Check availability",
       "storage.client.note": "storages are owned by the server: it reads the " +
-        "path and availability, this client has no explorer"
+        "path and availability, this client has no explorer",
+      // Экспозиция и привязка (S6, §5, §7): тот же текст, что выдаёт сервер и
+      // что читает окно - превью не рисует другой английский.
+      "serve.refresh": "Read the access state",
+      "serve.pending": "the access state was not read - press Read the access state",
+      "http.no_server": "the page was not opened by the server - pairing is impossible",
+      "http.pair_empty": "pairing code not entered",
+      "http.pair_throttle": "too many wrong attempts from this address - wait",
+      "http.pair_code_local": "the pairing code is shown in the server window: its value is not served over HTTP",
+      "http.pair_listener_down": "the listener is not up - pairing is impossible (turn HTTPS access on)",
+      "http.expose_consent": "consent about what leaves outward is accepted by a person on the server: not accepted over HTTP",
+      "http.tokens_revoked": "key revoked",
+      "http.tokens_absent": "key not found - nothing to revoke",
+      "pair.store_none": "the key store is not open - pairing is impossible",
+      "tokens.store_none": "the key store is not open - nothing to revoke",
+      "pair.running": "listener is up",
+      "pair.down": "listener is not up",
+      "pair.mode": "mode:",
+      "pair.address": "listens on:",
+      "pair.consent_on": "consent accepted",
+      "pair.consent_off": "no consent",
+      "pair.attempts": "wrong pairing attempts:",
+      "pair.code.active": "code is active",
+      "pair.code.none": "no code shown",
+      "pair.code.expires": "expires in",
+      "pair.code.words": "4 words",
+      "pair.code.digits": "6 digits",
+      "pair.allow_none": "allowlist is empty",
+      "pair.title": "Pairing with the server",
+      "pair.code.label": "Pairing code (6 digits or 4 words)",
+      "pair.code.ph": "the code from the server window…",
+      "pair.begin": "Show the pairing code",
+      "pair.submit": "Pair this browser",
+      "pair.note": "The code is shown by the server window; the server grants " +
+        "rights by the preset in settings; the code is single-use and an " +
+        "expired code will not be accepted",
+      "pair.pairing": "key accepted - rights:",
+      "pair.keys": "Access keys",
+      "pair.keys_none": "no keys issued",
+      "pair.revoke": "revoke",
+      "expose.title": "What leaves outward",
+      "expose.text": "A listener outside this computer serves: library row " +
+        "captions, thumbnails, durations, sizes, state counters (poll) and " +
+        "media bytes on request; the access journal is written on the server. " +
+        "Disk paths never leave: bytes are served by row id and file id. " +
+        "Rights come from scopes on the key that pairing issued; code brute " +
+        "force is throttled; the number of keys is limited.",
+      "expose.check": "Consent about what leaves outward is accepted",
+      "expose.denied": "Consent not accepted - outward access is not turned on",
+      "expose.accept": "Accept consent",
+      "expose.decline": "Do not accept",
+      "expose.dpi": "A port inside the DPI interception zone (1024-65535, plus " +
+        "80/443) can be slowed or mangled. Keep the port outside that zone " +
+        "(444-1023 recommended, 1001 by default); turning the DPI tool off is " +
+        "not needed."
     };
     var MOCK_LABELS_EN = {
       theme: { label: "Theme",
@@ -7554,8 +8067,19 @@
               "the database and storages stay on the server. Off by default: " +
               "rights come from scopes on the access key." },
       serve_bind: { label: "Where to bind the listener",
-        hint: "Only \"this computer\" (127.0.0.1) now: nothing leaves the " +
-              "machine. LAN, Tailscale and a plain port come with consent." },
+        hint: "By default \"this computer only\" (127.0.0.1). LAN, Tailscale " +
+              "and a plain port (0.0.0.0) need the explicit consent about " +
+              "what leaves outward; without it the listener stays on this " +
+              "machine. A plain port also needs an allowlist." },
+      serve_allowlist: { label: "Allowlist of addresses (IP or CIDR)",
+        hint: "Comma- or space-separated: 192.168.1.7, 10.0.0.0/24. Required " +
+              "for a plain port; a broken entry is named. Loopback is always local." },
+      serve_pair_scope: { label: "Rights issued by pairing",
+        hint: "Reader and player (read+watch), reader + downloads + marks, or " +
+              "operator: every scope except the native window." },
+      serve_pair_minutes: { label: "Pairing code lifetime, minutes",
+        hint: "Single-use code lives this long; after 5 wrong attempts from " +
+              "one address the brute force is throttled." },
       serve_port: { label: "Client HTTP server port",
         hint: "TLS on this port; keep it outside the DPI interception zone " +
               "(1024-65535, 80/443) - 1001 by default, next to mesh 1000." },
@@ -7566,7 +8090,13 @@
               "says so honestly. 0 means no limit." },
       serve_hls_transcode: { label: "Transcode video for the browser",
         hint: "Re-encoding HEVC/VP9/AV1 burns CPU and quality: off by " +
-              "default, the refusal names the codec." }
+              "default, the refusal names the codec." },
+      // Виджет S6: состояние слушателя, согласие и ключи (подписи те же, что
+      // в словаре окна; виджет рисует код, а не карточка схемы).
+      _serve_access: { label: "State, consent and access keys",
+        hint: "Whether the listener is up, where it listens, whether consent " +
+              "is accepted, whether the pairing code is active; keys can be " +
+              "revoked. No token or code values here." }
     };
     var MOCK_SECTIONS_EN = {
       "Библиотека": "Library", "Загрузка": "Downloads", "Mesh": "Mesh",
@@ -7664,6 +8194,10 @@
     // Симуляция аккаунтов Google: реестр + вход «сам снимает куки».
     var mockAccount = { accounts: [], labels: {}, logging_in: false,
                         note: "", visible: null, browser_warning: "" };
+    // Доступ по HTTPS (S6): в превью слушателя нет, ключей выдано не было,
+    // код привязки не показывался - состояние называет причину, а не молчит.
+    var mockServe = { tokens: [], code: null, expiresAt: 0, scopes: [],
+                      attempts: 0, problem: "" };
     function mockStorageLabel(id) {
       var hit = mockStorages.filter(function (s) { return s.id === id; })[0];
       return hit ? hit.label : null;
@@ -7905,11 +8439,43 @@
         default: false },
       { key: "serve_bind", type: "choice", section: "Доступ по HTTPS",
         label: "Куда привязать слушатель",
-        choices: [["loopback", "Только этот компьютер (127.0.0.1)"]],
-        hint: "Сейчас только «этот компьютер»: наружу ничего не уходит. " +
-              "LAN, Tailscale и обычный порт с allowlist - следующим шагом " +
-              "с тем же согласием «что уходит наружу».",
+        choices: [["loopback", "Только этот компьютер (127.0.0.1)"],
+                  ["lan", "Сеть этого компьютера (LAN)"],
+                  ["tailscale", "Адрес Tailscale"],
+                  ["wildcard", "Обычный порт (0.0.0.0) + allowlist"]],
+        hint: "По умолчанию «только этот компьютер»: наружу ничего не уходит. " +
+              "LAN, Tailscale и обычный порт требуют согласия «что уходит " +
+              "наружу» (диалог перечисляет, что отдаётся клиенту); без " +
+              "согласия слушатель остаётся на этом компьютере. Обычный порт " +
+              "кроме согласия требует allowlist, иначе слушатель не " +
+              "поднимается.",
         default: "loopback" },
+      // Согласие принимается диалогом на сервере: карточка не рисует флажок
+      // (hidden у бэкенда и у превью одинаково), а прямая запись отказана.
+      { key: "serve_expose_consent", type: "bool", section: "", label: "",
+        hint: "Согласие «что уходит наружу» принимает только диалог в окне " +
+              "сервера; прямая запись (в том числе по HTTP) отказана с причиной.",
+        hidden: true, default: false },
+      { key: "serve_allowlist", type: "str", section: "Доступ по HTTPS",
+        label: "Allowlist адресов (IP или CIDR)",
+        hint: "Через запятую или пробел: 192.168.1.7, 10.0.0.0/24. Для " +
+              "обычного порта обязателен; битый элемент назван причиной. " +
+              "Loopback-клиент всегда свой.",
+        default: "" },
+      { key: "serve_pair_scope", type: "choice", section: "Доступ по HTTPS",
+        label: "Права, которые выдаёт привязка",
+        choices: [["viewer", "Читатель и плеер (read+watch)"],
+                  ["editor", "Читатель, закачка и пометки"],
+                  ["operator", "Оператор: все скоупы, кроме нативного окна"]],
+        hint: "Код привязки выдаёт ключ с пресетом прав; по умолчанию " +
+              "читатель. Права решает сервер, клиент их только читает.",
+        default: "viewer" },
+      { key: "serve_pair_minutes", type: "int", section: "Доступ по HTTPS",
+        label: "Срок кода привязки, минут",
+        hint: "Код одноразовый и живёт это время; истёкший код отказан " +
+              "подписью. После 5 неверных попыток с одного адреса перебор " +
+              "затормозен.",
+        min: 1, max: 120, default: 3 },
       { key: "serve_port", type: "int", section: "Доступ по HTTPS",
         label: "Порт HTTP-сервера клиента",
         hint: "TLS на этом порту; при занятости слушатель не поднимется " +
@@ -7932,6 +8498,12 @@
         hint: "Ре-encode HEVC/VP9/AV1 жрёт CPU и качество: по умолчанию " +
               "выключено, отказ называет кодек.",
         default: false },
+      { key: "_serve_access", type: "serve", section: "Доступ по HTTPS",
+        label: "Состояние, согласие и ключи доступа",
+        hint: "Показывает, поднят ли слушатель, куда, принято ли согласие, " +
+              "активен ли код привязки; здесь же отзыв ключей. Значений " +
+              "токенов и кодов здесь нет.",
+        transient: true, default: [] },
       { key: "output_template", type: "str", section: "Загрузка",
         label: "Шаблон имени и пути",
         hint: "Синтаксис yt-dlp (%(title)s, %(id)s, ...). Часть [%(id)s] в " +
@@ -8777,11 +9349,90 @@
       open_path: function () { return Promise.resolve(null); },
       open_url: function () { return Promise.resolve(null); },
       save_setting: function (pair) {
+        if (pair.key === "serve_expose_consent") {
+          // Тот же отказ, что у бэкенда (§7): согласие принимает диалог на
+          // сервере, прямая запись - «галка, которую никто не подтвердил».
+          return Promise.resolve({
+            error: t("http.expose_consent",
+                     "согласие «что уходит наружу» принимает человек на сервере: по HTTP не принимается")
+          });
+        }
         settings[pair.key] = pair.value;
         // rev растёт, как в настоящем окне: иначе после первого сохранения
         // ветка смены настроек в превью перестанет срабатывать.
         return Promise.resolve({ settings: settings,
                                  settings_rev: ++settingsRev });
+      },
+      /* Доступ по HTTPS (S6): превью не поднимает слушателя и не выдаёт
+         ключи - состояние называет причину («это превью»), а не выдумывает
+         «поднят» и «ключей ноль» из молчания. */
+      serve_state: function () {
+        return Promise.resolve({
+          ok: true, enabled: !!settings.serve_enabled, running: false,
+          url: "", bind: "127.0.0.1", port: settings.serve_port,
+          mode: settings.serve_bind || "loopback",
+          note: "", problem: "превью: слушатель не поднят (данные вымышленные)",
+          consent: !!settings.serve_expose_consent,
+          allowlist: settings.serve_allowlist || "",
+          rate_mbit: settings.serve_rate_mbit, watchers_max: settings.serve_watchers_max,
+          pair_scope: settings.serve_pair_scope || "viewer",
+          pair_minutes: settings.serve_pair_minutes || 3,
+          tokens: mockServe.tokens, count: mockServe.tokens.length, error: "",
+          pairing: { active: mockServe.code ? 1 : 0,
+                    expires_at: mockServe.expiresAt, scopes: mockServe.scopes,
+                    wrong_attempts: mockServe.attempts }
+        });
+      },
+      serve_pair_status: function () {
+        return Promise.resolve({ ok: true, active: mockServe.code ? 1 : 0,
+                                 expires_at: mockServe.expiresAt,
+                                 scopes: mockServe.scopes,
+                                 wrong_attempts: mockServe.attempts });
+      },
+      serve_pair_begin: function () {
+        // В превью нет сервера и нет DPAPI-реестра: код показывать нечем,
+        // и отказ назван причиной, а не пустым кодом.
+        return Promise.resolve({
+          error: t("http.pair_listener_down",
+                   "слушатель не поднят - привязка невозможна (включите доступ по HTTPS)"),
+          code: "pairing"
+        });
+      },
+      serve_token_revoke: function (req) {
+        var id = (req || {}).id || "";
+        var found = mockServe.tokens.filter(function (item) { return item.id === id; });
+        if (!found.length) {
+          return Promise.resolve({
+            error: t("http.tokens_absent", "ключ не найден - отзывать нечего"),
+            code: "tokens"
+          });
+        }
+        mockServe.tokens = mockServe.tokens.filter(function (item) {
+          return item.id !== id;
+        });
+        return Promise.resolve({ ok: true, revoked: id,
+                                 tokens: mockServe.tokens,
+                                 count: mockServe.tokens.length });
+      },
+      serve_consent_accept: function (req) {
+        var accept = !!(req || {}).accept;
+        settings.serve_expose_consent = accept;
+        settingsRev += 1;
+        mockServe.problem = accept
+          ? "превью: согласие принято, но слушателя здесь нет (данные вымышленные)"
+          : "";
+        return Promise.resolve({
+          ok: true, consent: accept, problem: mockServe.problem,
+          serve: { ok: true, enabled: !!settings.serve_enabled, running: false,
+                  url: "", bind: "127.0.0.1", port: settings.serve_port,
+                  mode: settings.serve_bind || "loopback", note: "",
+                  problem: "превью: слушатель не поднят (данные вымышленные)",
+                  consent: accept, allowlist: settings.serve_allowlist || "",
+                  tokens: mockServe.tokens, count: mockServe.tokens.length,
+                  error: "",
+                  pairing: { active: 0, expires_at: 0, scopes: [], wrong_attempts: 0 } },
+          settings: settings, settings_rev: settingsRev
+        });
       },
       account_login_start: function () {
         mockAccount.logging_in = true;

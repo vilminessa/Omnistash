@@ -59,6 +59,23 @@
     выдуманным отказом. -->
 <div id="access-band" class="access-band" role="status" aria-live="polite" hidden></div>
 
+<!-- Привязка клиента (S6, §5): поле кода лежит вне карточки настроек, потому
+    что карточка читается целью `get_initial`, которой без ключа не выдано.
+    Без этого поля клиент не мог бы ввести код: молчание вместо входа. Блок
+    виден, пока привязка не завершена (ключа нет, ключ отозван, ответ не
+    принят); после удачной привязки прячется - повторная привязка в виджете
+    «Доступ по HTTPS» в настройках. POST /pair не требует права: это и есть
+    получение права, поэтому значение кода показывает окно сервера (§5). -->
+<div id="pair-box" class="pair-box" hidden>
+  <span class="pair-title" data-l="pair.title">Привязка к серверу</span>
+  <span class="pair-caption" id="pair-caption" role="status" aria-live="polite"></span>
+  <input type="text" id="pair-code-out" autocomplete="off" maxlength="40"
+         aria-label="Код привязки (6 цифр или 4 слова)"
+         data-l-tip="pair.note" data-l-ph="pair.code.ph"
+         placeholder="код из окна сервера…">
+  <button class="btn primary" id="pair-btn-out" data-l="pair.submit">Привязать этот браузер</button>
+</div>
+
 <!-- Второй индикатор «где я» (замена №25): на широком экране активная вкладка
     имеет цвет + underline + фон, на узком строка вкладок не помещается и
     текущий раздел назван текстом (виден только на узком экране - app.css). -->

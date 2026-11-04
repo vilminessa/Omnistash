@@ -52,7 +52,11 @@ from .mesh import mdns as mesh_mdns
 from .mesh import nat as mesh_nat
 from .mesh import pacing as mesh_pacing
 from .mesh import server as mesh_server
+from .http import bind as serve_bind
+from .http import context as serve_context
+from .http import pair as serve_pair
 from .http import server as serve_http
+from .http import tokens as serve_tokens_mod
 from .db import SYNC_MODES, Database
 from .metadata import normalize_video, video_url
 from .paths import log_path, profile_dir
@@ -288,15 +292,32 @@ class Api:
         # по сети. База, хранилища и очередь остаются здесь - слушатель ничего
         # не «переезжает». Поднимается ТОЛЬКО при включённом serve_enabled
         # (согласие человека), права решает токен со скоупами (app/http/scopes.py).
-        self._serve_bind = serve_http.bind_address(config0.get("serve_bind"))
+        # S6: адрес выбирает serve_bind.resolve по режиму serve_bind и согласию
+        # serve_expose_consent; без согласия остаётся loopback с названной
+        # причиной, а «обычный порт» требует allowlist.
+        expose = serve_bind.resolve(config0.get("serve_bind"),
+                                    bool(config0.get("serve_expose_consent")),
+                                    config0.get("serve_allowlist"))
+        self._serve_bind = expose["address"]
+        self._serve_mode = expose["mode"]
+        self._serve_allow = str(config0.get("serve_allowlist") or "")
+        self._serve_note = expose["note"]
+        self._serve_error = expose["error"]
         self._serve_port = int(config0.get("serve_port") or 1001)
         self._serve_limits = (mesh_pacing.mbit_to_bps(config0.get("serve_rate_mbit")),
                               int(config0.get("serve_watchers_max") or 0))
-        self._serve_server = serve_http.ServeServer(
-            self, bind=self._serve_bind, port=self._serve_port,
-            rate_bps=self._serve_limits[0], watchers_max=self._serve_limits[1],
-            log=self._log, settings=self._current_settings,
-            language=self._ui_language)
+        self._serve_target = (self._serve_bind, self._serve_port,
+                              self._serve_mode, self._serve_allow,
+                              self._serve_limits)
+        # Реестр ключей и коды привязки (S6): открываются через _build_serve_server -
+        # битый файл DPAPI не роняет окно, а отказ назван в журнале.
+        self._serve_tokens: serve_tokens_mod.TokenStore | None = None
+        self._pairing: serve_pair.Pairing | None = None      # НЕ метод: атрибут
+        self._serve_code_shown = ""      # формат последнего показанного кода
+        self._serve_server = self._build_serve_server(
+            bind=self._serve_bind, port=self._serve_port,
+            limits=self._serve_limits, mode=self._serve_mode,
+            allow_text=self._serve_allow, note=self._serve_note)
         self._serve_dpi_hinted = False   # подсказка про зону перехвата: раз
         # Аккаунт Google: окно входа живёт отдельно от главного.
         self._login_window = None
@@ -1489,39 +1510,46 @@ class Api:
         `serve_enabled` - согласие человека: без него слушатель не поднимается
         вовсе (наружу ничего не уходит).
 
-        Смена адреса или порта = новый слушатель (адрес должен быть стабилен
-        для клиента), смена лимитов = перезапуск: они живут в обработчике
-        соединений. Отказ старта (порт занят, TLS-материал не построен, файл
-        токенов не читается) - строка в журнале с причиной, окно не падает.
+        `serve_bind` выбирает адрес через `app/http/bind.py`: LAN, Tailscale и
+        0.0.0.0 требуют явного согласия `serve_expose_consent`, а 0.0.0.0 ещё
+        и непустого allowlist. Отказ (согласия нет, адрес не найден, список
+        битый) назван строкой в журнале и слушатель остаётся на loopback -
+        «не получилось наружу» не превращается в «включили наружу».
+
+        Смена адреса, режима, allowlist, порта или лимитов = новый слушатель
+        (адрес должен быть стабилен для клиента). Отказ старта (порт занят,
+        TLS-материал не построен, файл токенов не читается) - строка в
+        журнале с причиной, окно не падает.
         """
         config = self._current_settings()
         want = bool(config.get("serve_enabled"))
-        bind = serve_http.bind_address(config.get("serve_bind"))
+        expose = serve_bind.resolve(config.get("serve_bind"),
+                                    bool(config.get("serve_expose_consent")),
+                                    config.get("serve_allowlist"))
+        if expose["error"] and expose["error"] != self._serve_error:
+            self._log(f"Доступ по HTTPS: {expose['error']}")
+        self._serve_error = expose["error"]
+        self._serve_mode = expose["mode"]
+        self._serve_note = expose["note"]
+        self._serve_allow = str(config.get("serve_allowlist") or "")
         port = int(config.get("serve_port") or 1001)
         limits = (mesh_pacing.mbit_to_bps(config.get("serve_rate_mbit")),
                   int(config.get("serve_watchers_max") or 0))
-        if (bind, port) != (self._serve_bind, self._serve_port):
+        target = (expose["address"], port, self._serve_mode,
+                  self._serve_allow, limits)
+        if target != self._serve_target:
             if self._serve_server.running:
                 self._serve_server.stop()
-                self._log("Доступ по HTTPS: перезапуск - изменился адрес "
-                          "или порт")
-            self._serve_server = serve_http.ServeServer(
-                self, bind=bind, port=port, rate_bps=limits[0],
-                watchers_max=limits[1], log=self._log,
-                settings=self._current_settings, language=self._ui_language)
-            self._serve_bind, self._serve_port = bind, port
+                self._log("Доступ по HTTPS: перезапуск - изменился адрес, "
+                          "режим, allowlist, порт или лимиты")
+            self._serve_target = target
+            self._serve_server = self._build_serve_server(
+                bind=expose["address"], port=port, limits=limits,
+                mode=self._serve_mode, allow_text=self._serve_allow,
+                note=self._serve_note)
+            self._serve_bind, self._serve_port = expose["address"], port
             self._serve_limits = limits
             self._serve_dpi_hinted = False
-        elif self._serve_limits != limits:
-            if self._serve_server.running:
-                self._serve_server.stop()
-                self._log("Доступ по HTTPS: перезапуск - изменился лимит "
-                          "отдачи или зрителей")
-            self._serve_server = serve_http.ServeServer(
-                self, bind=self._serve_bind, port=self._serve_port,
-                rate_bps=limits[0], watchers_max=limits[1], log=self._log,
-                settings=self._current_settings, language=self._ui_language)
-            self._serve_limits = limits
         if want:
             # Подсказка про зону перехвата DPI: тот же приём, что mesh-порт -
             # выключать программу не просим, говорим, что порт вне зоны.
@@ -1536,13 +1564,51 @@ class Api:
                     keys = self._serve_server.tokens_state().get("count", 0)
                     self._log(f"Доступ по HTTPS поднят: "
                               f"{self._serve_server.base_url()} (TLS, слушает "
-                              f"{self._serve_bind}; права на ключе, "
-                              f"ключей: {keys})")
+                              f"{self._serve_bind}, режим {self._serve_mode}; "
+                              f"права на ключе, ключей: {keys})")
+                    if self._serve_server.pairing is None:
+                        self._log("Привязка не работает: реестр ключей не "
+                                  "открыт - код привязки не выдаётся")
                 except Exception as exc:  # noqa: BLE001 - старта нет = наружу тихо
                     self._log(f"Доступ по HTTPS не поднят (порт {port}): {exc}")
         elif self._serve_server.running:
             self._serve_server.stop()
             self._log("Доступ по HTTPS остановлен")
+
+    def _serve_store(self) -> serve_tokens_mod.TokenStore | None:
+        """Реестр ключей доступа (DPAPI). None - файл не открылся: причина в журнале."""
+        if self._serve_tokens is not None:
+            return self._serve_tokens
+        try:
+            self._serve_tokens = serve_tokens_mod.TokenStore()
+        except Exception as exc:  # noqa: BLE001 - окно не падает из-за реестра
+            self._log(f"Реестр ключей доступа не открыт: {exc}")
+            return None
+        return self._serve_tokens
+
+    def _serve_pairing(self) -> serve_pair.Pairing | None:
+        """Реестр кодов привязки (S6): нужен и окну, и слушателю один и тот же.
+
+        Ключ выдаётся из того же реестра токенов, который читает слушатель,
+        поэтому привязка не «живёт отдельно» от прав: снятый код и выданный
+        ключ видны одному человеку в одном журнале.
+        """
+        store = self._serve_store()
+        if store is None:
+            return None
+        if self._pairing is None:
+            self._pairing = serve_pair.Pairing(store, log=self._log)
+        return self._pairing
+
+    def _build_serve_server(self, *, bind: str, port: int, limits: tuple,
+                            mode: str, allow_text: str, note: str):
+        """Собрать слушателя с текущим реестром ключей и кодов привязки."""
+        return serve_http.ServeServer(
+            self, bind=bind, port=port, rate_bps=limits[0],
+            watchers_max=limits[1], log=self._log,
+            settings=self._current_settings, language=self._ui_language,
+            mode=mode, allow_text=allow_text, note=note,
+            tokens=self._serve_store(), pairing=self._serve_pairing())
 
     def _serve_dpi_warn(self, port: int) -> None:
         """Порт HTTPS в зоне перехвата DPI? Сказать честно, не мешая."""
@@ -1602,6 +1668,138 @@ class Api:
             "count": int(state.get("count") or 0),
             "error": state.get("error") or "",
         }
+
+    # ------------------------------------------------------------------ #
+    #  SV-C S6: экспозиция, согласие и привязка (docs/SERVER-CLIENT.md §5, §7)
+    # ------------------------------------------------------------------ #
+
+    def serve_state(self, request=None) -> dict:
+        """Что открыто наружу: режим, адрес, согласие, ключи и коды привязки.
+
+        Право `server_config`: снимок показывает метки ключей и скоупы, но ни
+        значений токенов, ни значений кодов привязки (их отдаёт только окно).
+        Отказ выбора режима (`problem`) читается подписью bind.resolve:
+        «согласия нет», «адрес не найден», «allowlist битый» - не молчание.
+        """
+        config = self._current_settings()
+        state = self._serve_state()
+        state.update({
+            "mode": self._serve_mode,
+            "note": self._serve_note,
+            "problem": self._serve_error,
+            "consent": bool(config.get("serve_expose_consent")),
+            "allowlist": self._serve_allow,
+            "pair_scope": str(config.get("serve_pair_scope") or "viewer"),
+            "pair_minutes": int(config.get("serve_pair_minutes") or 3),
+        })
+        pairing = self._serve_pairing()
+        if pairing is None:
+            state["pairing"] = {
+                "active": 0, "expires_at": 0.0, "scopes": [], "wrong_attempts": 0,
+                "error": i18n_mod.t("pair.store_none", "ru"),
+            }
+        else:
+            info = pairing.state()
+            info["wrong_attempts"] = pairing.attempt_total()
+            state["pairing"] = info
+        return state
+
+    def serve_pair_begin(self, request=None) -> dict:
+        """Одноразовый код привязки показывает только окно сервера (§5).
+
+        Значение кода - право, которое человек показывает ОДНОму клиенту,
+        поэтому по HTTP оно не отдаётся: клиент с `server_config`, читающий
+        код, привязал бы себе ключ сам. Причина отказа названа подписью, а не
+        молчанием или пустым кодом.
+        """
+        if serve_context.is_http():
+            return {"error": i18n_mod.t("http.pair_code_local", "ru"),
+                    "code": "window"}
+        if not self._serve_server.running:
+            return {"error": i18n_mod.t("http.pair_listener_down", "ru"),
+                    "code": "pairing"}
+        pairing = self._serve_pairing()
+        if pairing is None:
+            return {"error": i18n_mod.t("http.pair_no_code", "ru"),
+                    "code": "tokens"}
+        config = self._current_settings()
+        fmt = str((request or {}).get("format") or "digits")
+        try:
+            shown = pairing.begin(config.get("serve_pair_scope") or "viewer",
+                                  int(config.get("serve_pair_minutes") or 3), fmt)
+        except ValueError as exc:
+            # Битый пресет или формат: причина названа, «код показан» нет.
+            return {"error": str(exc), "code": "pairing"}
+        self._serve_code_shown = shown["format"]
+        return shown
+
+    def serve_pair_status(self, request=None) -> dict:
+        """Сколько кодов привязки активно и сколько было неверных попыток.
+
+        Значений кодов здесь нет: активный код и срок чтения, а код показывает
+        окно (`serve_pair_begin`). Перебор ограничен: attempts - сумма по всем
+        адресам, сами адреса в снимок не уходят.
+        """
+        pairing = self._serve_pairing()
+        if pairing is None:
+            return {"ok": True, "active": 0, "expires_at": 0.0, "scopes": [],
+                    "wrong_attempts": 0,
+                    "error": i18n_mod.t("pair.store_none", "ru")}
+        info = pairing.state()
+        info["wrong_attempts"] = pairing.attempt_total()
+        info["ok"] = True
+        return info
+
+    def serve_token_revoke(self, request=None) -> dict:
+        """Отозвать ключ доступа по его метке-id (не по значению токена)."""
+        store = self._serve_store()
+        if store is None:
+            return {"error": i18n_mod.t("tokens.store_none", "ru"),
+                    "code": "tokens"}
+        ident = str((request or {}).get("id") or "")
+        if not ident:
+            return {"error": i18n_mod.t("http.tokens_absent", "ru"),
+                    "code": "tokens"}
+        if not store.revoke(ident):
+            # False - такого ключа нет: «отозван» был бы враньём.
+            return {"error": i18n_mod.t("http.tokens_absent", "ru"),
+                    "code": "tokens"}
+        self._log(f"Доступ по HTTPS: {i18n_mod.t('http.tokens_revoked', 'ru')} "
+                  f"(ключ {ident})")
+        # Сессии и слоты зрителей, выданные этим ключом, снять нельзя по id
+        # ключа (зрители считаются по видео и адресу); право снимается
+        # сразу: verify больше не найдёт значение.
+        return {"ok": True, "revoked": ident, "tokens": store.list(),
+                "count": store.count()}
+
+    def serve_consent_accept(self, request=None) -> dict:
+        """Согласие «что уходит наружу» принимает человек на сервере (§7).
+
+        По HTTP отказано с причиной: удалённый клиент с `server_config` не
+        должен решать, что отдаётся наружу с этого компьютера. Диалог называет
+        список передаваемого; при отказе настройка возвращается в «не принято»
+        и слушатель остаётся на loopback.
+        """
+        if serve_context.is_http():
+            return {"error": i18n_mod.t("http.expose_consent", "ru"),
+                    "code": "window"}
+        accept = bool((request or {}).get("accept"))
+        settings.set_value("serve_expose_consent", accept)
+        with self._lock:
+            self._settings_rev += 1
+            self._settings_cache.clear()
+        settings.reload_if_changed(self._settings_cache)
+        self._log("Согласие «что уходит наружу»: "
+                  + ("принято - слушатель выходит наружу по выбранному режиму"
+                     if accept else
+                     "не принято - доступ наружу не включается, слушатель "
+                     "остаётся на этом компьютере"))
+        self._serve_apply()
+        state = self._serve_state()
+        return {"ok": True, "consent": accept, "serve": state,
+                "problem": self._serve_error,
+                "settings": settings.as_public(self._current_settings()),
+                "settings_rev": self._settings_rev}
 
     # ------------------------------------------------------------------ #
     #  B4: mDNS-объявление и поиск участников в LAN
@@ -1826,6 +2024,13 @@ class Api:
         if not isinstance(pair, dict):
             return settings.as_public(self._current_settings())
         key = str(pair.get("key") or "")
+        if key == "serve_expose_consent":
+            # Согласие принимается диалогом на сервере (serve_consent_accept):
+            # прямая запись - «галка, которую никто не подтвердил», а клиент с
+            # правом server_config открыл бы доступ наружу сам себе (§7).
+            self._log("Согласие «что уходит наружу» не сохранено напрямую: "
+                      + i18n_mod.t("http.expose_consent", "ru"))
+            return {"error": i18n_mod.t("http.expose_consent", "ru")}
         try:
             settings.set_value(key, pair.get("value"))
         except Exception as exc:  # noqa: BLE001
@@ -1844,10 +2049,12 @@ class Api:
                     "mesh_max_mb", "mesh_rate_mbit"):
             # Согласие/порт/лимиты - сервер и проброс следуют сразу.
             self._mesh_apply()
-        if key in ("serve_enabled", "serve_bind", "serve_port",
+        if key in ("serve_enabled", "serve_bind", "serve_port", "serve_allowlist",
                    "serve_rate_mbit", "serve_watchers_max"):
-            # Согласие/адрес/порт/лимиты - слушатель клиента следует сразу:
-            # человек включил или выключил доступ в этом же сохранении.
+            # Согласие/адрес/режим/allowlist/порт/лимиты - слушатель клиента
+            # следует сразу: человек включил или выключил доступ в этом же
+            # сохранении. allowlist меняет адресную проверку - это новый
+            # слушатель (перезапуск в _serve_apply).
             self._serve_apply()
         if key == "mesh_nick":
             # Смена ника объявляется сразу (при включённом участии):

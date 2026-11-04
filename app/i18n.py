@@ -139,14 +139,16 @@ _TEXTS: dict = {
     "settings.serve_bind.label": {"ru": "Куда привязать слушатель",
                                   "en": "Where to bind the listener"},
     "settings.serve_bind.hint": {
-        "ru": "Сейчас доступен только «этот компьютер» (127.0.0.1): наружу "
-              "ничего не уходит. Сеть (LAN), Tailscale и обычный порт с "
-              "allowlist придут следующим шагом и потребуют того же согласия "
-              "«что уходит наружу».",
-        "en": "Only \"this computer\" (127.0.0.1) is available now: nothing "
-              "leaves the machine. LAN, Tailscale and a plain port with an "
-              "allowlist come in the next step and need the same consent "
-              "about what leaves outward."},
+        "ru": "По умолчанию «только этот компьютер» (127.0.0.1). Сеть "
+              "(LAN), Tailscale и обычный порт (0.0.0.0) требуют явного "
+              "согласия «что уходит наружу»: без него слушатель остаётся на "
+              "этом компьютере, а отказ назван в журнале. Обычный порт "
+              "кроме того требует allowlist - списка адресов или CIDR.",
+        "en": "By default \"this computer only\" (127.0.0.1). LAN, Tailscale "
+              "and a plain port (0.0.0.0) need the explicit consent about "
+              "what leaves outward; without it the listener stays on this "
+              "machine and the refusal is written to the log. A plain port "
+              "also needs an allowlist - a list of addresses or CIDRs."},
     "settings.serve_port.label": {"ru": "Порт HTTP-сервера клиента",
                                   "en": "Client HTTP server port"},
     "settings.serve_port.hint": {
@@ -193,6 +195,62 @@ _TEXTS: dict = {
               "default, and the refusal names the codec and says the browser "
               "cannot play this file without re-encoding. Turn it on only "
               "when the file bytes really do not work for the browser."},
+    # ---- SV-C S6: экспозиция, allowlist и привязка -----------------------
+    # Согласие `serve_expose_consent` в словаре НЕ покрывается: поле скрыто в
+    # карточке (решение принимает диалог), а отказ о прямой записи называет
+    # подпись `http.expose_consent` - переводимого текста карточки здесь нет.
+    "settings.serve_allowlist.label": {"ru": "Allowlist адресов (IP или CIDR)",
+                                       "en": "Allowlist of addresses (IP or CIDR)"},
+    "settings.serve_allowlist.hint": {
+        "ru": "Список через запятую или пробел: 192.168.1.7, 10.0.0.0/24. "
+              "Для обычного порта (0.0.0.0) обязателен: без него слушатель "
+              "не поднимается. Битый элемент списка назван причиной - "
+              "«половина списка понята» было бы доступом, которого нет в "
+              "плане. Loopback-клиент всегда свой.",
+        "en": "Comma- or space-separated list: 192.168.1.7, 10.0.0.0/24. "
+              "Required for a plain port (0.0.0.0); without it the listener "
+              "does not start. A broken entry is named - \"half the list was "
+              "understood\" would be access nobody planned. A loopback "
+              "client is always local."},
+    "settings.serve_pair_scope.label": {"ru": "Права, которые выдаёт привязка",
+                                        "en": "Rights issued by pairing"},
+    "settings.serve_pair_scope.hint": {
+        "ru": "Код привязки выдаёт ключ с пресетом прав: «читатель и плеер» "
+              "(read+watch), «читатель, закачка и пометки» "
+              "(read+watch+queue+mark), «оператор» (все скоупы, кроме "
+              "нативного окна). По умолчанию читатель: клиент смотрит и "
+              "играет, но не качает и не меняет настройки.",
+        "en": "The pairing code issues a key with a preset: \"reader and "
+              "player\" (read+watch), \"reader, downloads and marks\" "
+              "(read+watch+queue+mark), \"operator\" (every scope except the "
+              "native window). Reader by default: the client looks and plays, "
+              "but does not download or change settings."},
+    "settings.serve_pair_minutes.label": {"ru": "Срок кода привязки, минут",
+                                          "en": "Pairing code lifetime, minutes"},
+    "settings.serve_pair_minutes.hint": {
+        "ru": "Код одноразовый и живёт это время; истёкший код отказан "
+              "подписью, а не молчанием. После 5 неверных попыток с одного "
+              "адреса перебор затормозен, задержка растёт и видна в журнале.",
+        "en": "The code is single-use and lives this long; an expired code is "
+              "refused with a caption, not silence. After 5 wrong attempts "
+              "from one address the brute force is throttled, the delay grows "
+              "and is visible in the log."},
+    "settings._serve_access.label": {
+        "ru": "Состояние, согласие и ключи доступа",
+        "en": "State, consent and access keys"},
+    "settings._serve_access.hint": {
+        "ru": "Показывает, поднят ли слушатель, куда он слушает и что "
+              "согласие говорит про наружу; отсюда же принимается согласие "
+              "«что уходит наружу» и показывается одноразовый код привязки "
+              "(значение кода отдаёт только окно сервера). Список ключей "
+              "показывает метки и скоупы - значений токенов здесь нет, "
+              "ключ можно отозвать.",
+        "en": "Shows whether the listener is up, where it listens and what "
+              "the consent says about outward traffic; the \"what leaves "
+              "outward\" consent is accepted here, and the single-use pairing "
+              "code is shown here (its value is given to the server window "
+              "only). The key list shows labels and scopes - no token values, "
+              "and a key can be revoked."},
 
     # ---- диалоги согласий --------------------
     "dlg.adult.title": {"ru": "Возрастной контент", "en": "Adult content"},
@@ -343,6 +401,118 @@ _TEXTS: dict = {
     "watch.hash": {"ru": "хеш выдан", "en": "hash granted"},
     "watch.hash_none": {"ru": "хеш не вычислен", "en": "hash not computed"},
     "watch.gone": {"ru": "файл пропал с диска", "en": "file gone from disk"},
+
+    # ---- привязка и экспозиция (SV-C S6, docs/SERVER-CLIENT.md §5, §7) ----
+    # Причина отказа называется всегда: «код не принят», «код истёк»,
+    # «сервер не показывал код», «перебор затормозен», «адрес не в allowlist».
+    "http.pair_denied": {"ru": "код привязки не принят - привязка не завершена",
+                         "en": "pairing code not accepted - pairing not completed"},
+    "http.pair_used": {"ru": "код привязки уже использован - покажите новый код",
+                       "en": "the pairing code was already used - show a new code"},
+    "http.pair_expired": {"ru": "код привязки истёк - покажите новый код",
+                          "en": "the pairing code expired - show a new code"},
+    "http.pair_empty": {"ru": "код привязки не введён",
+                        "en": "pairing code not entered"},
+    "http.pair_no_code": {"ru": "сервер не показывал код привязки - покажите код в окне",
+                          "en": "the server did not show a pairing code - show the code in the window"},
+    "http.pair_throttle": {"ru": "слишком много неверных попыток с этого адреса - подождите",
+                           "en": "too many wrong attempts from this address - wait"},
+    "http.pair_post_only": {"ru": "привязка - только POST",
+                            "en": "pairing must use POST"},
+    "http.pair_code_local": {"ru": "код привязки показан в окне сервера: по HTTP его значение не отдаётся",
+                             "en": "the pairing code is shown in the server window: its value is not served over HTTP"},
+    "http.pair_listener_down": {
+        "ru": "слушатель не поднят - привязка невозможна (включите доступ по HTTPS)",
+        "en": "the listener is not up - pairing is impossible (turn HTTPS access on)"},
+    "http.allowlist": {"ru": "адрес клиента не в allowlist - доступ не выдан",
+                       "en": "the client address is not in the allowlist - access is not granted"},
+    "http.allowlist_required": {
+        "ru": "обычный порт (0.0.0.0) требует allowlist: без списка адресов "
+              "слушатель не поднимается",
+        "en": "a plain port (0.0.0.0) needs an allowlist: without a list of "
+              "addresses the listener is not started"},
+    "http.expose_consent": {"ru": "согласие «что уходит наружу» принимает человек на сервере: по HTTP не принимается",
+                            "en": "consent about what leaves outward is accepted by a person on the server: not accepted over HTTP"},
+    "http.tokens_revoked": {"ru": "ключ отозван", "en": "key revoked"},
+    "http.tokens_absent": {"ru": "ключ не найден - отзывать нечего",
+                           "en": "key not found - nothing to revoke"},
+
+    # ---- диалог согласия и привязка в интерфейсе --------------------------
+    "expose.title": {"ru": "Что уходит наружу", "en": "What leaves outward"},
+    "expose.text": {
+        "ru": "Слушатель за пределами этого компьютера отдаёт: подписи строк "
+              "библиотеки, обложки, длительности, размеры, счётчики состояния "
+              "(poll) и байты медиа по запросу клиента; журнал обращений "
+              "пишется на сервере. Пути дисков наружу не уходят: байты "
+              "раздаются по id строки и id файла. Доступ решают скоупы на "
+              "ключе, который выдал привязка; перебор кода затормозен; "
+              "число ключей ограничено.",
+        "en": "A listener outside this computer serves: library row captions, "
+              "thumbnails, durations, sizes, state counters (poll) and media "
+              "bytes on request; the access journal is written on the server. "
+              "Disk paths never leave: bytes are served by row id and file id. "
+              "Rights come from scopes on the key that pairing issued; code "
+              "brute force is throttled; the number of keys is limited."},
+    "expose.check": {"ru": "Согласие «что уходит наружу» принято",
+                     "en": "Consent about what leaves outward is accepted"},
+    "expose.denied": {"ru": "Согласие не принято - доступ наружу не включается",
+                      "en": "Consent not accepted - outward access is not turned on"},
+    "pair.title": {"ru": "Привязка к серверу", "en": "Pairing with the server"},
+    "pair.code.label": {"ru": "Код привязки (6 цифр или 4 слова)",
+                        "en": "Pairing code (6 digits or 4 words)"},
+    "pair.code.ph": {"ru": "код из окна сервера…", "en": "the code from the server window…"},
+    "pair.begin": {"ru": "Показать код привязки", "en": "Show the pairing code"},
+    "pair.submit": {"ru": "Привязать этот браузер", "en": "Pair this browser"},
+    "pair.note": {"ru": "Код показывает окно сервера; права выдаёт сервер по "
+                       "пресету в настройках; код одноразовый и истёкший код "
+                       "не примется",
+                  "en": "The code is shown by the server window; the server "
+                       "grants rights by the preset in settings; the code is "
+                       "single-use and an expired code will not be accepted"},
+    "pair.pairing": {"ru": "ключ принят - права:", "en": "key accepted - rights:"},
+    "pair.keys": {"ru": "Ключи доступа", "en": "Access keys"},
+    "pair.keys_none": {"ru": "ключей не выдано", "en": "no keys issued"},
+    "pair.revoke": {"ru": "отозвать", "en": "revoke"},
+    "pair.store_none": {"ru": "реестр ключей не открыт - привязка невозможна",
+                        "en": "the key store is not open - pairing is impossible"},
+    "tokens.store_none": {"ru": "реестр ключей не открыт - отзывать нечего",
+                          "en": "the key store is not open - nothing to revoke"},
+    # Состояние доступа по HTTPS (виджет карточки): поднят ли слушатель, куда,
+    # принято ли согласие, активен ли код и сколько было неверных попыток.
+    "pair.running": {"ru": "слушатель поднят", "en": "listener is up"},
+    "pair.down": {"ru": "слушатель не поднят", "en": "listener is not up"},
+    "pair.mode": {"ru": "режим:", "en": "mode:"},
+    "pair.address": {"ru": "слушает:", "en": "listens on:"},
+    "pair.consent_on": {"ru": "согласие принято", "en": "consent accepted"},
+    "pair.consent_off": {"ru": "согласия нет", "en": "no consent"},
+    "pair.attempts": {"ru": "неверных попыток привязки:",
+                      "en": "wrong pairing attempts:"},
+    "pair.code.active": {"ru": "код активен", "en": "code is active"},
+    "pair.code.none": {"ru": "код не показан", "en": "no code shown"},
+    "pair.code.expires": {"ru": "истекает через", "en": "expires in"},
+    "pair.code.words": {"ru": "4 слова", "en": "4 words"},
+    "pair.code.digits": {"ru": "6 цифр", "en": "6 digits"},
+    "pair.allow_none": {"ru": "allowlist пуст", "en": "allowlist is empty"},
+    # Виджет состояния доступа: подписи «прочитать» и «ещё не прочитано» -
+    # молчания и выдуманных «ноль ключей» нет.
+    "serve.refresh": {"ru": "Прочитать состояние доступа",
+                      "en": "Read the access state"},
+    "serve.pending": {"ru": "состояние доступа не прочитано - нажмите «Прочитать состояние»",
+                      "en": "the access state was not read - press Read the access state"},
+    "http.no_server": {"ru": "страница открыта не сервером - привязка невозможна",
+                       "en": "the page was not opened by the server - pairing is impossible"},
+    # Кнопки диалога согласия и плеера привязки.
+    "expose.accept": {"ru": "Принять согласие", "en": "Accept consent"},
+    "expose.decline": {"ru": "Не принимать", "en": "Do not accept"},
+    "expose.dpi": {
+        "ru": "Порт в зоне перехвата DPI (1024-65535, а также 80/443): трафик "
+              "может замедляться или искажаться. Держите порт вне зоны "
+              "(рекомендуем 444-1023, по умолчанию 1001); выключать "
+              "DPI-утилиту не нужно.",
+        "en": "A port inside the DPI interception zone (1024-65535, plus "
+              "80/443) can be slowed or mangled. Keep the port outside that "
+              "zone (444-1023 recommended, 1001 by default); turning the DPI "
+              "tool off is not needed."},
 
     # ---- права ключа клиента (SV-C S5, docs/SERVER-CLIENT.md §4, §8) ------
     # Права клиент читает у сервера (GET /whoami). Чего не выдано - называется

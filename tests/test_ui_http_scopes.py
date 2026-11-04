@@ -227,8 +227,10 @@ class TestClientAccess(unittest.TestCase):
         call = function_body(self.js, "call")
         self.assertLess(call.index("accessReason"), call.index("bridge()"),
                         "цель без права всё равно уходит по HTTP")
-        self.assertIn('code: HTTP_DESKTOP.indexOf(name) >= 0 ? "desktop"',
-                      call, "отказ нативной цели теряется в пути отказа")
+        self.assertIn('HTTP_DESKTOP.indexOf(name) >= 0 ? "desktop"', call,
+                      "отказ нативной цели теряется в пути отказа")
+        self.assertIn('"window"', call,
+                      "отказ оконной цели (S6) теряется в пути отказа")
         self.assertIn("scope", call)
 
     def test_click_on_a_denied_target_explains_itself(self):

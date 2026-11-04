@@ -328,6 +328,24 @@ body {
   font-size: var(--fs-cap);
 }
 
+/* Привязка клиента (S6, §5): поле кода без права - вход, которого без него
+   не было бы. Подложка и граница из токенов, состояние читается текстом,
+   циклов и переходов здесь нет (SC 1.4.1, §4.2 DESIGN-UI). */
+.pair-box {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  align-items: center;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--info-line);
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+.pair-box .pair-title { color: var(--info); font-weight: 600; }
+.pair-box .pair-caption { color: var(--warn); overflow-wrap: anywhere; }
+.pair-box input[type="text"] { flex: 1 1 220px; min-width: 160px; }
+
 .where {
   display: none;      /* на широком экране активная вкладка читается сама */
   padding: 4px 10px;
@@ -1489,6 +1507,23 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .btn.no-access { border-color: var(--line-strong); }
 .icon-btn.no-access, .link-btn.no-access { color: var(--text); }
 .storage-row .no-access { border-color: var(--line-strong); }
+
+/* Виджет доступа по HTTPS (S6, §5, §7): состояние, кнопки, код привязки.
+   Подложка и граница из токенов, текста без цвета нет (SC 1.4.1); коду
+   привязки нужен моноширинный набор и letter-spacing - цифры читаются
+   построчно. Анимации и переходов здесь нет: состояние - данные. */
+.serve-box { display: flex; flex-direction: column; gap: var(--s-2); }
+.serve-code {
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--info-line);
+  border-radius: var(--r-2);
+  color: var(--text);
+  font: var(--fs-lg)/1.4 var(--mono);
+  letter-spacing: 0.08em;
+  user-select: text;
+  word-break: break-word;
+}
 
 @media (max-width: 900px) {
   .tree { width: 180px; flex-basis: 180px; }

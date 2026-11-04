@@ -33,11 +33,14 @@ from .. import i18n
 from .. import ui
 from ..mesh import channel as channel_mod
 from ..mesh import pacing
+from . import bind as bind_rule
 from . import hls
 from . import media
+from . import pair as pair_mod
 from . import scopes
 from . import tls
 from .audit import Audit
+from .context import http_call
 from .tokens import TokenStore, TokenStoreError
 
 # Тело JSON-запроса: больше - честный 413, а не тихая обрезка.
@@ -90,16 +93,14 @@ class ServeError(Exception):
 
 
 def bind_address(value) -> str:
-    """Значение `serve_bind` -> адрес привязки слушателя.
+    """Значение `serve_bind` -> адрес привязки БЕЗ согласия человека.
 
-    Шаг S1 знает только loopback: случайный текст в настройке не должен
-    открыть порт наружу без согласия (режимы lan/tailscale/0.0.0.0+allowlist
-    приходят в S6, там выбор адреса решается явным согласием).
+    Любой режим (lan, tailscale, 0.0.0.0, случайный текст) остаётся на этом
+    компьютере: наружу слушатель выходит только через `http.bind.resolve` с
+    явным согласием `serve_expose_consent` (и allowlist для 0.0.0.0). Это
+    страховка: выбор адреса не может «забыть» согласие.
     """
-    text = str(value or "loopback").strip().lower()
-    if text in ("", "loopback", "localhost", "127.0.0.1"):
-        return "127.0.0.1"
-    return "127.0.0.1"
+    return bind_rule.resolve(value, False, "")["address"]
 
 
 def _san_hosts(bind: str) -> list:
@@ -173,6 +174,12 @@ class _Handler(BaseHTTPRequestHandler):
     hls_builder = None        # http.hls.HlsBuilder (кеш HLS, S3)
     settings = staticmethod(lambda: {})     # настройки сервера (serve_hls_transcode)
     language = staticmethod(lambda: "ru")   # язык подписей сервера
+    # Экспозиция и привязка (S6, §7, §5): режим, список адресов и коды
+    # привязки. Право на СОЕДИНЕНИЕ решает адрес (allowlist), право на
+    # данные - скоупы на ключе; одно другое не заменяет.
+    expose_mode = "loopback"
+    allowlists: list = []
+    pairing = None            # http.pair.Pairing или None: коды не показываются
     _head_only = False        # HEAD: заголовки без тела (плеер спрашивает Range)
 
     def log_message(self, *args) -> None:   # noqa: D102 - в stderr не пишем
@@ -307,6 +314,25 @@ class _Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _client_allowed(self) -> bool:
+        """Адрес клиента принимается? False - отказ уже отвечен (§7, S6).
+
+        Списка адресов нет (LAN и Tailscale по своему адресу) - принимает
+        любой, кто достает порт: право на данные решают скоупы на ключе, а не
+        адрес. Allowlist задан (режим 0.0.0.0) - принимаются только сети из
+        списка; loopback всегда свой, потому что слушатель на этом компьютере
+        не «чужой». Отказ называется до раздачи любой страницы: «кто-то
+        подключился» не равно «доступ есть».
+        """
+        if not self.allowlists:
+            return True
+        if bind_rule.allowed(self.addr(), self.allowlists):
+            return True
+        self._answer(403, {"error": self.text("http.allowlist"),
+                           "code": "allowlist", "addr": self.addr()},
+                     name="connect", note=f"режим {self.expose_mode}")
+        return False
+
     # -- страница воспроизведения и файлы клиента (S4) ------------------------
 
     def _serve_watch(self, target: str) -> None:
@@ -354,6 +380,46 @@ class _Handler(BaseHTTPRequestHandler):
                      name="whoami", label=token.label,
                      note="права: " + "+".join(token.scopes))
 
+    def _serve_pair(self) -> None:
+        """POST /pair: клиент вводит короткий код - сервер выдаёт ключ (§5, S6).
+
+        Без Bearer: привязка - это и есть получение ключа. Причина отказа
+        называется всегда («код не принят», «сервер не показывал код»,
+        «перебор затормозен»), а не молчание и не выдуманный успех. Значений
+        кода и токена в журнале нет: метка выданного ключа и причина отказа.
+        """
+        if self.pairing is None:
+            # Реестра кодов нет (слушатель поднят без привязки): отказ назван,
+            # а не «тихий успех» или пустое тело.
+            self._answer(409, {"error": self.text("http.pair_no_code"),
+                               "code": "pairing"}, name="pair")
+            return
+        args, kwargs, problem = self._body()
+        if problem is not None:
+            self._answer(413 if problem.get("code") == "too_large" else 400,
+                         problem, name="pair")
+            return
+        code = kwargs.get("code")
+        if code is None and args:
+            first = args[0]
+            code = first.get("code") if isinstance(first, dict) else first
+        result = self.pairing.consume(code, self.addr())
+        reason = result.get("code") or ""
+        if reason == "throttle":
+            self._answer(429, result, name="pair", scope="pairing",
+                         note=f"перебор: {result.get('retry_in')} с")
+            return
+        if not result.get("ok"):
+            # Хранилище токенов не ответило - 500 с причиной; код не принят -
+            # 401: привязка не завершена, клиент читает подпись.
+            self._answer(500 if reason == "tokens" else 401, result,
+                         name="pair", scope="pairing",
+                         note=reason or "отказ")
+            return
+        self._answer(200, result, name="pair", scope="pairing",
+                     label=result.get("label") or "",
+                     note="ключ выдан: " + "+".join(result.get("scopes") or []))
+
     def _serve_asset(self, path: str, asset: tuple) -> None:
         """Файл интерфейса клиента: ETag и 304, без чужих путей (карта одна)."""
         ctype, body, etag = asset
@@ -399,6 +465,10 @@ class _Handler(BaseHTTPRequestHandler):
     def _route(self) -> None:
         path = (self.path or "").partition("?")[0]
         try:
+            if not self._client_allowed():
+                # Адрес не в allowlist: ни страницы, ни байтов, ни вызова
+                # (§7) - соединение с чужого адреса не означает доступ.
+                return
             if path in ("/", "/index.html"):
                 self._record("page", 200)
                 self._write(200, self.page, "text/html; charset=utf-8",
@@ -413,6 +483,12 @@ class _Handler(BaseHTTPRequestHandler):
                 # Права этого ключа (§4): клиент знает, что ему выдано, и
                 # подписывает недоступные цели, а не получает 403 вслепую.
                 self._serve_whoami()
+                return
+            if path == "/pair":
+                # Привязка - выдача права, поэтому только POST (GET сюда
+                # не читает код: значение кода отдаёт окно сервера, §5).
+                self._answer(405, {"error": self.text("http.pair_post_only"),
+                                   "code": "http"}, name="pair")
                 return
             if path.startswith("/watch/"):
                 # Страница воспроизведения клиента (S4): сама она не данные,
@@ -457,6 +533,14 @@ class _Handler(BaseHTTPRequestHandler):
         name = path[len("/api/"):] if path.startswith("/api/") else ""
         addr = self.addr()
         try:
+            if not self._client_allowed():
+                return
+            if path == "/pair":
+                # Привязка по короткому коду (§5): без ключа, поэтому до
+                # проверки Bearer - иначе «код не принят» читался бы как
+                # «ключа нет», и человек не понял бы, что код уже истёк.
+                self._serve_pair()
+                return
             if not name:
                 if path == "/whoami":
                     # Права ключа читаются GET; POST сюда - не вызов метода.
@@ -564,7 +648,12 @@ class _Handler(BaseHTTPRequestHandler):
             return (413 if problem.get("code") == "too_large" else 400), problem, ""
 
         try:
-            result = method(*args, **kwargs)
+            # Поток помечается как HTTP-вызов на время метода: цели, которые
+            # решают только человек на сервере (согласие «что уходит наружу»,
+            # значение кода привязки), отказывают по HTTP подписью, а не
+            # выполняют действие чужому клиенту (app/http/context.py).
+            with http_call():
+                result = method(*args, **kwargs)
         except TypeError as exc:
             # Аргументы не подходят сигнатуре метода: причину называем,
             # «метод молча вернул null» для клиента не читается как отказ.
@@ -594,9 +683,19 @@ class ServeServer:
     def __init__(self, api, *, bind: str = "127.0.0.1", port: int = 1001,
                  rate_bps: int = 0, watchers_max: int = 0, log=None,
                  tokens: TokenStore | None = None, audit: Audit | None = None,
-                 settings=None, language=None, page_marker: dict | None = None):
+                 settings=None, language=None, page_marker: dict | None = None,
+                 mode: str = "loopback", allow_text: str = "", note: str = "",
+                 pairing: pair_mod.Pairing | None = None):
         self._api = api
         self._bind = str(bind or "127.0.0.1")
+        # Экспозиция (S6, §7): режим выбран человеком с согласием; адрес
+        # решает `app/http.bind.resolve`, здесь только проводка в обработчик.
+        self._mode = bind_rule.normalize_mode(mode)
+        self._allow_text = str(allow_text or "")
+        self._note = str(note or "")
+        # Коды привязки живут вместе с сервером: обработчик выдаёт ключ из
+        # того же реестра кодов, который показывает окно (http.pair).
+        self._pairing = pairing
         # 0 = системный порт (тесты и «порт не задан»); `port or 1001`
         # превращал 0 в 1001 - тест попадал бы на чужой слушатель этого порта.
         self._port = 1001 if port is None else int(port)
@@ -631,6 +730,16 @@ class ServeServer:
     def running(self) -> bool:
         return self._httpd is not None and self._thread is not None \
             and self._thread.is_alive()
+
+    @property
+    def mode(self) -> str:
+        """Режим экспозиции, ради которого слушатель поднят (§7)."""
+        return self._mode
+
+    @property
+    def pairing(self) -> pair_mod.Pairing | None:
+        """Реестр кодов привязки (окно показывает код, клиент вводит его)."""
+        return self._pairing
 
     def base_url(self) -> str:
         """Адрес, с которого человек открывает страницу (https всегда)."""
@@ -673,6 +782,18 @@ class ServeServer:
         except TokenStoreError as exc:
             raise ServeError(str(exc)) from exc
 
+        # Allowlist читается до подъёма: битый элемент списка - отказ поднимать
+        # «обычный порт», а не «половина списка понята» и открытый доступ.
+        try:
+            nets = bind_rule.parse_allowlist(self._allow_text)
+        except ValueError as exc:
+            raise ServeError(str(exc)) from exc
+        if self._mode == "wildcard" and not nets:
+            # «Обычный порт» без списка адресов открылся бы всему, кто
+            # достает порт: это не отказ «молча оставили loopback», а
+            # названная причина, по которой слушатель не поднят.
+            raise ServeError(i18n.t("http.allowlist_required", "ru"))
+
         handler = type("_BoundHandler", (_Handler,), {
             "api": self._api,
             "tokens": self._tokens,
@@ -688,14 +809,21 @@ class ServeServer:
             "hls_builder": self._hls_builder,
             "settings": staticmethod(self._settings),
             "language": staticmethod(self._language),
+            # Экспозиция и привязка (S6): режим, адресная проверка и коды
+            # едины для всех соединений - новый поток не получает «свой» список.
+            "expose_mode": self._mode,
+            "allowlists": nets,
+            "pairing": self._pairing,
         })
         httpd = _ServeServer((self._bind, self._port), handler)
         httpd.daemon_threads = True
         httpd.log = self._log
         # TLS обязателен. Материал эфемерный (память), SAN - адрес привязки,
         # ключ ECDSA: TLS-стек браузера отказывает Ed25519 ещё до решения
-        # человека о доверии (app/http/tls.py). Отпечаток SPKI того же
-        # сертификата пишем в журнал - клиент запоминает именно его (TOFU, §5).
+        # человека о доверии (app/http/tls.py). Отпечаток SPKI пишем в журнал,
+        # чтобы человек видел, какой ключ у слушателя СЕЙЧАС: материал
+        # меняется при каждом подъёме, поэтому якорь доверия для клиента -
+        # одноразовый код привязки (§5), а не пин сертификата в localStorage.
         try:
             cert_pem, key_pem = tls.material(_san_hosts(self._bind))
             httpd.ctx = tls.context_from(cert_pem, key_pem)
@@ -703,7 +831,20 @@ class ServeServer:
             httpd.server_close()
             raise ServeError(f"TLS-контекст не построен: {exc}") from exc
         self._log(f"Доступ по HTTPS: отпечаток ключа страницы "
-                  f"{tls.fingerprint(cert_pem)[:16]}… (клиент запоминает его)")
+                  f"{tls.fingerprint(cert_pem)[:16]}… (эфемерный: меняется при "
+                  f"каждом подъёме, якорь доверия - одноразовый код привязки)")
+        if self._mode != "loopback":
+            self._log(f"Экспозиция: режим {self._mode} на {self._bind}"
+                      + (f"; {self._note}" if self._note else "")
+                      + (f"; allowlist: {len(nets)} сетей" if nets else ""))
+        else:
+            self._log("Экспозиция: loopback - наружу ничего не уходит")
+        if self._pairing is not None:
+            self._log("Привязка: код показывает окно сервера (одноразовый, "
+                      "права по пресету); клиент вводит его на странице")
+        else:
+            self._log("Привязка не настроена: окно не показывало код - "
+                      "POST /pair ответит причиной")
 
         self._audit.rotate()
         self._httpd = httpd
