@@ -215,7 +215,9 @@ python -m PyInstaller Omnistash.spec --distpath . --workpath build --noconfirm
 Юридический пакет собирается своим инструментом (`python tools/build_legal_pack.py`):
 рядом с exe уезжают тексты, которые требует лицензия — `LICENSE` (с Required
 Notice), `README.md`, `THIRD_PARTY_NOTICES.md`, `docs/ACCEPTABLE_USE.md`,
-`docs/LEGAL_FAQ.md` и текст лицензии вендора `hls.js`. Инструмент ничего не
+`docs/LEGAL_FAQ.md`, текст лицензии вендора `hls.js` и тексты лицензий бандла
+(`licenses/` с картой `licenses/manifest.json`: каждый файл кладётся
+байт-в-байт, карта называет источник текста и его sha256). Инструмент ничего не
 скачивает: читает репозиторий и сверяет `LICENSE` с каноническим текстом
 PolyForm по закреплённому sha256 (`docs/POLYFORM-NONCOMMERCIAL-1.0.0.txt`),
 требует, чтобы уведомления называли все компоненты распространяемого состава

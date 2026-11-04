@@ -33,7 +33,7 @@
 - UPX: «either under the pure GPLv2+, or (at your option) under the GPLv2+ with special exceptions … granting the free usage for all binaries including commercial programs» — https://upx.github.io/
 - PolyForm Noncommercial «Notices»: получатель любой части софта должен получить текст лицензии (или URL) и строки `Required Notice:` — https://polyformproject.org/licenses/noncommercial/1.0.0 и https://spdx.org/licenses/PolyForm-Noncommercial-1.0.0.html
 
-Оценка: **средний** — сама архитектура вшитых зависимостей корректна (см. таблицу раздела 2), но разрыв в том, что LICENSE/NOTICES не поставляются вместе с exe (см. раздел 5). Плюс мелкая неточность: cffi помечен MIT-0 (фактически MIT).
+Оценка: **средний** — сама архитектура вшитых зависимостей корректна (см. таблицу раздела 2). Разрыв «LICENSE/NOTICES не поставляются вместе с exe» закрыт: релизный пакет кладёт тексты условий и тексты лицензий бандла рядом с exe (`tools/build_legal_pack.py`, §5.2). Неточность была в этом review и в обратную сторону: cffi распространяется под `MIT-0` (MIT No Attribution) — так написано в тексте лицензии самого пакета и в его license expression, правка «MIT-0 → MIT» была ошибкой и возвращена.
 
 ### 1.4 Персональные данные / куки / OAuth — **средний**
 
@@ -97,10 +97,10 @@
 | **certifi** | `MPL-2.0` | да (cacert.pem) | да (MPL-2.0 требует уведомления о лицензии; файл в бандле) | в notices есть; хорошо бы класть сам `certifi/LICENSE` в бандл |
 | **charset-normalizer** | `MIT` (в newer versions — also Apache-2.0 dual) | да | да | в notices есть |
 | **idna** | `BSD-3-Clause` (newer — Apache-2.0 dual) | да | да | в notices есть |
-| **PySocks** | `BSD` (BSD-3-Clause variant) | да | да | в notices есть |
+| **PySocks** | `BSD` (текст лицензии: два условия, Copyright © 2006 Dan-Haim — форма BSD-2) | да | да | в notices есть с правообладателем; текст лежит в `licenses/PySocks/LICENSE` |
 | **bottle** | `MIT` | да | да | в notices есть |
-| **proxy_tools** | `MIT` | да | да | в notices есть |
-| **cffi** | `MIT` (в notices указано «MIT-0» — уточнить: сам cffi лицензован под MIT, не MIT-0) | да | да | сверить с PyPI metadata: cffi = MIT; MIT-0 — это отдельный лиценз (публичный-подобный), его у cffi нет |
+| **proxy_tools** | `BSD-2-Clause` (текст upstream LICENSE.txt: Armin Ronacher 2013, Jonathan Tushman 2014; метадата PyPI говорит «MIT» и расходится с текстом файла) | да | да | wheel не несёт текста; текст взят с upstream и лежит в `licenses/proxy_tools/LICENSE.txt` |
+| **cffi** | `MIT-0` (MIT No Attribution — так написано в тексте лицензии пакета и в его license expression) | да | да | прежняя правка «MIT» была ошибкой: MIT-0 — отдельный SPDX-лиценз, и он у cffi есть; текст лежит в `licenses/cffi/LICENSE` |
 | **pycparser** | `BSD-3-Clause` | да | да | в notices есть |
 | **pythonnet** | `MIT` | да | да | в notices есть |
 | **clr_loader** | `MIT` | да | да | в notices есть |
@@ -122,8 +122,8 @@
 
 **Выводы по packaging:**
 1. Ни один GPL/LGPL-код не распространяется вместе с exe в виде «сильного» GPL: PyInstaller и UPX покрыты своими исключениями; ffmpeg и zeroconf вынесены наружу и ставятся пользователем. Это корректная архитектура — её надо сохранить и в CI (проверка состава exe).
-2. Все «weak notice»-лицензы (MIT/BSD/Apache/MPL) требуют, чтобы каждый редистрибьютор получил их тексты. Сейчас это выполняется только через THIRD_PARTY_NOTICES.md — но сам файл не кладётся в exe и не обязан скачиваться вместе с бинарником. Это главный packaging-разрыв (см. раздел 5). Единственный сторонний код в исходниках — вендор `hls.js` — закрыт: текст Apache-2.0 лежит рядом с файлом и входит в бандл клиента (`tools/build_client.py`), поэтому бандл передаётся вместе с лицензией, а «файл без лицензии» не расходится с фактом.
-3. Двойные лицензии (cryptography, packaging, idna, charset-normalizer, cffi) надо указывать как «OR», как и сделано; единственная неточность — cffi помечен MIT-0 вместо MIT.
+2. Все «weak notice»-лицензы (MIT/BSD/Apache/MPL) требуют, чтобы каждый редистрибьютор получил их тексты. Это закрыто двумя местами: единственный сторонний код в исходниках — вендор `hls.js` — имеет текст Apache-2.0 рядом с файлом и входит в бандл клиента (`tools/build_client.py`), а тексты лицензий бандла кладутся рядом с exe в релизный пакет (`tools/build_legal_pack.py`, каталог `licenses/` с картой `licenses/manifest.json` по sha256). Прежний packaging-разрыв («файл не кладётся вместе с бинарником») больше не факт: ассет `omnistash-notices.zip` публикуется в релизе, и его наличие сверяется скачиванием из релиза.
+3. Двойные лицензии (cryptography, packaging) указываются как «OR», как и сделано. cffi назван `MIT-0` (MIT No Attribution) — это сверено по тексту лицензии самого пакета, а не по гаданию; `idna` и `charset-normalizer` имеют по одному тексту, и они лежат в `licenses/`. Тексты бандла кладутся в юр-пакет (см. §5.2), поэтому «weak notice»-условие выполняется для получателя копии, а не только в репозитории.
 
 ## 3. Черновики текстов (готовые фрагменты для вставки человеком)
 
@@ -414,17 +414,23 @@
       лицензии отказывается по несовпадению абзацев, по лишнему абзацу или по
       другому порядку разделов — лицензию не «улучшают», её сверяют по SPDX
       (`PolyForm-Noncommercial-1.0.0`).
-- [x] `THIRD_PARTY_NOTICES.md` — все лицензии указаны SPDX-именами; для BSD-3 есть
+- [x] `THIRD_PARTY_NOTICES.md` — все лицензии указаны SPDX-именами, и имя сверяется
+      с текстом лицензии, а не только с метадатой: cffi — `MIT-0` (MIT No
+      Attribution) по тексту самого пакета (прежняя правка «MIT» была ошибкой и
+      возвращена), proxy_tools — BSD 2-Clause с правообладателями по тексту
+      upstream (метадата PyPI говорит «MIT», что расходится с текстом файла),
+      PySocks — BSD с правообладателем (Dan-Haim, 2006); для BSD-3 есть
       правообладатель и год (pywebview: Roman Sirokov, 2014-2017 — сверено по
       тексту лицензии установленного пакета); curl_cffi покрывает libcurl
-      («curl license») и curl-impersonate (MIT); cffi исправлен с «MIT-0» на
-      «MIT»; условия Microsoft для WebView2 названы вместе со страницей
+      («curl license») и curl-impersonate (MIT); условия Microsoft для WebView2
+      названы вместе со страницей
       загрузки Runtime (отдельного текстового файла Microsoft не публикует), и
       добавлено уведомление, которое требует Microsoft: окно работает на
       WebView2 с настройками по умолчанию (`IsReputationCheckingRequired` не
       меняется), Microsoft Defender SmartScreen включён — это названо в README
       («Приватность») со ссылкой https://aka.ms/privacy; стаб UPX = официальный
-      без правок.
+      без правок; названы тексты лицензий бандла (`licenses/` с картой
+      `licenses/manifest.json`, пины по sha256, источник каждого текста).
 - [x] `README.md` — «не аффилирован, не одобрен и не спонсируется» на месте;
       секции о mesh, ffmpeg и обходе — в нейтральной лексике (раздел 4);
       ссылки на ACCEPTABLE_USE/LEGAL_FAQ/THIRD_PARTY_NOTICES есть; условия
@@ -465,21 +471,33 @@
       отдавал только exe, и получатель бинарника текстов условий не получал)
       закрыт; бандл и пакет публикуются без провенанса, это сказано в тексте
       релиза.
-- [ ] В бандл exe (или рядом с ним) — тексты лицензий бандла:
-      `yt_dlp/LICENSE` (Unlicense), `webview` BSD-notice, `curl_cffi` MIT +
-      curl notice, `certifi/LICENSE`, `cryptography`, `requests`, `urllib3`,
-      `cffi`, `pycparser`, `bottle`, `proxy_tools`, `pythonnet`, `clr_loader`,
-      `pywin32-ctypes`, `packaging`, `altgraph`, `pefile`, `setuptools`,
-      `charset-normalizer`, `idna`, `PySocks`, Python PSF, OpenSSL Apache-2.0,
-      WebView2 license terms.
+- [x] Рядом с exe — тексты лицензий бандла: каталог `licenses/` (34 файла, 27
+      компонентов) уезжает в релизный пакет по карте `licenses/manifest.json`.
+      Каждый текст кладётся байт-в-байт и закреплён по sha256, источник назван:
+      из `dist-info` установленного пакета (yt-dlp Unlicense, pywebview BSD-3,
+      curl_cffi MIT, libcurl «curl license», curl-impersonate MIT, certifi MPL,
+      cryptography и packaging — оба текста двойной лицензии, requests Apache +
+      NOTICE, urllib3, cffi MIT-0, pycparser, bottle, proxy_tools BSD-2 с
+      правообладателями, pythonnet и clr_loader, pywin32-ctypes, idna,
+      charset-normalizer, PySocks, altgraph, pefile, setuptools, PyInstaller
+      GPL-2.0-or-later) или с upstream по URL и с датой (OpenSSL Apache-2.0, UPX
+      GPL + исключение, Python PSF — из того CPython, из которого собирается
+      exe). `tools/build_legal_pack.py --check` сверяет пины и то, что имя
+      лицензии совпадает с текстом файла; компоненты без текста названы с
+      причиной: SQLite (Public Domain), WebView2 (Microsoft не публикует текст
+      отдельным файлом), hls.js (текст Apache-2.0 рядом с файлом в исходниках),
+      ffmpeg и zeroconf (не поставляются), magic-wormhole (не входит в exe).
 - [ ] В собранном exe **нет** ffmpeg/ffprobe, нет `zeroconf` (.pyd/.dll), нет
       wormhole/Twisted/PyNaCl — проверить по `build/Omnistash/EXE-00.toc` и
       `PKG-00.toc` (список бинарей и datas).
 - [ ] Проверка, что PyInstaller и UPX не превращают exe в GPL: правок PyInstaller
       нет; UPX-стаб официальный; собранный exe распространяется под PolyForm по
       исключению PyInstaller и исключению UPX (для неизменённого стаба).
-- [ ] Если в CI включён `collect_all("curl_cffi")` — его нативная либа попадает
-      в exe: проверять presence и лиценз (MIT + curl) в notices.
+- [x] `collect_all("curl_cffi")` в `Omnistash.spec`: нативная либа попадает в exe,
+      если пакет есть в среде сборки (нет в среде — exe собирается без неё и
+      программа деградирует мягко, это названо в spec и в notices). Лиценз
+      покрыт: MIT самого curl_cffi, «curl license» libcurl и MIT
+      curl-impersonate — все три текста лежат в `licenses/` и в юр-пакете.
 - [ ] Никаких ключей/секретов в exe: `client_secret` нет; `data_api_key`/`client_id`
       — только значения, введённые пользователем на своей машине (Developer
       Policies III.D.1: не встраивать credentials в open source и не шарить их).
@@ -541,8 +559,11 @@
    ассет рядом с exe и бандлом, джоб проверки подписи скачивает ассет из
    релиза. Условие «Notices» выполняется для получателя бинарника, а не
    только в репозитории.
-2. Тексты лицензий бандла в пакет/рядом с exe (MIT/BSD/Apache/MPL требуют,
-   чтобы каждый редистрибьютор получил их тексты).
+2. Выполнено: тексты лицензий бандла кладутся рядом с exe - каталог
+   `licenses/` (34 файла, 27 компонентов) уезжает в юр-пакет по карте
+   `licenses/manifest.json` с пинами sha256 и с названным источником каждого
+   текста; сверка имени лицензии по тексту файла - в
+   `tools/build_legal_pack.py --check`.
 3. Выполнено: «как есть, без гарантий» и ответственность на человеке -
    README («Ответственность и гарантии») и AUP п.7; отказ от ответственности
    за убытки - раздел «No Liability» канонического текста лицензии;
@@ -564,11 +585,15 @@
    собранный `preview.html` сверяется стражем `tests/test_public_texts.py`;
    `app/platforms.py` остаётся внутренним реестром (контракт из
    docs/REVIEW-WAVE1.md, п.4 закрыт).
-7. Выполнено: THIRD_PARTY_NOTICES - cffi назван «MIT» (не «MIT-0»),
-   правообладатель и год для pywebview (BSD-3: Roman Sirokov,
-   2014-2017), libcurl и curl-impersonate для curl_cffi, условия Microsoft
-   для WebView2 вместе со страницей загрузки Runtime и уведомление о
-   Microsoft Defender SmartScreen (требование Microsoft для WebView2 с
+7. Выполнено: THIRD_PARTY_NOTICES - имена лицензий сверены с текстами
+   файлов: cffi назван «MIT-0 (MIT No Attribution)» по тексту самого пакета
+   (прежняя правка «MIT» была ошибкой и возвращена), proxy_tools -
+   «BSD 2-Clause» с правообладателями по тексту upstream (метадата PyPI
+   говорит «MIT» и расходится с текстом), PySocks - «BSD» с правообладателем
+   (Dan-Haim, 2006), правообладатель и год для pywebview (BSD-3: Roman
+   Sirokov, 2014-2017), libcurl и curl-impersonate для curl_cffi, условия
+   Microsoft для WebView2 вместе со страницей загрузки Runtime и уведомление
+   о Microsoft Defender SmartScreen (требование Microsoft для WebView2 с
    настройками по умолчанию).
 8. Выполнено: лексика про отказ площадки в режиме «совместимость» (README
    «Совместимость с zapret/DPI и VPN», «не поставляет и не конфигурирует»,

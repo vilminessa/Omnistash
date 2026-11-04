@@ -202,15 +202,17 @@ class TestNoticesGuard(unittest.TestCase):
             self.assertTrue(any(reason in line for line in errors),
                             f"{needle}: отказ назван не тем текстом - {errors[:2]}")
 
-    def test_wrong_license_name_is_named(self):
+    def test_license_name_contradicting_the_text_is_named(self):
         def transform(text):
-            return text.replace("| cffi | MIT |", "| cffi | MIT-0 |")
+            return text.replace("| cffi | MIT-0 (MIT No Attribution) |",
+                                "| cffi | MIT |")
 
         with tamper("THIRD_PARTY_NOTICES.md", transform):
             code, errors = BUILD.build(check_only=True, want_zip=False)
         self.assertEqual(code, 1)
-        self.assertTrue(any("MIT-0" in line for line in errors),
-                        "выдуманное SPDX-имя лицензии прошло бы как «покрыто»")
+        self.assertTrue(any("cffi" in line for line in errors),
+                        "имя лицензии, которое не совпадает с текстом файла, "
+                        "прошло бы как «покрыто»")
 
     def test_bsd_notice_without_holder_is_named(self):
         def transform(text):
@@ -352,11 +354,23 @@ class TestPackWrites(unittest.TestCase):
         self.assertEqual((code, errors), (0, []), errors)
         written = sorted(p.relative_to(self.dir).as_posix()
                          for p in self.dir.rglob("*") if p.is_file())
-        self.assertEqual(written, sorted(list(BUILD.PACK_FILES) +
-                                         ["manifest.json", BUILD.ZIP_NAME]),
-                         "пакет не покрывает тексты условия лицензии")
+        card = json.loads((ROOT / BUILD.LICENSES_MANIFEST).read_text(encoding="utf-8"))
+        license_paths = [file["path"] for entry in card["entries"]
+                         for file in entry["files"]]
+        self.assertEqual(written, sorted(list(BUILD.PACK_FILES) + license_paths +
+                                         [BUILD.LICENSES_MANIFEST, "manifest.json",
+                                          BUILD.ZIP_NAME]),
+                         "пакет не покрывает тексты условия лицензии и тексты "
+                         "лицензий бандла")
         manifest = json.loads((self.dir / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(sorted(manifest["files"]), sorted(BUILD.PACK_FILES))
+        self.assertEqual(sorted(manifest["files"]),
+                         sorted(list(BUILD.PACK_FILES) + license_paths +
+                                  [BUILD.LICENSES_MANIFEST]),
+                         "manifest называет не тот состав пакета")
+        self.assertEqual(manifest["licenseTexts"]["dir"], BUILD.LICENSES_DIR)
+        self.assertEqual(manifest["licenseTexts"]["files"], len(license_paths))
+        self.assertIn("hls.js", manifest["licenseTexts"]["notRequired"],
+                      "вендор без текста в licenses/ не назван с причиной")
         for name, entry in manifest["files"].items():
             body = (self.dir / name).read_bytes()
             self.assertEqual(entry["sha256"], BUILD.sha256_bytes(body),
@@ -382,6 +396,12 @@ class TestPackWrites(unittest.TestCase):
                       "узнает, какой файл называет README")
         self.assertIn("ui_src/vendor/hls.js.LICENSE.txt", names,
                       "текст лицензии вендора не уехал в пакет (§4 Apache-2.0)")
+        self.assertIn("licenses/yt-dlp/LICENSE", names,
+                      "текст лицензии бандла не уехал: получатель копии "
+                      "Unlicense не получил")
+        self.assertIn("licenses/manifest.json", names,
+                      "карта текстов лицензий не уехала: источник текста "
+                      "остался бы не назван")
         self.assertIn("LICENSE", names)
         self.assertIn("manifest.json", names)
 
@@ -442,6 +462,8 @@ class TestPipelineAndDocs(unittest.TestCase):
                       "README не говорит, что уезжает рядом с exe")
         self.assertIn("POLYFORM-NONCOMMERCIAL-1.0.0.txt", readme,
                       "канонический якорь сверки лицензии не назван в README")
+        self.assertIn("licenses/manifest.json", readme,
+                      "тексты лицензий бандла в README не названы")
         self.assertIn("не аффилирован, не одобрен и не спонсируется", readme)
         self.assertIn("SmartScreen", readme,
                       "README не передаёт уведомление, которое требует Microsoft")
@@ -449,8 +471,12 @@ class TestPipelineAndDocs(unittest.TestCase):
         notices = NOTICES.read_text(encoding="utf-8")
         self.assertIn("tools/build_legal_pack.py", notices)
         self.assertIn("POLYFORM-NONCOMMERCIAL-1.0.0.txt", notices)
-        self.assertNotIn("MIT-0", notices, "выдуманное имя лицензии в перечне")
+        self.assertIn("MIT-0", notices,
+                      "cffi распространяется под MIT-0 (MIT No Attribution) - "
+                      "имя обязано стоять по тексту файла")
         self.assertIn("Roman Sirokov", notices)
+        self.assertIn("licenses/manifest.json", notices,
+                      "тексты лицензий бандла в перечне не названы")
 
         legal = LEGAL.read_text(encoding="utf-8")
         self.assertIn("tools/build_legal_pack.py", legal,
@@ -508,7 +534,7 @@ class TestPipelineAndDocs(unittest.TestCase):
                 "adult-site.invalid", "pornhub", "data-l", "smart", "screen")
         files = [ROOT / "tools" / "build_legal_pack.py", Path(__file__), README,
                  NOTICES, LICENSE, LICENSE_CANON, AUP, FAQ, LEGAL, GITIGNORE, CI,
-                 BETA, RELEASE]
+                 BETA, RELEASE, ROOT / BUILD.LICENSES_MANIFEST]
         for path in files:
             text = path.read_text(encoding="utf-8")
             hits = []

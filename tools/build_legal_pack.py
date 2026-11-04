@@ -14,6 +14,7 @@ THIRD_PARTY_NOTICES.md — условие выглядело выполненн�
     docs/ACCEPTABLE_USE.md      — правила использования (AUP)
     docs/LEGAL_FAQ.md           — правовые вопросы и ответы
     ui_src/vendor/hls.js.LICENSE.txt — текст Apache-2.0 для вендора в бандле
+    licenses/**                  — тексты лицензий бандла по карте licenses/manifest.json
 
     python tools/build_legal_pack.py           # собрать release_pack/ и manifest
     python tools/build_legal_pack.py --check   # сверить состав и тексты, не писать
@@ -79,10 +80,10 @@ LICENSES_OF = {
     "certifi": ("MPL-2.0",),
     "charset-normalizer": ("MIT",),
     "idna": ("BSD",),
-    "PySocks": ("BSD",),
+    "PySocks": ("BSD", "Dan-Haim"),
     "bottle": ("MIT",),
-    "proxy_tools": ("MIT",),
-    "cffi": ("MIT",),                      # MIT, не «MIT-0» (неточность в перечне)
+    "proxy_tools": ("BSD", "Armin Ronacher", "Jonathan Tushman"),
+    "cffi": ("MIT-0", "No Attribution"),   # upstream текст: MIT No Attribution
     "pycparser": ("BSD",),
     "pythonnet": ("MIT",),
     "clr_loader": ("MIT",),
@@ -101,6 +102,12 @@ LICENSES_OF = {
 # name в requirements -> name в перечне уведомлений
 PIP_TO_NOTICE = {"pyinstaller": "PyInstaller", "curl_cffi": "curl_cffi"}
 
+# Тексты лицензий бандла: каталог в репозитории, карта с пинами - его manifest.
+# Собран вручную (шаг LC2): copy из dist-info установленного пакета или текст
+# upstream по названному URL. Рантайм и CI ничего не скачивают.
+LICENSES_DIR = "licenses"
+LICENSES_MANIFEST = "licenses/manifest.json"
+
 # Что обязано быть названо в уведомлениях где угодно в файле (не в одной строке).
 NOTICES_ASSERTIONS = (
     "Условия для тех, кто распространяет Omnistash",
@@ -114,6 +121,7 @@ NOTICES_ASSERTIONS = (
     "POLYFORM-NONCOMMERCIAL-1.0.0.txt",  # канонический якорь сверки лицензии
     "tools/build_legal_pack.py",         # пакет, который уезжает рядом с exe
     "omnistash-notices.zip",
+    "licenses/manifest.json",            # тексты лицензий бандла уезжают в пакете
     "ffmpeg",
     "GPL",
     "zeroconf",
@@ -141,6 +149,7 @@ STATEMENTS = {
         "взрослая площадка",
         "omnistash-notices.zip",
         "tools/build_legal_pack.py",
+        "licenses/manifest.json",
     ),
     "THIRD_PARTY_NOTICES.md": NOTICES_ASSERTIONS,
     "docs/ACCEPTABLE_USE.md": (
@@ -212,9 +221,44 @@ FORBIDDEN_CLAIMS = (
      "утверждение, что у кода нет правообладателя"),
 )
 
-# Запрещённая неточность: cffi распространяется под MIT, «MIT-0» в перечне был
-# выдумкой (см. docs/LEGAL-REVIEW.md §5.1).
-WRONG_LICENSE = ("MIT-0",)
+# маркеры, которые обязаны быть в собранном тексте лицензии: текст сам говорит,
+# под чем распространяется компонент (имя из метадаты или из текста файла).
+MIT_MARKER = ("Permission is hereby granted",)
+BSD_MARKER = ("Redistribution and use",)
+APACHE_MARKER = ("Apache License",)
+TEXT_TOKENS = {
+    "Python": ("PYTHON SOFTWARE FOUNDATION LICENSE",),
+    "OpenSSL": APACHE_MARKER,
+    "yt-dlp": ("public domain",),
+    "curl_cffi": MIT_MARKER,
+    "libcurl": ("Daniel Stenberg",),
+    "curl-impersonate": MIT_MARKER,
+    "pywebview": BSD_MARKER + ("Roman Sirokov", "2014-2017"),
+    "cryptography": APACHE_MARKER + BSD_MARKER,
+    "requests": APACHE_MARKER + ("Kenneth Reitz",),
+    "urllib3": MIT_MARKER,
+    "certifi": ("Mozilla Public License",),
+    "charset-normalizer": MIT_MARKER,
+    "idna": BSD_MARKER,
+    "PySocks": BSD_MARKER + ("Dan-Haim",),
+    "bottle": MIT_MARKER,
+    "cffi": ("MIT No Attribution",),
+    "proxy_tools": BSD_MARKER + ("Armin Ronacher", "Jonathan Tushman"),
+    "pycparser": BSD_MARKER,
+    "pythonnet": MIT_MARKER,
+    "clr_loader": MIT_MARKER,
+    "pywin32-ctypes": BSD_MARKER,
+    "packaging": APACHE_MARKER + BSD_MARKER,
+    "altgraph": MIT_MARKER,
+    "pefile": MIT_MARKER,
+    "setuptools": MIT_MARKER,
+    "PyInstaller": ("GNU GENERAL PUBLIC LICENSE",),
+    "UPX": ("GNU GENERAL PUBLIC LICENSE", "special exception"),
+}
+
+# Компоненты, у которых текста лицензии нет или он лежит не в licenses/: причина
+# обязана быть названа в карте (молчание = «покрыто» было бы враньём).
+NO_TEXT_COMPONENTS = ("SQLite", "hls.js", "Microsoft WebView2")
 
 LINK_MARKDOWN = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 BACKTICK = chr(96)
@@ -355,12 +399,106 @@ def notices_checks(notices_text: str, requirements_text: str) -> list[str]:
         if assertion not in notices_text:
             errors.append(f"THIRD_PARTY_NOTICES.md не называет {assertion!r} - "
                           "условие стороны или состав сборки описаны не полностью")
-    for wrong in WRONG_LICENSE:
-        if wrong in notices_text:
-            errors.append(f"THIRD_PARTY_NOTICES.md несёт неверное имя лицензии {wrong!r}: "
-                          "cffi распространяется под MIT - выдуманное SPDX-имя в "
-                          "уведомлениях не право")
     return errors
+
+
+def license_texts() -> tuple[dict[str, bytes], list[str], dict]:
+    """Тексты лицензий бандла по карте `licenses/manifest.json`.
+
+    Карта - единственный список того, что кладётся: файл вне карты не уезжает,
+    пин сверяется по байтам, отсутствие текста или отсутствие причины - отказ.
+    """
+    try:
+        raw_manifest = read(LICENSES_MANIFEST)
+    except ValueError as exc:
+        return {}, [str(exc)], {}
+
+    errors: list[str] = []
+    try:
+        manifest = json.loads(raw_manifest.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        return {}, [f"{LICENSES_MANIFEST}: карта читается, но не разбирается - "
+                    f"состав текстов лицензий не сверяется ({exc})"], {}
+
+    entries = manifest.get("entries") or []
+    not_required = manifest.get("notRequired") or []
+    covered: dict[str, str] = {}
+    files: dict[str, bytes] = {}
+    for entry in entries:
+        component = str(entry.get("component") or "")
+        if not component:
+            errors.append(f"{LICENSES_MANIFEST}: запись без имени компонента - "
+                          "карта не называет, чей это текст")
+            continue
+        source = entry.get("source") or {}
+        if not source.get("kind") or not source.get("detail"):
+            errors.append(f"{LICENSES_MANIFEST}: {component} не называет, откуда взят "
+                          "текст (установленный дистрибутив или URL с датой)")
+        if not str(entry.get("license") or "").strip():
+            errors.append(f"{LICENSES_MANIFEST}: {component} без имени лицензии")
+        blobs = []
+        for record in entry.get("files") or []:
+            path = str(record.get("path") or "")
+            if not path.startswith(f"{LICENSES_DIR}/"):
+                errors.append(f"{LICENSES_MANIFEST}: путь {path} вне каталога "
+                              f"{LICENSES_DIR} - карта описывает не тексты бандла")
+                continue
+            try:
+                body = read(path)
+            except ValueError as exc:
+                errors.append(str(exc))
+                continue
+            digest = sha256_bytes(body)
+            if digest != str(record.get("sha256") or ""):
+                errors.append(f"пин текста лицензии не совпадает: {path} файл {digest}, "
+                              f"карта {record.get('sha256')}")
+            if len(body) != int(record.get("bytes") or 0):
+                errors.append(f"{path}: размер текста не совпадает с картой: "
+                              f"{len(body)} против {record.get('bytes')}")
+            files[path] = body
+            blobs.append(body.decode("utf-8", "replace"))
+        if not blobs:
+            errors.append(f"{LICENSES_MANIFEST}: {component} назван без файла - "
+                          "текст лицензии не собран, а выглядит покрытым")
+        covered[component] = "\n".join(blobs)
+        tokens = TEXT_TOKENS.get(component)
+        if tokens:
+            absent = [token for token in tokens if token not in covered[component]]
+            if absent:
+                errors.append(f"лицензия {component} названа {entry.get('license')!r}, но её "
+                              f"текст об этом не говорит: нет {absent}")
+        elif component not in NO_TEXT_COMPONENTS:
+            errors.append(f"{LICENSES_MANIFEST}: компонент {component} не сверяется по "
+                          "тексту - его имя лицензии никто не проверяет")
+
+    reasons = {str(item.get("component") or ""): str(item.get("reason") or "").strip()
+               for item in not_required}
+    for component, reason in reasons.items():
+        if not reason:
+            errors.append(f"{LICENSES_MANIFEST}: {component} назван без текста без "
+                          "причины - условие стороны молча пропущено")
+        if component in covered:
+            errors.append(f"{LICENSES_MANIFEST}: {component} одновременно назван с "
+                          "текстом и без текста")
+    for component in LICENSES_OF:
+        if component not in covered and component not in reasons:
+            errors.append(f"текст лицензии не собран для {component}: распространяемый "
+                          "состав exe не покрыт своими лицензиями")
+
+    summary = {
+        "dir": LICENSES_DIR,
+        "manifest": LICENSES_MANIFEST,
+        "collected": str(manifest.get("collected") or ""),
+        "components": len(entries),
+        "files": len(files),
+        "bytes": sum(len(body) for body in files.values()),
+        "notRequired": sorted(reasons),
+        "note": ("тексты кладутся байт-в-байт из установленного дистрибутива или с "
+                 "upstream по названному URL; в рантайме и в CI ничего не скачивается"),
+    }
+    if not summary["collected"]:
+        errors.append(f"{LICENSES_MANIFEST}: не названа дата, когда тексты собраны")
+    return files, errors, summary
 
 
 def claim_hit(pattern: re.Pattern, line: str, match: re.Match) -> bool:
@@ -418,12 +556,13 @@ def checks(bodies: dict[str, str]) -> list[str]:
     return errors
 
 
-def manifest(bodies: dict[str, bytes]) -> dict:
+def manifest(bodies: dict[str, bytes], license_texts_summary: dict) -> dict:
     return {
         "tool": "tools/build_legal_pack.py",
         "note": ("пак читается из репозитория, из сети ничего не скачивается; "
                  "рядом с exe уезжают текст условий лицензии, Required Notice, "
-                 "уведомления о третьих сторонах, правила использования и FAQ"),
+                 "уведомления о третьих сторонах, правила использования, FAQ и "
+                 "тексты лицензий бандла"),
         "license": {
             "spdx": CANONICAL_SPDX,
             "canonicalFile": CANONICAL_FILE,
@@ -432,6 +571,7 @@ def manifest(bodies: dict[str, bytes]) -> dict:
             "fetched": CANONICAL_FETCHED,
             "requiredNotice": "Required Notice: Copyright © 2026 vilminessa",
         },
+        "licenseTexts": license_texts_summary,
         "files": {name: {"bytes": len(body), "sha256": sha256_bytes(body)}
                   for name, body in sorted(bodies.items())},
         "archive": ZIP_NAME,
@@ -449,15 +589,31 @@ def build(check_only: bool, want_zip: bool) -> tuple[int, list[str]]:
     except ValueError as exc:
         return 1, [str(exc)]
 
+    # Тексты лицензий бандла уезжают по карте: она же и список, и пины.
+    texts, text_errors, summary = license_texts()
+    for name, body in texts.items():
+        raw[name] = body
+        bodies[name] = body.decode("utf-8", "replace")
+    # Карта текстов тоже уезжает: получатель должен видеть, откуда взят каждый
+    # текст и какой он байт-в-байт, а не просто «лицензии приложены».
+    try:
+        raw[LICENSES_MANIFEST] = read(LICENSES_MANIFEST)
+    except ValueError as exc:  # карта уже сверена - повторная читка называет причину
+        return 1, text_errors + [str(exc)]
+
     try:
         errors = checks(bodies)
     except ValueError as exc:  # сверка требует requirements.txt - отказ назван
         return 1, [str(exc)]
+    errors += text_errors
     if errors:
         return 1, errors
 
     if check_only:
-        print(f"юр-пак проверен: файлов {len(raw)}, текст лицензии совпадает с "
+        print(f"юр-пак проверен: файлов {len(raw)}, из них текстов лицензий бандла "
+              f"{summary['files']} ({summary['components']} компонентов, "
+              f"{summary['bytes']} байт, без текста названо "
+              f"{len(summary['notRequired'])} с причиной), текст лицензии совпадает с "
               f"каноническим ({CANONICAL_SPDX}), уведомления покрывают "
               f"{len(LICENSES_OF)} компонентов и прямые зависимости, публичные "
               "тексты нейтральны")
@@ -471,10 +627,11 @@ def build(check_only: bool, want_zip: bool) -> tuple[int, list[str]]:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(body)
     (DIST / "manifest.json").write_text(
-        json.dumps(manifest(raw), ensure_ascii=False, indent=2), encoding="utf-8")
+        json.dumps(manifest(raw, summary), ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print(f"собрано: {DIST} ({len(raw)} файла плюс manifest.json; пути внутри - "
-          "те же, что в репозитории)")
+    print(f"собрано: {DIST} ({len(raw)} файла плюс manifest.json; текстов лицензий "
+          f"бандла {summary['files']} плюс карта; пути внутри - те же, что в "
+          "репозитории)")
     if want_zip:
         zip_path = DIST / ZIP_NAME
         # Список берётся до создания архива и без самого архива: иначе zipfile

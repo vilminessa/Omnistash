@@ -22,6 +22,17 @@ exe.
 Сборка создаётся PyInstaller (onefile): внутрь попадает интерпретатор,
 сторонние библиотеки проекта и их данные.
 
+Тексты лицензий этих компонентов лежат в `licenses/` и уезжают в релизный
+пакет рядом с exe: каждый файл кладётся байт-в-байт и закреплён по sha256 в
+`licenses/manifest.json` — карта называет, откуда взят текст (из `dist-info`
+установленного пакета или с upstream по URL), его имя лицензии и дату сбора.
+Имя лицензии в этом перечне обязано совпадать с текстом файла:
+`tools/build_legal_pack.py --check` сверяет текст, а не молчание по метадате.
+У SQLite текста лицензии нет (Public Domain), условия Microsoft для WebView2
+показываются диалогом на странице загрузки Runtime (отдельного файла Microsoft
+не публикует), а текст Apache-2.0 для `hls.js` лежит рядом с файлом в
+`ui_src/vendor/`.
+
 ### Интерпретатор и рантайм
 
 | Компонент | Лицензия | Что это |
@@ -43,10 +54,10 @@ exe.
 | certifi | MPL-2.0 | CA-бандл (файл `certifi/cacert.pem` в сборке) |
 | charset-normalizer | MIT | определение кодировок |
 | idna | BSD 3-Clause | IDN-имена |
-| PySocks | BSD | SOCKS-прокси (работа через прокси, если задан) |
+| PySocks | BSD (Copyright © 2006 Dan-Haim) | SOCKS-прокси (работа через прокси, если задан) |
 | bottle | MIT | локальный HTTP (часть pywebview) |
-| proxy_tools | MIT | локальный HTTP (часть pywebview) |
-| cffi | MIT | FFI (вызов нативной криптографии) |
+| proxy_tools | BSD 2-Clause (Copyright © 2013 Armin Ronacher, 2014 Jonathan Tushman) | локальный HTTP (часть pywebview) |
+| cffi | MIT-0 (MIT No Attribution) | FFI (вызов нативной криптографии) |
 | pycparser | BSD 3-Clause | парсер C-заголовков (часть cffi) |
 | pythonnet | MIT | мост .NET (часть pywebview на Windows) |
 | clr_loader | MIT | загрузчик .NET (часть pythonnet) |
@@ -200,6 +211,9 @@ PolyForm Noncommercial 1.0.0 требует, чтобы каждый, кто п�
   `docs/LEGAL_FAQ.md` и текст лицензии вендора). Пакет не заменяет условие
   лицензии — он исполняет его в CI; тот, кто распространяет свою сборку сам,
   передаёт те же файлы рядом с ней;
+- тексты лицензий бандла (`licenses/` с картой `licenses/manifest.json`) —
+  MIT, BSD, Apache и MPL требуют, чтобы их тексты получил каждый, кто
+  передаёт копию программы; в пакете они лежат как есть, байт-в-байт;
 - если передаётся бандл клиента (`tools/build_client.py` →
   `client_dist/omnistash-client.zip`), вместе с ним передаётся
   `vendor/hls.js` и `vendor/hls.js.LICENSE.txt` — текст лицензии Apache-2.0
