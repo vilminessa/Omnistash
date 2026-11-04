@@ -411,7 +411,7 @@ class TestPipelineAndDocs(unittest.TestCase):
 
     def test_ci_checks_the_pack_after_the_suite(self):
         text = CI.read_text(encoding="utf-8")
-        tests_at = text.index("python -m unittest discover")
+        tests_at = text.index("tools/run_tests.py")
         check_at = text.index("tools/build_legal_pack.py --check")
         build_at = text.index("tools/build_legal_pack.py --zip")
         self.assertLess(tests_at, check_at,

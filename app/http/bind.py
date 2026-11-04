@@ -24,6 +24,7 @@ import ipaddress
 import os
 import re
 import subprocess
+import time
 from typing import Callable
 
 LOOPBACK = "127.0.0.1"
@@ -38,6 +39,12 @@ APIPA = ipaddress.ip_network("169.254.0.0/16")
 CREATE_NO_WINDOW = 0x08000000
 PS_TIMEOUT = 12.0
 _SPLIT = re.compile(r"[,\s;]+")
+# Кэш адресов машины: подпроцесс PowerShell стоит ~1.2 с, а интерфейсы
+# меняются редко. TTL маленький: человек, который только что поднял VPN или
+# Tailscale, не должен ждать.
+ADDRESSES_TTL = 5.0
+_ADDRESSES_CACHE: list[str] | None = None
+_ADDRESSES_STAMP = 0.0
 
 
 def normalize_mode(value) -> str:
@@ -56,9 +63,19 @@ def read_addresses() -> list[str]:
     """IPv4-адреса машины. Windows - Get-NetIPAddress (вывод объектов не
     зависит от локали); вне Windows список пуст: серверный режим Windows
     (docs/SERVER-CLIENT.md §1), чужую ОС наружу не открываем.
+
+    Список кэшируется на ADDRESSES_TTL секунд: интерфейсы меняются редко,
+    а подпроцесс стоит ~1.2 с - читать адреса на каждый вызов резать было
+    бы медленной работой без нужды. Кэш не меняет решений: «адрес не найден»
+    остаётся тем же фактом, что и без кэша. Сброс - forget_addresses()
+    (смена интерфейсов и тесты).
     """
+    global _ADDRESSES_CACHE, _ADDRESSES_STAMP
     if os.name != "nt":
         return []
+    now = time.monotonic()
+    if _ADDRESSES_CACHE is not None and now - _ADDRESSES_STAMP < ADDRESSES_TTL:
+        return list(_ADDRESSES_CACHE)
     script = ("Get-NetIPAddress -AddressFamily IPv4 -ErrorAction "
               "SilentlyContinue | Select-Object -ExpandProperty IPAddress")
     try:
@@ -71,7 +88,21 @@ def read_addresses() -> list[str]:
     if done.returncode != 0:
         return []
     out = done.stdout.decode("utf-8", "replace")
-    return [line.strip() for line in out.splitlines() if line.strip()]
+    found = [line.strip() for line in out.splitlines() if line.strip()]
+    _ADDRESSES_CACHE = found
+    _ADDRESSES_STAMP = time.monotonic()
+    return list(found)
+
+
+def forget_addresses() -> None:
+    """Сбросить кэш адресов: интерфейсы машины поменялись или тесты.
+
+    Пустой список без чтения означал бы «не смотрели», а не «адресов нет»;
+    поэтому сброс называет причину и следующий читатель идёт к системе.
+    """
+    global _ADDRESSES_CACHE, _ADDRESSES_STAMP
+    _ADDRESSES_CACHE = None
+    _ADDRESSES_STAMP = 0.0
 
 
 def parse_allowlist(text) -> list:
@@ -139,7 +170,13 @@ def resolve(mode, consent, allowlist, addresses: Callable[[], list] | None = Non
     loopback: отказ не должен оставить слушатель на чужом адресе.
     """
     mode = normalize_mode(mode)
-    addresses = list(addresses()) if addresses else read_addresses()
+    # Адреса машины читаются только там, где режим их требует: loopback и
+    # 0.0.0.0 их не используют (wildcard привязывается на все интерфейсы и
+    # решает список адресов), поэтому резать их ради «наружу ничего не
+    # уходит» было бы медленным молчанием - подпроцесс ~1.2 с на вызов.
+    def read() -> list:
+        return list(addresses()) if addresses else read_addresses()
+
     if mode == "loopback":
         return {"mode": "loopback", "address": LOOPBACK, "error": "",
                 "note": "только этот компьютер: наружу ничего не уходит"}
@@ -153,7 +190,7 @@ def resolve(mode, consent, allowlist, addresses: Callable[[], list] | None = Non
     except ValueError as exc:
         return {"mode": mode, "address": LOOPBACK, "error": str(exc), "note": ""}
     if mode == "lan":
-        address = _lan_address(addresses)
+        address = _lan_address(read())
         if not address:
             return {"mode": mode, "address": LOOPBACK,
                     "error": "адрес сети этого компьютера не найден - "
@@ -162,7 +199,7 @@ def resolve(mode, consent, allowlist, addresses: Callable[[], list] | None = Non
                 "note": f"сеть открыта для тех, кто достает порт ({address}): "
                         f"доступ решают скоупы на ключе, а не адрес"}
     if mode == "tailscale":
-        address = _tailscale_address(addresses)
+        address = _tailscale_address(read())
         if not address:
             return {"mode": mode, "address": LOOPBACK,
                     "error": "адрес Tailscale не найден (диапазон "

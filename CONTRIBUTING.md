@@ -7,7 +7,9 @@
 ## Техническая часть
 
 ```powershell
-python -m unittest discover -t . -s tests    # офлайн, 500+ проверок
+python tools/run_tests.py                    # офлайн, 1637 проверок,
+                                             # параллельно по ядрам
+                                             # (--jobs 1 - последовательно)
 ```
 
 - ветка от `main`, в одном PR — одна тема;

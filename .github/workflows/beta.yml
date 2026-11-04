@@ -62,7 +62,9 @@ jobs:
             exit 1
           fi
       - name: Офлайн-тесты
-        run: python -m unittest discover -t . -s tests
+        # Модули независимы (каждый берёт свой профиль во временную папку):
+        # параллельный прогон по ядрам раннера, покрытие то же.
+        run: python tools/run_tests.py
       - name: Синтаксис JS
         shell: bash
         run: node --check ui_src/app.js

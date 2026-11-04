@@ -975,7 +975,9 @@ Register-ScheduledTask -TaskName "Omnistash Sync" `
 Тесты:
 
 ```powershell
-python -m unittest discover -t . -s tests          # офлайн, 500+ проверок
+python tools/run_tests.py                          # офлайн, 1637 проверок,
+#   параллельно по ядрам (модули независимы: свой профиль во временной папке);
+#   --jobs 1 - последовательно, --only test_i18n - выборка модулей
 $env:OMNISTASH_LIVE='1'; python -m unittest tests.test_live   # на живом YouTube
 # то же через консоль: debug.bat 4 (офлайн) и debug.bat 5 (+ живые,
 # там реально качается ролик - это и проверка, что загрузка работает)

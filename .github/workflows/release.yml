@@ -33,7 +33,9 @@ jobs:
       - name: Линт workflows (пины SHA, permissions)
         run: python tools/check_workflows.py
       - name: Офлайн-тесты
-        run: python -m unittest discover -t . -s tests
+        # Модули независимы (каждый берёт свой профиль во временную папку):
+        # параллельный прогон по ядрам раннера, покрытие то же.
+        run: python tools/run_tests.py
       - name: Версия совпадает с тегом
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash

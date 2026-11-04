@@ -346,7 +346,8 @@ pairing (§5) и правится в настройках сервера. Пуб
 ## 9. Шаги исполнения (каждый — отдельный коммит, без push)
 
 Проверка каждого шага: `python tools/build_preview.py`,
-`python -m unittest discover -t . -s tests` (ожидается `OK (skipped=17)`),
+`python tools/run_tests.py` (ожидается `OK (skipped=17)`; это тот же набор,
+модули гоняются параллельно, `--jobs 1` возвращает последовательный прогон),
 `node --check ui_src/app.js`.
 
 | Шаг | Что делает | Файлы | Коммит |

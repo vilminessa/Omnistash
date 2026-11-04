@@ -104,8 +104,8 @@ rem  Проверки
 rem ---------------------------------------------------------------
 
 :op_tests
-echo Тесты офлайн (сеть не нужна)...
-python -m unittest discover -t . -s tests
+echo Тесты офлайн (сеть не нужна, параллельно по ядрам)...
+python tools/run_tests.py
 set "rc=%errorlevel%"
 goto after
 

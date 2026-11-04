@@ -243,7 +243,7 @@ class TestPipelineAndDocs(unittest.TestCase):
 
     def test_ci_runs_pin_lint_and_bundle_after_the_suite(self):
         text = CI.read_text(encoding="utf-8")
-        tests_at = text.index("python -m unittest discover")
+        tests_at = text.index("tools/run_tests.py")
         check_at = text.index("tools/build_client.py --check")
         build_at = text.index("tools/build_client.py --zip")
         self.assertLess(tests_at, check_at,
