@@ -5,6 +5,11 @@
   "source": "https://cdn.jsdelivr.net/npm/hls.js@1.7.4/dist/hls.min.js",
   "sha256": "a56a4f0328b16adf3a0a04fcec0968051bf95b327d0fd46b3f5d4f67637e5254",
   "fetched": "2026-11-03",
+  "repository": "https://github.com/video-dev/hls.js",
+  "licenseFile": "hls.js.LICENSE.txt",
+  "licenseSource": "https://raw.githubusercontent.com/video-dev/hls.js/v1.7.4/LICENSE",
+  "licenseSha256": "ca8773cf798c7ed997d4dd7c8e23c348699f8d5b7462636694cc14de6cda12db",
+  "licenseFetched": "2026-11-04",
   "publish": "npm-провенанс: опубликован GitHub Actions (registry.npmjs.org attestations hls.js@1.7.4)",
-  "note": "минифицированный dist лежит в репозитории: рантайм клиента грузит только свой адрес (/vendor/hls.js), из сети ничего не скачивается; ссылка на sourcemap убрана (сервер не отдаёт .map - иначе браузер запросил бы файл, которого нет)"
+  "note": "минифицированный dist лежит в репозитории: рантайм клиента грузит только свой адрес (/vendor/hls.js), из сети ничего не скачивается; ссылка на sourcemap убрана (сервер не отдаёт .map - иначе браузер запросил бы файл, которого нет); текст лицензии Apache-2.0 лежит рядом (hls.js.LICENSE.txt) и уезжает в бандл клиента вместе с файлом"
 }

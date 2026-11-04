@@ -43,3 +43,11 @@ jobs:
         run: python tools/build_preview.py
       - name: Офлайн-тесты
         run: python -m unittest discover -t . -s tests
+      # Бандл клиента (S7): собирается после набора проверок, потому что
+      # проверяется тем же кодом, что раздаёт слушатель (--serve). Линт пинов
+      # - сверка sha256 вендора с метадатой; несоответствие называет причину,
+      # а не «тихо скопировали что есть».
+      - name: Пины клиентского вендора сверяются
+        run: python tools/build_client.py --check
+      - name: Клиентский бандл собирается
+        run: python tools/build_client.py --zip

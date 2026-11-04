@@ -49,3 +49,7 @@ result_log.txt
 
 # Превью интерфейса - сборка tools/build_preview.py, в git не идёт
 preview.html
+
+# Бандл клиента - сборка tools/build_client.py (страницы, вендор, manifest,
+# архив). В git не идёт: состав проверяется самим инструментом по пинам sha256.
+client_dist/

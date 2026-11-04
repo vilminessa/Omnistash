@@ -5575,21 +5575,32 @@ def run(serve: bool = False) -> int:
         api.bind_window(window)
         if serve:
             # Что человек должен увидеть в терминале планировщика: поднят ли
-            # слушатель, где и сколько ключей живёт. Ключи выдаёт pairing
-            # (шаг S6), поэтому без ключа сервер отвечает 401 - это правда,
-            # а не «доступ готов».
-            state = api._serve_state()
+            # слушатель, где, какой режим наружу и сколько ключей живёт.
+            # Строки пишутся и в консоль, и в журнал: в окне exe консоли нет
+            # (console=False), а планировщик смотрит omnistash.log.
+            state = api.serve_state()
             if state["running"]:
                 print(f"Доступ по HTTPS: {state['url']} "
-                      f"(ключей: {state['count']}, привязка - шаг S6, "
-                      "без ключа сервер отвечает 401 «привязка не завершена»)")
+                      f"(режим: {state['mode']}, слушает: {state['bind']}, "
+                      f"согласие наружу: {'принято' if state['consent'] else 'не принято'}, "
+                      f"ключей: {state['count']})")
+                api._log(f"Доступ по HTTPS поднят: {state['url']} "
+                         f"(режим {state['mode']}, ключей: {state['count']}, "
+                         "код привязки показывает окно сервера - раздел "
+                         "«Доступ по HTTPS»")
+            elif state["problem"]:
+                print(f"Доступ по HTTPS: {state['problem']}", file=sys.stderr)
+                api._log(f"Доступ по HTTPS: {state['problem']}")
             elif state["error"]:
                 print(f"Доступ по HTTPS не поднят: {state['error']}",
                       file=sys.stderr)
+                api._log(f"Доступ по HTTPS не поднят: {state['error']}")
             else:
                 print("Доступ по HTTPS не поднят: включите «Доступ по HTTPS» "
                       "в настройках (serve_enabled); окно работает как обычно",
                       file=sys.stderr)
+                api._log("Доступ по HTTPS не поднят: serve_enabled выключен - "
+                         "флаг включения доступа это согласие человека")
         webview.start(debug="--debug" in sys.argv)
     except Exception as exc:  # noqa: BLE001 - окно не поднялось, но причина видна
         print(f"Окно не открылось: {exc}", file=sys.stderr)

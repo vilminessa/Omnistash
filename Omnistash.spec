@@ -67,6 +67,13 @@ for pkg in ("yt_dlp", "webview", "curl_cffi"):
     datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 # Интерфейс: ui.py читает ui_src/{index.html,app.css,app.js} и вшивает в страницу.
+# Тот же каталог несёт клиентские файлы шагов S4-S7: ui_src/watch.html и
+# ui_src/watch.js (страница воспроизведения), ui_src/vendor/hls.js с метадатой
+# и текстом лицензии Apache-2.0 - их раздаёт --serve по карте CLIENT_ASSETS, и
+# их же собирает tools/build_client.py в бандл. Поэтому один список каталога,
+# а не отдельный список файлов: клиентский состав не расходится с exe.
+# Режим --serve живёт в том же exe: exe читает sys.argv и добавляет слушатель
+# к тому же процессу (база, хранилища и очередь остаются здесь).
 datas += [("ui_src", "ui_src")]
 
 a = Analysis(

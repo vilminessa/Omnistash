@@ -57,6 +57,7 @@ ROOT = Path(__file__).resolve().parent.parent
 JS = ROOT / "ui_src" / "app.js"
 CSS = ROOT / "ui_src" / "app.css"
 DOC = ROOT / "docs" / "SERVER-CLIENT.md"
+BACKEND = ROOT / "app" / "gui.py"
 
 
 def _clean(text: str) -> str:
@@ -697,6 +698,21 @@ class TestServeExposureInGui(GuiCase):
         self.assertIn(i18n.t("http.tokens_absent", "ru"), again.get("error", ""),
                       "повторный отзыв читался бы как «отозван»")
         self.assertFalse(api.serve_token_revoke({}).get("ok"))
+
+    def test_run_serve_summary_names_the_mode_and_reaches_the_journal(self):
+        """Запуск `--serve`: строка называет режим и пишется в журнал программы."""
+        text = BACKEND.read_text(encoding="utf-8")
+        start = text.index("        if serve:")
+        block = text[start:text.index("webview.start(", start)]
+        self.assertIn("api.serve_state()", block,
+                      "снимок доступа читается приватным полем вместо публичной цели")
+        self.assertIn("api._log(", block,
+                      "в окне exe консоли нет: планировщик читает omnistash.log, "
+                      "и строка о доступе должна туда попадать")
+        self.assertIn("согласие наружу", block,
+                      "строка не говорит, принято ли согласие на выход наружу")
+        self.assertNotIn("шаг S6", block,
+                         "журнал обещает привязку будущим шагом - S6 уже сделан")
 
     def test_schema_fields_are_the_documented_modes(self):
         self.assertEqual([pair[0] for pair in

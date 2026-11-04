@@ -62,6 +62,8 @@ exe.
 |---|---|---|
 | PyInstaller (бутлоадер и рантайм) | GPL-2.0-or-later **WITH Bootloader-exception** | сам упаковщик; исключение прямо разрешает встраивать бутлоадер и рантайм в любые программы и распространять их без ограничений GPL — поэтому exe не становится GPL. PyInstaller проект не изменяет |
 | UPX (стаб сжатия) | GPL-2.0-or-later + special exception for compressed executables | сжатие exe; исключение разрешает распространять сжатые программы на условии **неизменённого** официального UPX (стаб байт-в-байт). Сборка использует стандартный UPX и не изменяет стаб |
+| hls.js v1.7.4 (`ui_src/vendor/hls.js`) | Apache-2.0 | воспроизведение HLS на странице клиента `/watch/<video_id>`; единственный сторонний код в исходниках проекта. Файл закреплён в репозитории по sha256 (`ui_src/vendor/hls.js.meta.json`), npm-провенанс — публикация через GitHub Actions; рантайм грузит только свой адрес (`/vendor/hls.js`), из сети ничего не скачивается |
+| hls.js NOTICE и текст лицензии (`ui_src/vendor/hls.js.LICENSE.txt`) | Apache-2.0 | текст лицензии, который распространяется вместе с файлом (§4 Apache-2.0): copyright Dailymotion (2017) и части, производные от videojs-contrib-hls (copyright 2013-2015 Brightcove), тоже под Apache-2.0. Пин текста — sha256 в той же метадате; файл уезжает в бандл клиента (`tools/build_client.py`) |
 
 ### Microsoft WebView2
 
@@ -76,8 +78,9 @@ WebView2, а не на условиях проекта. Сама среда вы
 
 Собственный код Omnistash (`app/`, `ui_src/`, `gateway/`, `tools/`) и
 интерфейсные файлы — под [PolyForm Noncommercial 1.0.0](LICENSE),
-Copyright © 2026 vilminessa. Стороннего кода в исходниках проекта нет:
-всё, что лежит в репозитории, написано для Omnistash.
+Copyright © 2026 vilminessa. Сторонний код в исходниках один и он назван:
+`ui_src/vendor/hls.js` (Apache-2.0, см. таблицу выше) с текстом лицензии рядом;
+прочие файлы репозитория написаны для Omnistash.
 
 Иконка exe — собственный asset проекта (`assets/omnistash.ico`),
 собирается `tools/make_icon.py` из палитры тёмной темы программы; это
@@ -169,7 +172,11 @@ PolyForm Noncommercial 1.0.0 требует, чтобы каждый, кто п�
 - копию [LICENSE](LICENSE) (с текстом PolyForm Noncommercial 1.0.0 и
   строкой `Required Notice: Copyright © 2026 vilminessa`) —
   это условие самой лицензии;
-- этот файл (THIRD_PARTY_NOTICES.md) — уведомления о сторонах.
+- этот файл (THIRD_PARTY_NOTICES.md) — уведомления о сторонах;
+- если передаётся бандл клиента (`tools/build_client.py` →
+  `client_dist/omnistash-client.zip`), вместе с ним передаётся
+  `vendor/hls.js` и `vendor/hls.js.LICENSE.txt` — текст лицензии Apache-2.0
+  входит в бандл, а не лежит отдельно от файла.
 
 Коммерческое распространение (в т.ч. в составе своего продукта) — только
 по отдельной лицензии от автора: vilminessa@gmail.com.
