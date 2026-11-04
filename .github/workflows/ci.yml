@@ -51,3 +51,13 @@ jobs:
         run: python tools/build_client.py --check
       - name: Клиентский бандл собирается
         run: python tools/build_client.py --zip
+      # Юр-пак (docs/LEGAL-REVIEW.md §5.2): тексты, которые условие «Notices»
+      # требует передать рядом с exe. Сверка идёт после набора тестов: состав
+      # пакета читается из репозитория, LICENSE сверяется с каноническим
+      # текстом по sha256, notifications покрывают состав exe и прямые
+      # зависимости. Отсутствие файла или непокрытый компонент - отказ с
+      # причиной, молчания нет.
+      - name: Юр-пак сверяется с текстами условий
+        run: python tools/build_legal_pack.py --check
+      - name: Юр-пак собирается
+        run: python tools/build_legal_pack.py --zip

@@ -36,7 +36,7 @@ exe.
 |---|---|---|
 | yt-dlp | Unlicense (общественное достояние) | загрузка видео и метаданных с площадок; входит в exe полностью, включая экстракторы |
 | curl_cffi | MIT (в комплекте libcurl — «curl license») | имитация TLS-отпечатка браузера (настройка «Имитация браузера»), борьба с анти-бот 403/410 |
-| pywebview | BSD 3-Clause | окно интерфейса (webview поверх HTML) |
+| pywebview | BSD 3-Clause (Copyright © Roman Sirokov, 2014-2017) | окно интерфейса (webview поверх HTML) |
 | cryptography | Apache-2.0 OR BSD-3-Clause | Ed25519/X25519, ChaCha20-Poly1305, TLS, DPAPI-обвязка |
 | requests | Apache-2.0 | HTTP-клиент |
 | urllib3 | MIT | транспорт для requests |
@@ -46,7 +46,7 @@ exe.
 | PySocks | BSD | SOCKS-прокси (работа через прокси, если задан) |
 | bottle | MIT | локальный HTTP (часть pywebview) |
 | proxy_tools | MIT | локальный HTTP (часть pywebview) |
-| cffi | MIT-0 | FFI (вызов нативной криптографии) |
+| cffi | MIT | FFI (вызов нативной криптографии) |
 | pycparser | BSD 3-Clause | парсер C-заголовков (часть cffi) |
 | pythonnet | MIT | мост .NET (часть pywebview на Windows) |
 | clr_loader | MIT | загрузчик .NET (часть pythonnet) |
@@ -70,9 +70,21 @@ exe.
 Пакет pywebview поставляет с собой `WebView2Loader.dll`,
 `Microsoft.Web.WebView2.Core.dll` и `Microsoft.Web.WebView2.WinForms.dll`
 (компоненты Microsoft) — они распространяются на условиях Microsoft для
-WebView2, а не на условиях проекта. Сама среда выполнения WebView2
+WebView2 (Microsoft Software License Terms для Microsoft Edge WebView2
+Runtime), а не на условиях проекта. Условия Microsoft показываются на
+странице загрузки Runtime — https://developer.microsoft.com/microsoft-edge/webview2
+(кнопки загрузки открывают диалог с текстом условий); отдельного текстового
+файла условий Microsoft не публикует. Сама среда выполнения WebView2
 (Evergreen) — часть Windows 11 / устанавливается Microsoft; проект её не
 поставляет.
+
+**Уведомление, которое требует Microsoft:** окно программы работает на WebView2
+с настройками по умолчанию — pywebview не меняет `IsReputationCheckingRequired`,
+то есть Microsoft Defender SmartScreen включён. Пока он включён, условия
+Microsoft требуют сказать каждому получателю программы, что она включает
+SmartScreen и передаёт данные в Microsoft: это названо в разделе «Приватность»
+README и в их документе о данных (https://aka.ms/privacy — Microsoft Privacy
+Statement, и раздел SmartScreen в «User data and privacy in Microsoft Edge»).
 
 ### Проект и его файлы
 
@@ -81,6 +93,15 @@ WebView2, а не на условиях проекта. Сама среда вы
 Copyright © 2026 vilminessa. Сторонний код в исходниках один и он назван:
 `ui_src/vendor/hls.js` (Apache-2.0, см. таблицу выше) с текстом лицензии рядом;
 прочие файлы репозитория написаны для Omnistash.
+
+Тексты условий, которые передаются вместе с копией, лежат в репозитории и
+кладутся в релизный пакет: `LICENSE`, `README.md`, этот файл,
+`docs/ACCEPTABLE_USE.md` и `docs/LEGAL_FAQ.md`. Канонический текст лицензии
+сохранён как якорь сверки — `docs/POLYFORM-NONCOMMERCIAL-1.0.0.txt` (получен с
+polyformproject.org и закреплён по sha256 в `tools/build_legal_pack.py`). Это
+текст лицензии, а не код: он не меняет состава программы и сверяется офлайн, а
+правка в тексте LICENSE отказывается CI по несовпадению абзацев — лицензию
+нельзя «улучшать», её сверяют по SPDX.
 
 Иконка exe — собственный asset проекта (`assets/omnistash.ico`),
 собирается `tools/make_icon.py` из палитры тёмной темы программы; это
@@ -173,6 +194,12 @@ PolyForm Noncommercial 1.0.0 требует, чтобы каждый, кто п�
   строкой `Required Notice: Copyright © 2026 vilminessa`) —
   это условие самой лицензии;
 - этот файл (THIRD_PARTY_NOTICES.md) — уведомления о сторонах;
+- рядом с exe в релизе этот набор уезжает автоматическим пакетом:
+  `tools/build_legal_pack.py` → `release_pack/omnistash-notices.zip`
+  (`LICENSE`, `README.md`, этот файл, `docs/ACCEPTABLE_USE.md`,
+  `docs/LEGAL_FAQ.md` и текст лицензии вендора). Пакет не заменяет условие
+  лицензии — он исполняет его в CI; тот, кто распространяет свою сборку сам,
+  передаёт те же файлы рядом с ней;
 - если передаётся бандл клиента (`tools/build_client.py` →
   `client_dist/omnistash-client.zip`), вместе с ним передаётся
   `vendor/hls.js` и `vendor/hls.js.LICENSE.txt` — текст лицензии Apache-2.0

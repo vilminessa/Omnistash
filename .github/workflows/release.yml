@@ -52,6 +52,12 @@ jobs:
         run: python tools/build_client.py --check
       - name: Клиентский бандл собирается (проба)
         run: python tools/build_client.py
+      # Юр-пак (docs/LEGAL-REVIEW.md §5.2): тексты условий и уведомлений,
+      # которые обязан получить каждый, кто скачал exe. Сверка до сборки exe.
+      - name: Юр-пак сверяется с текстами условий
+        run: python tools/build_legal_pack.py --check
+      - name: Юр-пак собирается (проба)
+        run: python tools/build_legal_pack.py
 
   build:
     name: сборка Omnistash.exe
@@ -97,6 +103,19 @@ jobs:
           path: client_dist/omnistash-client.zip
           if-no-files-found: error
           retention-days: 5
+      # Юр-пак: LICENSE с Required Notice, уведомления о сторонах, правила
+      # использования, FAQ и текст лицензии вендора. Условие «Notices» из
+      # PolyForm Noncommercial требует, чтобы получатель копии получил их
+      # вместе с exe - поэтому пакет публикуется отдельным ассетом релиза.
+      # SLSA-подпись считается по exe, на пакет она не распространяется.
+      - name: Сборка юр-пакета
+        run: python tools/build_legal_pack.py --zip
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Omnistash-notices
+          path: release_pack/omnistash-notices.zip
+          if-no-files-found: error
+          retention-days: 5
 
   python-publish:
     name: публикация exe в релиз
@@ -113,16 +132,21 @@ jobs:
         with:
           name: Omnistash-client
           path: client
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: Omnistash-notices
+          path: notices
       - name: Создать/обновить релиз тега
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          notes="Автоматическая сборка (CI). Провенанс SLSA прикладывается отдельным джобом (по exe). Клиентский бандл - тот же состав, что раздаёт --serve; на бандл провенанс не распространяется. Юр-пак (LICENSE с Required Notice, THIRD_PARTY_NOTICES.md, ACCEPTABLE_USE.md, LEGAL_FAQ.md и текст лицензии hls.js) уезжает рядом с exe: так выполняется условие «Notices» PolyForm Noncommercial; на него провенанс тоже не распространяется."
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" Omnistash.exe client/omnistash-client.zip --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload "$GITHUB_REF_NAME" Omnistash.exe client/omnistash-client.zip notices/omnistash-notices.zip --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" Omnistash.exe client/omnistash-client.zip --repo "$GITHUB_REPOSITORY" \
+            gh release create "$GITHUB_REF_NAME" Omnistash.exe client/omnistash-client.zip notices/omnistash-notices.zip --repo "$GITHUB_REPOSITORY" \
               --title "$GITHUB_REF_NAME" \
-              --notes "Автоматическая сборка (CI). Провенанс SLSA прикладывается отдельным джобом (по exe). Клиентский бандл - тот же состав, что раздаёт --serve; на бандл провенанс не распространяется."
+              --notes "$notes"
           fi
 
   generator-generic-ossf-slsa3-publish:
@@ -158,6 +182,16 @@ jobs:
         run: |
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             -p Omnistash.exe -p Omnistash.exe.intoto.jsonl --clobber
+      - name: Юр-пак скачивается из релиза
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # условие «Notices» сверяется по факту: ассет пакета должен лежать в
+        # релизе рядом с exe, иначе скачавший бинарник текстов условий не получил.
+        # Граница снизу - защита от пустого или обрезанного ассета.
+        run: |
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            -p omnistash-notices.zip --clobber
+          python3 -c "import os; s = os.path.getsize('omnistash-notices.zip'); print('omnistash-notices.zip', s, 'bytes'); assert s > 25_000, s"
       - name: gh attestation verify (bundle из релиза)
         env:
           GH_TOKEN: ${{ github.token }}
