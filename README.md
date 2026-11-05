@@ -982,7 +982,7 @@ Register-ScheduledTask -TaskName "Omnistash Sync" `
 Тесты:
 
 ```powershell
-python tools/run_tests.py                          # офлайн, 1724 проверок (прогон 05.11.2026, skipped=17),
+python tools/run_tests.py                          # офлайн, 1733 проверок (прогон 05.11.2026, skipped=17),
 #   параллельно по ядрам (модули независимы: свой профиль во временной папке);
 #   --jobs 1 - последовательно, --only test_i18n - выборка модулей
 $env:OMNISTASH_LIVE='1'; python -m unittest tests.test_live   # на живом YouTube
