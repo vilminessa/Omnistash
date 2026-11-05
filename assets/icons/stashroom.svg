@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" role="img" aria-labelledby="stashroom-title" focusable="false">
+  <title id="stashroom-title">Stashroom</title>
+  <rect x="0" y="0" width="24" height="24" rx="5.25" fill="#780000"/>
+    <rect x="0.75" y="0.75" width="22.5" height="22.5" rx="5.25" fill="none" stroke="#FDF0D5" stroke-width="0.5"/>
+    <path d="M8 17 V11 A4 4 0 0 1 16 11 V17 Z" fill="#003049"/>
+    <path d="M8 17 V11 A4 4 0 0 1 16 11 V17" fill="none" stroke="#FDF0D5" stroke-width="1.5"/>
+    <path d="M9.25 15.75 V11 A2.75 2.75 0 0 1 14.75 11 V15.75" fill="none" stroke="#669BBC" stroke-width="0.75"/>
+    <path d="M6.5 17 H17.5" fill="none" stroke="#FDF0D5" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M11 11.5 L14 13.75 L11 16 Z" fill="#FDF0D5"/>
+</svg>

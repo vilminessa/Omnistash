@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Иконки Omnistash и Stashroom - варианты использования</title>
+<style>
+  body { background: #003049; color: #FDF0D5; font-family: system-ui, sans-serif;
+          padding: 24px; }
+  h2 { font-size: 1rem; margin: 24px 0 8px; }
+  button { background: #003049; color: #FDF0D5; border: 1px solid #669BBC;
+            padding: 8px 10px; margin-right: 8px; font: inherit;
+            display: inline-flex; align-items: center; gap: 8px; }
+  .svg-icon { height: 1em; width: 1em; flex-shrink: 0; fill: currentColor; }
+  .visually-hidden { position: absolute; height: 1px; width: 1px;
+                      overflow: hidden; clip: rect(0, 0, 0, 0);
+                      white-space: nowrap; }
+  .big { font-size: 2rem; }
+  .small { font-size: 0.75rem; }
+  .sizes { display: flex; align-items: flex-end; gap: 16px; margin: 12px 0; }
+  .sizes.light { color: #003049; background: #FDF0D5; padding: 12px; }
+</style>
+</head>
+<body>
+  <h1>Иконки Omnistash и Stashroom</h1>
+  <p>Спрайт ниже тот же <code>&lt;symbol&gt;</code>, что в
+     <code>assets/icons/sprite.svg</code>: геометрия одного источника,
+     подпись и скрытие решаются на месте <code>&lt;use&gt;</code>.</p>
+<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="display:none">
+  <symbol id="omnistash" viewBox="0 0 24 24">
+    <rect x="0" y="0" width="24" height="24" rx="5.25" fill="#FDF0D5"/>
+    <rect x="0.75" y="0.75" width="22.5" height="22.5" rx="5.25" fill="none" stroke="#003049" stroke-width="0.5"/>
+    <circle cx="12" cy="12" r="7.75" fill="none" stroke="#669BBC" stroke-width="0.75"/>
+    <circle cx="12" cy="12" r="6.75" fill="none" stroke="#003049" stroke-width="1.5"/>
+    <rect x="8" y="8.5" width="8" height="1.5" rx="0.75" fill="#669BBC"/>
+    <rect x="8.6" y="11.25" width="6.8" height="1.5" rx="0.75" fill="#780000"/>
+    <rect x="9.2" y="14" width="5.6" height="1.5" rx="0.75" fill="#003049"/>
+    <rect x="10.5" y="4.5" width="3" height="2.5" rx="1.25" fill="#C1121F"/>
+  </symbol>
+  <symbol id="omnistash-mono" viewBox="0 0 24 24">
+    <rect x="0.75" y="0.75" width="22.5" height="22.5" rx="5.25" fill="none" stroke="currentColor" stroke-width="0.5" opacity="0.5"/>
+    <circle cx="12" cy="12" r="7.75" fill="none" stroke="currentColor" stroke-width="0.75" opacity="0.45"/>
+    <circle cx="12" cy="12" r="6.75" fill="none" stroke="currentColor" stroke-width="1.5"/>
+    <rect x="8" y="8.5" width="8" height="1.5" rx="0.75" fill="currentColor" opacity="0.45"/>
+    <rect x="8.6" y="11.25" width="6.8" height="1.5" rx="0.75" fill="currentColor"/>
+    <rect x="9.2" y="14" width="5.6" height="1.5" rx="0.75" fill="currentColor"/>
+    <rect x="10.5" y="4.5" width="3" height="2.5" rx="1.25" fill="currentColor"/>
+  </symbol>
+  <symbol id="stashroom" viewBox="0 0 24 24">
+    <rect x="0" y="0" width="24" height="24" rx="5.25" fill="#780000"/>
+    <rect x="0.75" y="0.75" width="22.5" height="22.5" rx="5.25" fill="none" stroke="#FDF0D5" stroke-width="0.5"/>
+    <path d="M8 17 V11 A4 4 0 0 1 16 11 V17 Z" fill="#003049"/>
+    <path d="M8 17 V11 A4 4 0 0 1 16 11 V17" fill="none" stroke="#FDF0D5" stroke-width="1.5"/>
+    <path d="M9.25 15.75 V11 A2.75 2.75 0 0 1 14.75 11 V15.75" fill="none" stroke="#669BBC" stroke-width="0.75"/>
+    <path d="M6.5 17 H17.5" fill="none" stroke="#FDF0D5" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M11 11.5 L14 13.75 L11 16 Z" fill="#FDF0D5"/>
+  </symbol>
+  <symbol id="stashroom-mono" viewBox="0 0 24 24">
+    <rect x="0.75" y="0.75" width="22.5" height="22.5" rx="5.25" fill="none" stroke="currentColor" stroke-width="0.5" opacity="0.5"/>
+    <path d="M8 17 V11 A4 4 0 0 1 16 11 V17 Z" fill="currentColor" opacity="0.45"/>
+    <path d="M8 17 V11 A4 4 0 0 1 16 11 V17" fill="none" stroke="currentColor" stroke-width="1.5"/>
+    <path d="M9.25 15.75 V11 A2.75 2.75 0 0 1 14.75 11 V15.75" fill="none" stroke="currentColor" stroke-width="0.75"/>
+    <path d="M6.5 17 H17.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M11 11.5 L14 13.75 L11 16 Z" fill="currentColor"/>
+  </symbol>
+</svg>
+
+
+    <h2>Omnistash</h2>
+    <div class="row">
+      <button type="button">
+        <svg class="svg-icon" role="img" aria-labelledby="t-omnistash-stand" focusable="false">
+          <title id="t-omnistash-stand">Omnistash</title>
+          <use href="#omnistash"></use>
+        </svg>
+      </button>
+
+      <button type="button">
+        <svg class="svg-icon" aria-hidden="true" focusable="false">
+          <use href="#omnistash"></use>
+        </svg>
+        Omnistash - текст первичен, иконка декоративна
+      </button>
+
+      <button type="button">
+        <svg class="svg-icon" aria-hidden="true" focusable="false">
+          <use href="#omnistash"></use>
+        </svg>
+        <span class="visually-hidden">Только иконка, текст скрыт визуально</span>
+      </button>
+    </div>
+
+    <p>Масштаб от размера шрифта (монохром, currentColor): <svg class="svg-icon" aria-hidden="true" focusable="false"><use href="#omnistash-mono"></use></svg> обычный,
+      <span class="big">крупный <svg class="svg-icon" aria-hidden="true" focusable="false"><use href="#omnistash-mono"></use></svg></span>,
+      <span class="small">мелкий <svg class="svg-icon" aria-hidden="true" focusable="false"><use href="#omnistash-mono"></use></svg></span></p>
+
+    <div class="sizes">
+      <svg style="width:16px;height:16px" role="img" aria-labelledby="t-omnistash-16" focusable="false"><title id="t-omnistash-16">Omnistash, 16 пиксела</title><use href="#omnistash"></use></svg>
+      <svg style="width:24px;height:24px" role="img" aria-labelledby="t-omnistash-24" focusable="false"><title id="t-omnistash-24">Omnistash, 24 пиксела</title><use href="#omnistash"></use></svg>
+      <svg style="width:48px;height:48px" role="img" aria-labelledby="t-omnistash-48" focusable="false"><title id="t-omnistash-48">Omnistash, 48 пикселов</title><use href="#omnistash"></use></svg>
+      <svg style="width:128px;height:128px" role="img" aria-labelledby="t-omnistash-128" focusable="false"><title id="t-omnistash-128">Omnistash, 128 пикселов</title><use href="#omnistash"></use></svg>
+    </div>
+    <div class="sizes light">
+      <svg style="width:24px;height:24px" aria-hidden="true" focusable="false"><use href="#omnistash-mono"></use></svg>
+      <svg style="width:48px;height:48px" aria-hidden="true" focusable="false"><use href="#omnistash-mono"></use></svg>
+    </div>
+
+    <h2>Stashroom</h2>
+    <div class="row">
+      <button type="button">
+        <svg class="svg-icon" role="img" aria-labelledby="t-stashroom-stand" focusable="false">
+          <title id="t-stashroom-stand">Stashroom</title>
+          <use href="#stashroom"></use>
+        </svg>
+      </button>
+
+      <button type="button">
+        <svg class="svg-icon" aria-hidden="true" focusable="false">
+          <use href="#stashroom"></use>
+        </svg>
+        Stashroom - текст первичен, иконка декоративна
+      </button>
+
+      <button type="button">
+        <svg class="svg-icon" aria-hidden="true" focusable="false">
+          <use href="#stashroom"></use>
+        </svg>
+        <span class="visually-hidden">Только иконка, текст скрыт визуально</span>
+      </button>
+    </div>
+
+    <p>Масштаб от размера шрифта (монохром, currentColor): <svg class="svg-icon" aria-hidden="true" focusable="false"><use href="#stashroom-mono"></use></svg> обычный,
+      <span class="big">крупный <svg class="svg-icon" aria-hidden="true" focusable="false"><use href="#stashroom-mono"></use></svg></span>,
+      <span class="small">мелкий <svg class="svg-icon" aria-hidden="true" focusable="false"><use href="#stashroom-mono"></use></svg></span></p>
+
+    <div class="sizes">
+      <svg style="width:16px;height:16px" role="img" aria-labelledby="t-stashroom-16" focusable="false"><title id="t-stashroom-16">Stashroom, 16 пиксела</title><use href="#stashroom"></use></svg>
+      <svg style="width:24px;height:24px" role="img" aria-labelledby="t-stashroom-24" focusable="false"><title id="t-stashroom-24">Stashroom, 24 пиксела</title><use href="#stashroom"></use></svg>
+      <svg style="width:48px;height:48px" role="img" aria-labelledby="t-stashroom-48" focusable="false"><title id="t-stashroom-48">Stashroom, 48 пикселов</title><use href="#stashroom"></use></svg>
+      <svg style="width:128px;height:128px" role="img" aria-labelledby="t-stashroom-128" focusable="false"><title id="t-stashroom-128">Stashroom, 128 пикселов</title><use href="#stashroom"></use></svg>
+    </div>
+    <div class="sizes light">
+      <svg style="width:24px;height:24px" aria-hidden="true" focusable="false"><use href="#stashroom-mono"></use></svg>
+      <svg style="width:48px;height:48px" aria-hidden="true" focusable="false"><use href="#stashroom-mono"></use></svg>
+    </div>
+
+</body>
+</html>

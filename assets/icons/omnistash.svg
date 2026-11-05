@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" role="img" aria-labelledby="omnistash-title" focusable="false">
+  <title id="omnistash-title">Omnistash</title>
+  <rect x="0" y="0" width="24" height="24" rx="5.25" fill="#FDF0D5"/>
+    <rect x="0.75" y="0.75" width="22.5" height="22.5" rx="5.25" fill="none" stroke="#003049" stroke-width="0.5"/>
+    <circle cx="12" cy="12" r="7.75" fill="none" stroke="#669BBC" stroke-width="0.75"/>
+    <circle cx="12" cy="12" r="6.75" fill="none" stroke="#003049" stroke-width="1.5"/>
+    <rect x="8" y="8.5" width="8" height="1.5" rx="0.75" fill="#669BBC"/>
+    <rect x="8.6" y="11.25" width="6.8" height="1.5" rx="0.75" fill="#780000"/>
+    <rect x="9.2" y="14" width="5.6" height="1.5" rx="0.75" fill="#003049"/>
+    <rect x="10.5" y="4.5" width="3" height="2.5" rx="1.25" fill="#C1121F"/>
+</svg>

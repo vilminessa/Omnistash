@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="display:none">
+  <symbol id="omnistash" viewBox="0 0 24 24">
+    <rect x="0" y="0" width="24" height="24" rx="5.25" fill="#FDF0D5"/>
+    <rect x="0.75" y="0.75" width="22.5" height="22.5" rx="5.25" fill="none" stroke="#003049" stroke-width="0.5"/>
+    <circle cx="12" cy="12" r="7.75" fill="none" stroke="#669BBC" stroke-width="0.75"/>
+    <circle cx="12" cy="12" r="6.75" fill="none" stroke="#003049" stroke-width="1.5"/>
+    <rect x="8" y="8.5" width="8" height="1.5" rx="0.75" fill="#669BBC"/>
+    <rect x="8.6" y="11.25" width="6.8" height="1.5" rx="0.75" fill="#780000"/>
+    <rect x="9.2" y="14" width="5.6" height="1.5" rx="0.75" fill="#003049"/>
+    <rect x="10.5" y="4.5" width="3" height="2.5" rx="1.25" fill="#C1121F"/>
+  </symbol>
+  <symbol id="omnistash-mono" viewBox="0 0 24 24">
+    <rect x="0.75" y="0.75" width="22.5" height="22.5" rx="5.25" fill="none" stroke="currentColor" stroke-width="0.5" opacity="0.5"/>
+    <circle cx="12" cy="12" r="7.75" fill="none" stroke="currentColor" stroke-width="0.75" opacity="0.45"/>
+    <circle cx="12" cy="12" r="6.75" fill="none" stroke="currentColor" stroke-width="1.5"/>
+    <rect x="8" y="8.5" width="8" height="1.5" rx="0.75" fill="currentColor" opacity="0.45"/>
+    <rect x="8.6" y="11.25" width="6.8" height="1.5" rx="0.75" fill="currentColor"/>
+    <rect x="9.2" y="14" width="5.6" height="1.5" rx="0.75" fill="currentColor"/>
+    <rect x="10.5" y="4.5" width="3" height="2.5" rx="1.25" fill="currentColor"/>
+  </symbol>
+  <symbol id="stashroom" viewBox="0 0 24 24">
+    <rect x="0" y="0" width="24" height="24" rx="5.25" fill="#780000"/>
+    <rect x="0.75" y="0.75" width="22.5" height="22.5" rx="5.25" fill="none" stroke="#FDF0D5" stroke-width="0.5"/>
+    <path d="M8 17 V11 A4 4 0 0 1 16 11 V17 Z" fill="#003049"/>
+    <path d="M8 17 V11 A4 4 0 0 1 16 11 V17" fill="none" stroke="#FDF0D5" stroke-width="1.5"/>
+    <path d="M9.25 15.75 V11 A2.75 2.75 0 0 1 14.75 11 V15.75" fill="none" stroke="#669BBC" stroke-width="0.75"/>
+    <path d="M6.5 17 H17.5" fill="none" stroke="#FDF0D5" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M11 11.5 L14 13.75 L11 16 Z" fill="#FDF0D5"/>
+  </symbol>
+  <symbol id="stashroom-mono" viewBox="0 0 24 24">
+    <rect x="0.75" y="0.75" width="22.5" height="22.5" rx="5.25" fill="none" stroke="currentColor" stroke-width="0.5" opacity="0.5"/>
+    <path d="M8 17 V11 A4 4 0 0 1 16 11 V17 Z" fill="currentColor" opacity="0.45"/>
+    <path d="M8 17 V11 A4 4 0 0 1 16 11 V17" fill="none" stroke="currentColor" stroke-width="1.5"/>
+    <path d="M9.25 15.75 V11 A2.75 2.75 0 0 1 14.75 11 V15.75" fill="none" stroke="currentColor" stroke-width="0.75"/>
+    <path d="M6.5 17 H17.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M11 11.5 L14 13.75 L11 16 Z" fill="currentColor"/>
+  </symbol>
+</svg>
