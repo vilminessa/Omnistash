@@ -453,7 +453,8 @@ def _migrate_v6(conn: sqlite3.Connection) -> None:
     кэшем «адрес -> ключ» (он про адрес, который может меняться); здесь -
     решение человека об УСТРОЙСТВЕ, а устройство = его Ed25519-ключ:
 
-      * verified_at заполняется только человеком (сверка отпечатка) -
+      * verified_at заполняется только человеком: сверка отпечатка
+        (verified_via='manual') или «12 слов» (verified_via='sas') -
         без него ключ просто запомненный TOFU-контакт;
       * revoked_at - «не принимать от этого ключа манифесты и файлы»:
         барьер стоит в mesh.fetch, отзыв действует и на будущее.
@@ -464,7 +465,7 @@ def _migrate_v6(conn: sqlite3.Connection) -> None:
             pubkey      TEXT PRIMARY KEY,   -- Ed25519 identity, hex
             label       TEXT NOT NULL DEFAULT '',  -- имя устройства (человека)
             verified_at TEXT,               -- NULL = TOFU-контакт
-            verified_via TEXT NOT NULL DEFAULT 'tofu',  -- tofu|manual
+            verified_via TEXT NOT NULL DEFAULT 'tofu',  -- tofu|manual|sas
             revoked_at  TEXT,               -- не NULL = доверие отозвано
             created_at  TEXT NOT NULL,
             last_addr   TEXT NOT NULL DEFAULT ''  -- последний рабочий адрес
