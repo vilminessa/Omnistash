@@ -96,7 +96,7 @@ class TestBulkDownload(BulkCase):
         result = self.api.bulk_download({
             "ids": [plain, present, archived, 99999],
             "storage_id": self.storage["id"]})
-        self.assertTrue(result["ok"], result)
+        self.assertTrue(result.get("ok"), result)
         self.assertEqual(result["total"], 4)
         self.assertEqual(result["queued"], 1, "в очередь только одна строка")
         self.assertEqual(result["skipped"], 3)
@@ -194,7 +194,7 @@ class TestBulkTags(BulkCase):
             "ids": [first, second],
             "add": ["избранное", "4К"],
             "remove": ["рок"]})
-        self.assertTrue(result["ok"], result)
+        self.assertTrue(result.get("ok"), result)
         self.assertEqual(result["updated"], 2)
         self.assertEqual(row_of(self.conn, first)["user_tags"],
                          "живой, избранное, 4К")
@@ -284,7 +284,7 @@ class TestBulkCollection(BulkCase):
 
         added = self.api.bulk_collection({"ids": vids, "collection_id": cid,
                                           "action": "add"})
-        self.assertTrue(added["ok"], added)
+        self.assertTrue(added.get("ok"), added)
         self.assertEqual(added["added"], 2)
         self.assertEqual(repo.collection_ids(self.conn, cid), vids)
 
@@ -359,7 +359,7 @@ class TestBulkRemoveRows(BulkCase):
 
         result = self.api.bulk_remove_rows({"ids": [first, second, 99999],
                                             "confirm": True})
-        self.assertTrue(result["ok"], result)
+        self.assertTrue(result.get("ok"), result)
         self.assertEqual(result["removed"], 2)
         self.assertEqual(result["gone"], 1)
         self.assertTrue(result["files_kept"])
@@ -402,7 +402,7 @@ class TestAdultGate(BulkCase):
         self.fake_download()
         result = self.api.bulk_download({"ids": [adult, plain],
                                          "storage_id": self.storage["id"]})
-        self.assertTrue(result["ok"], result)
+        self.assertTrue(result.get("ok"), result)
         self.assertEqual(result["queued"], 2)
 
     def test_other_bulk_endpoints_are_gated(self):
@@ -561,7 +561,7 @@ class TestFolderAboveLimit(BulkCase):
         self.fake_download()
         cid, vids = self.big_folder()
         result = self.api.bulk_download({"collection_id": cid})
-        self.assertTrue(result["ok"], result)
+        self.assertTrue(result.get("ok"), result)
         self.assertEqual(result["total"], len(vids))
         self.assertEqual(result["queued"], len(vids))
         self.assertEqual(sum(1 for v in vids
@@ -583,10 +583,10 @@ class TestFolderAboveLimit(BulkCase):
     def test_tags_and_rating_above_limit_reach_every_row(self):
         cid, vids = self.big_folder(extra=5)
         tagged = self.api.bulk_tags({"collection_id": cid, "add": ["большая"]})
-        self.assertTrue(tagged["ok"], tagged)
+        self.assertTrue(tagged.get("ok"), tagged)
         self.assertEqual(tagged["updated"], len(vids))
         rated = self.api.bulk_rating({"collection_id": cid, "rating": 4})
-        self.assertTrue(rated["ok"], rated)
+        self.assertTrue(rated.get("ok"), rated)
         self.assertEqual(rated["updated"], len(vids))
         self.assertTrue(all(row_of(self.conn, v)["user_tags"] == "большая"
                             for v in vids), "каждая строка папки обновлена")
@@ -596,7 +596,7 @@ class TestFolderAboveLimit(BulkCase):
     def test_clear_folder_above_limit_removes_all_links(self):
         cid, vids = self.big_folder(extra=2)
         result = self.api.bulk_collection({"collection_id": cid, "action": "remove"})
-        self.assertTrue(result["ok"], result)
+        self.assertTrue(result.get("ok"), result)
         self.assertEqual(result["removed"], len(vids))
         self.assertEqual(repo.collection_ids(self.conn, cid), [])
         self.assertTrue(all(row_of(self.conn, v) for v in vids),
@@ -605,7 +605,7 @@ class TestFolderAboveLimit(BulkCase):
     def test_remove_rows_above_limit_removes_every_row(self):
         cid, vids = self.big_folder(extra=6)
         result = self.api.bulk_remove_rows({"collection_id": cid, "confirm": True})
-        self.assertTrue(result["ok"], result)
+        self.assertTrue(result.get("ok"), result)
         self.assertEqual(result["removed"], len(vids))
         self.assertEqual(repo.stats(self.conn)["total"], 0)
         self.assertEqual(repo.collection_ids(self.conn, cid), [])
