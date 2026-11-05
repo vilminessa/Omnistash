@@ -155,10 +155,13 @@
   каркас `ui_flutter/` — измерительный стенд W0 с токенами темы (W1:
   `tools/build_flutter_theme.py` выводит роли цвета, метрики из `ui_src/app.css`
   и контрастные пары из `app/themes.py`, а `tools/check_flutter_mirror.py`
-  сверяет Dart-ассет с реестром и гоняется в CI без Flutter SDK); обе оболочки
-  живут на одном бэкенде через `/api/<имя>` с теми же правами ключей; Flutter
-  SDK пинится версией и sha256 архива (`tools/flutter_pin.json`), рантайм
-  ничего не скачивает.
+  сверяет Dart-ассет с реестром и гоняется в CI без Flutter SDK); на волне W2
+  построен экран библиотеки (`ui_flutter/lib/library_view.dart`) — список
+  читает тот же контракт `list_videos` (`{"total","rows"}`), тему и размер
+  текста из настройки бэкенда, а семантика строк и живой регион состояния
+  передают AT то же, что браузерное окно; обе оболочки живут на одном бэкенде
+  через `/api/<имя>` с теми же правами ключей; Flutter SDK пинится версией и
+  sha256 архива (`tools/flutter_pin.json`), рантайм ничего не скачивает.
 - **Всё локально** — настройки, журнал и индекс лежат в
   `%LOCALAPPDATA%\Omnistash`, ничего не отправляется наружу.
 
@@ -992,7 +995,7 @@ Register-ScheduledTask -TaskName "Omnistash Sync" `
 Тесты:
 
 ```powershell
-python tools/run_tests.py                          # офлайн, 1746 проверок (прогон 06.11.2026, skipped=17),
+python tools/run_tests.py                          # офлайн, 1752 проверок (прогон 06.11.2026, skipped=17),
 #   параллельно по ядрам (модули независимы: свой профиль во временной папке);
 #   --jobs 1 - последовательно, --only test_i18n - выборка модулей
 $env:OMNISTASH_LIVE='1'; python -m unittest tests.test_live   # на живом YouTube
