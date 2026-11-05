@@ -164,6 +164,27 @@ class TestLiveExchange(unittest.TestCase):
                                        method="digits")
         self.assertEqual(result["shown"], self._server_render("digits"))
 
+    def test_emoji_end_to_end(self):
+        result = self.client.sas_begin(f"127.0.0.1:{self.server.port}",
+                                       method="emoji")
+        self.assertEqual(len(result["shown"]), 8, "эмодзи: 8 позиций")
+        self.assertEqual(" ".join(result["shown"]),
+                         self._server_render("emoji"),
+                         "эмодзи клиента и сервера должны совпадать")
+
+    def test_icons_end_to_end(self):
+        result = self.client.sas_begin(f"127.0.0.1:{self.server.port}",
+                                       method="icons")
+        self.assertEqual(len(result["shown"]), 8, "иконки: 8 SVG на экране")
+        shown = self._server_render("icons")
+        self.assertTrue(shown.startswith("индексы "), shown)
+        indexes = [int(x) for x in shown[len("индексы "):].split()]
+        self.assertEqual(len(indexes), 8, shown)
+        for index, svg in zip(indexes, result["shown"]):
+            self.assertEqual(svg, sas.svg_icon(index),
+                             "иконка клиента обязана совпадать с индексом, "
+                             "который журналировал сервер")
+
     def test_unknown_method_refused(self):
         with self.assertRaises(RuntimeError):
             self.client.sas_begin(f"127.0.0.1:{self.server.port}",

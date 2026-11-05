@@ -144,5 +144,45 @@ class TestRevokedBarrier(TrustCase):
         self.assertEqual(logs, [])
 
 
+
+
+class TestVerifyViaSas(TrustCase):
+    """repo-уровень SAS (этап 1.1): способ подтверждения хранится в базе.
+
+    Именно этот путь использует gui.trust_sas_confirm; сверка фасада
+    (test_gui.py) не заменяет проверку самого репозитория.
+    """
+
+    def test_verify_via_sas_marks_method(self):
+        repo.truststore_add(self.conn, KEY_A)
+        device = repo.truststore_verify(self.conn, KEY_A, via="sas")
+        self.assertEqual(device["status"], "verified")
+        self.assertEqual(device["verified_via"], "sas")
+        self.assertIn(KEY_A, repo.truststore_verified(self.conn),
+                      "strict-барьер читает список verified - подтверждение "
+                      "12 словами должно в нём быть")
+
+    def test_revoke_then_verify_rewrites_method(self):
+        repo.truststore_verify(self.conn, KEY_A, via="sas")
+        repo.truststore_revoke(self.conn, KEY_A)
+        back = repo.truststore_verify(self.conn, KEY_A, via="manual")
+        self.assertEqual(back["status"], "verified")
+        self.assertEqual(back["verified_via"], "manual",
+                         "повторная сверка отпечатка обязана заменить способ")
+        self.assertIsNone(back["revoked_at"])
+
+    def test_unknown_verify_method_refused(self):
+        """Неизвестный способ подтверждения - отказ с названной причиной."""
+        for bad in ("words", "", "tofu"):
+            with self.assertRaises(ValueError) as ctx:
+                repo.truststore_verify(self.conn, KEY_A, via=bad)
+            self.assertIn("неизвестный способ подтверждения", str(ctx.exception))
+
+    def test_first_contact_is_not_sas(self):
+        """add - TOFU-память канала; SAS пишется только подтверждением."""
+        with self.assertRaises(ValueError):
+            repo.truststore_add(self.conn, KEY_A, via="sas")
+
+
 if __name__ == "__main__":
     unittest.main()

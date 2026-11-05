@@ -196,6 +196,31 @@ class TestSettingsMirror(unittest.TestCase):
             self.assertIn(values[key], allowed,
                           f"{key}: значение «{values[key]}» вне списка схемы")
 
+    def test_bool_snapshot_defaults_match_the_schema(self):
+        """Снимок превью держит bool-умолчания как в схеме бэкенда.
+
+        Поле default в списке полей сверяется, но значения рисует снимок
+        `var settings`: bool, перевёрнутый в снимке, проверяет в превью
+        поведение, которого на свежей машине нет. Символьно закрепляется
+        mesh_strict: в снимке он выключен, включается только кодом при
+        первом подтверждённом устройстве (gui._strict_autoload).
+        """
+        values = mock_settings_values(self.text)
+        diverged = []
+        for key, field in sorted(self.schema.items()):
+            if field["type"] != "bool":
+                continue
+            got = values.get(key)
+            if got is None:
+                continue      # покрытие снимка сверяет другая проверка
+            if bool(got) != bool(field.get("default")):
+                diverged.append((key, got, field.get("default")))
+        self.assertEqual(diverged, [],
+                         f"превью держит bool-умолчания вне схемы: {diverged}")
+        self.assertIs(values["mesh_strict"], False,
+                      "mesh_strict в снимке превью не false - превью "
+                      "проверяло бы включённый режим на свежей машине")
+
     def test_widgets_and_hidden_fields_stay_out_of_the_parity_check(self):
         """Виджеты окна есть в зеркале, скрытые поля бэкенда не рисуются."""
         all_mirror = mirror_fields(self.text)

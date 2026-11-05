@@ -391,6 +391,45 @@ class TestNetworkFetch(MeshNetCase):
                       "честный вердикт: сеть не объявила файл")
 
 
+    def test_explicit_paths_do_not_consult_strict(self):
+        """Граница 1.2 закреплена: strict спрашивает только restore.
+
+        fetch_from_network и restore_friend - явные запросы человека: сам
+        запрос есть разрешение (это названо в docstring fetch_from_network),
+        поэтому strict в них не вызывается. Появление барьера в явном пути
+        молча изменило бы проверяемое поведение, и тесты восстановления его
+        не ловят - проверка структурная. Барьеры явных путей (подпись
+        манифеста, стоп-лист, отзыв) сверены отдельными проверками.
+        """
+        import inspect
+        for fn in (mesh_fetch.fetch_from_network, mesh_fetch.restore_friend):
+            self.assertNotIn("_strict_filter", inspect.getsource(fn),
+                             f"{fn.__name__}: strict появился в явном пути - "
+                             "граница 1.2 изменена без пересмотра текстов")
+        self.assertIn("_strict_filter", inspect.getsource(mesh_fetch.restore),
+                      "strict-барьер пропал из автоматического восстановления "
+                      "- режим «только друзья» стал молчаливым")
+
+    def test_revoked_origin_blocks_network_fetch(self):
+        """Явный сетевой забор держит барьер отзыва (без strict)."""
+        holder = self.seed_holder()
+        self.seed_receiver()
+        origin = self._mirror(holder["digest"])
+        repo.truststore_revoke(self.db_b.conn, origin)
+        dest = self.root / "net-revoked"
+        dest.mkdir()
+        logs: list = []
+        result = mesh_fetch.fetch_from_network(
+            self.db_b.conn, "vid000000001", platform="youtube",
+            dest_dir=str(dest), log=logs.append)
+        self.assertFalse(result["ok"], result)
+        self.assertIn("нет пригодных манифестов", result["reason"],
+                      "отказ обязан называть причину, а не молчать")
+        self.assertTrue(any("отозванным доверием" in line for line in logs),
+                        logs)
+        self.assertEqual(list(dest.iterdir()), [],
+                         "отказ не должен оставить файл или часть файла")
+
 class TestRestore(MeshNetCase):
     """Полный путь восстановления: от манифеста до скачанной строки."""
 
@@ -578,6 +617,32 @@ class TestRestore(MeshNetCase):
             receiver["addr"], str(dest), log=logs.append)
         self.assertFalse(ok, "чужой ключ не должен проходить: " + str(logs))
         self.assertEqual(list(dest.iterdir()), [], "ничего не должно ляг")
+
+    def test_revoked_origin_blocks_friend_fetch(self):
+        """Забор у друга по чужой строке держит барьер отзыва.
+
+        restore_friend не спрашивает strict (граница 1.2 сверена отдельной
+        проверкой), но штатный фильтр отзыва обязан отсекать отозванный ключ
+        автора каталога и не оставлять на диске ни файла, ни части.
+        """
+        self.seed_holder()
+        receiver = self.seed_receiver()
+        origin = identity.get_identity()[1].hex()
+        repo.truststore_revoke(self.db_b.conn, origin)
+        dest = self.root / "friend-revoked"
+        dest.mkdir()
+        logs: list = []
+        ok = mesh_fetch.restore_friend(
+            self.db_b.conn,
+            {"remote_id": "vid000000001", "origin": origin,
+             "title": "Клип"},
+            receiver["addr"], str(dest), log=logs.append)
+        self.assertFalse(ok, "отозванный ключ обязан закрывать забор: "
+                            + str(logs))
+        self.assertTrue(any("отозванным доверием" in line for line in logs),
+                        logs)
+        self.assertEqual(list(dest.iterdir()), [],
+                         "отказ не должен оставить файл или часть")
 
     def test_redial_after_ip_change(self):
         """Критерий приёмки этапа 1: смена IP дружбы восстанавливается сама.
