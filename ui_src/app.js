@@ -98,7 +98,7 @@
 
   // Резерв списка тем, пока theme_list не ответил (превью до первого
   // ответа бэка). Совпадает с themes.ids() - сверяет тест.
-  var THEME_IDS = ["dark", "light", "contrast", "custom"];
+  var THEME_IDS = ["dark", "light", "coolors", "contrast", "custom"];
 
   function t(key, fallback) {
     // Подпись текущего языка. Ключ, которого в словаре нет (или нет
@@ -8670,9 +8670,13 @@
         default: false },
       { key: "theme", type: "choice", section: "Внешний вид", label: "Тема",
         hint: "Палитра окна через CSS-переменные: тёмная (по умолчанию), " +
-              "светлая, контрастная и своя.",
+              "светлая, контрастная, своя и бренд (палитра coolors: cream " +
+              "подложка, navy подпись, red акцент, blue границы). Битое " +
+              "значение возвращается дефолтной темой, читаемость каждой " +
+              "темы проверяется по контрасту подписей и подложек.",
         choices: [["dark", "Тёмная"], ["light", "Светлая"],
-                  ["contrast", "Контрастная"], ["custom", "Своя"]],
+                  ["coolors", "Бренд"], ["contrast", "Контрастная"],
+                  ["custom", "Своя"]],
         default: "dark" },
       // M15: те же ключи/подписи/границы, что в app/settings_schema.py -
       // превью проверяет карточку «Внешний вид» без бэка.
@@ -8730,13 +8734,14 @@
          подписи и границы полей те же, что у настоящего бэка (app/themes.py,
          app/i18n.py, app/settings_schema.py). */
       theme_list: function () {
-        var ids = ["dark", "light", "contrast", "custom"];
+        var ids = ["dark", "light", "coolors", "contrast", "custom"];
         var current = ids.indexOf(settings.theme) >= 0 ? settings.theme : "dark";
         return Promise.resolve({
           ok: true,
           themes: [
             { id: "dark", label: "Тёмная", dark: true },
             { id: "light", label: "Светлая", dark: false },
+            { id: "coolors", label: "Бренд", dark: false },
             { id: "contrast", label: "Контрастная", dark: true },
             { id: "custom", label: "Своя", dark: true }
           ],
