@@ -79,9 +79,16 @@ jobs:
         run: python -m PyInstaller Omnistash.spec --distpath . --workpath build --noconfirm
       - name: Проверка артефакта
         shell: bash
-        # нижняя граница - защита от пустой/обрезанной сборки: локально
-        # Omnistash.exe весит ~27.8 МБ
+        # нижняя граница - защита от пустой/обрезанной сборки: собранный
+        # локально Omnistash.exe весит ~30.4 МБ (2026-11-05: три сборки
+        # одного дерева дали 30 432 624, 30 433 270 и 30 433 590 байт -
+        # закрепляется нижняя граница, а не размер)
         run: python -c "import os; s = os.path.getsize('Omnistash.exe'); print('Omnistash.exe', s, 'bytes'); assert s > 20_000_000, s"
+      # Состав exe (docs/LEGAL-REVIEW.md §5.2): сверка по TOC после размера
+      # и до хеша артефакта - чужой бинарь или потерянный текст лицензии
+      # видны до публикации ассетов и до SLSA-подписи.
+      - name: Сверка состава exe по TOC
+        run: python tools/check_exe_contents.py
       - name: Хеш артефакта (формат sha256sum, base64 - для SLSA)
         id: hash
         shell: bash

@@ -87,7 +87,7 @@
 
 | Зависимость | Фактический лиценз (SPDX) | В onefile exe? | Требует NOTICE при распространении? | Что не хватает / что проверить |
 |---|---|---|---|---|
-| **Omnistash (свой код)** | `PolyForm-Noncommercial-1.0.0` (SPDX ID подтверждён: spdx.org/licenses/PolyForm-Noncommercial-1.0.0.html) | да (сам exe) | сам `LICENSE` + строка `Required Notice:` — условие лицензии («Notices») | в exe не кладётся ни LICENSE, ни THIRD_PARTY_NOTICES.md → редистрибьютор скачивает exe и не получает обязательный текст. Решение — см. раздел 5 |
+| **Omnistash (свой код)** | `PolyForm-Noncommercial-1.0.0` (SPDX ID подтверждён: spdx.org/licenses/PolyForm-Noncommercial-1.0.0.html) | да (сам exe) | сам `LICENSE` + строка `Required Notice:` — условие лицензии («Notices») | закрыто разделом 5: `LICENSE` и `THIRD_PARTY_NOTICES.md` уезжают ассетом релиза рядом с exe (`tools/build_legal_pack.py`), тексты лицензий бандла вшиты внутрь exe (`Omnistash.spec`) |
 | **yt-dlp** | `Unlicense` (публичное достояние; текст LICENSE — «The Unlicense») | да, целиком (`collect_all("yt_dlp")`) | формально нет (Unlicense не требует NOTICE), но «The Unlicense» сам содержит AS-IS отказ | в notices написано верно. Внимание: экстракторы yt-dlp называют площадки по имени (в т.ч. взрослую) — это бандл чужого кода, не публичный текст проекта |
 | **pywebview** | `BSD-3-Clause` | да | да: «reproduce the above copyright notice ... in the documentation and/or other materials» | в THIRD_PARTY_NOTICES.md есть только «BSD 3-Clause» без имени правообладателя (Roman Sirokov, 2014-2017) — для BSD-3 нужно «имя + год + дисклеймер» |
 | **curl_cffi** | `MIT` (PyPI license expression = MIT; форк curl-impersonate — тоже MIT) | да (опционально: без пакета в среде сборки exe собирается без него) | да (MIT требует сохранить copyright+permission notice в каждой копии) | в notices написан как «MIT (в комплекте libcurl — curl license)»; отдельно нужно упоминание libcurl (MIT-style «curl license») и curl-impersonate (MIT), т.к. нативная либа входит в wheel |
@@ -472,7 +472,9 @@
       закрыт; бандл и пакет публикуются без провенанса, это сказано в тексте
       релиза.
 - [x] Рядом с exe — тексты лицензий бандла: каталог `licenses/` (34 файла, 27
-      компонентов) уезжает в релизный пакет по карте `licenses/manifest.json`.
+      компонентов) уезжает в релизный пакет по карте `licenses/manifest.json`
+      и вшивается в exe (`Omnistash.spec`: `datas += [("licenses", "licenses")]`) —
+      так текст условий получает и тот, кто получил копию exe мимо релиза.
       Каждый текст кладётся байт-в-байт и закреплён по sha256, источник назван:
       из `dist-info` установленного пакета (yt-dlp Unlicense, pywebview BSD-3,
       curl_cffi MIT, libcurl «curl license», curl-impersonate MIT, certifi MPL,
@@ -487,20 +489,52 @@
       причиной: SQLite (Public Domain), WebView2 (Microsoft не публикует текст
       отдельным файлом), hls.js (текст Apache-2.0 рядом с файлом в исходниках),
       ffmpeg и zeroconf (не поставляются), magic-wormhole (не входит в exe).
-- [ ] В собранном exe **нет** ffmpeg/ffprobe, нет `zeroconf` (.pyd/.dll), нет
-      wormhole/Twisted/PyNaCl — проверить по `build/Omnistash/EXE-00.toc` и
-      `PKG-00.toc` (список бинарей и datas).
-- [ ] Проверка, что PyInstaller и UPX не превращают exe в GPL: правок PyInstaller
-      нет; UPX-стаб официальный; собранный exe распространяется под PolyForm по
-      исключению PyInstaller и исключению UPX (для неизменённого стаба).
+      Состав exe сверяется автоматически: `tools/check_exe_contents.py` по
+      `EXE-00.toc`, `PKG-00.toc` и `PYZ-00.toc` требует каждый файл карты внутри
+      exe и отказывает, если каталога `licenses/` нет.
+- [x] В собранном exe **нет** ffmpeg/ffprobe, нет `zeroconf` (.pyd/.dll), нет
+      wormhole/Twisted/PyNaCl — проверено по `build/Omnistash/EXE-00.toc`,
+      `PKG-00.toc` и `PYZ-00.toc` на сборках из тега `b0.1.12` (2026-11-05).
+      `Omnistash.exe` ~30.4 МБ с вшитыми текстами лицензий бандла.
+      Размер сверки: три сборки одного дерева дали 30 432 624, 30 433 270 и
+      30 433 590 байт - размер не закрепляется, сверяется нижняя граница
+      20 МБ. Бинарей `ffmpeg.exe` и `ffprobe.exe` нет,
+      пакетов `zeroconf`, `twisted`, `pynacl`, `nacl` и `wormhole` нет (в PYZ есть
+      только наш модуль `app.wormhole` — он не несёт чужого кода). yt-dlp несёт
+      свой Python-модуль `yt_dlp/postprocessor/ffmpeg.py`: он вызывает внешний
+      ffmpeg, а не поставляет его, поэтому сверка ищет именно `.exe` и именно
+      чужие пакеты (путь вне репозитория), а не подстроку «ffmpeg». Проверка
+      автоматическая: шаг «Сверка состава exe по TOC» (`tools/check_exe_contents.py`)
+      в `beta.yml` и `release.yml` — после проверки размера артефакта и до хеша
+      для SLSA.
+- [x] Проверка, что PyInstaller и UPX не превращают exe в GPL: правок PyInstaller
+      нет (`Omnistash.spec` берёт bootloader и runtime как есть, сам PyInstaller
+      не правит);
+      собранный exe распространяется под PolyForm по исключению PyInstaller. UPX:
+      локально стаб не найден и `build/build_log.txt` его не упоминает — exe не
+      сжат (~30.4 МБ; размер меняется от сборки к сборке); в CI стаб не
+      ставится, сжатия нет. Если сборка
+      сжата,
+      стаб обязан быть официальным и неизменённым — `tools/check_exe_contents.py`
+      называет UPX замечанием по логу сборки, а не молчанием.
 - [x] `collect_all("curl_cffi")` в `Omnistash.spec`: нативная либа попадает в exe,
       если пакет есть в среде сборки (нет в среде — exe собирается без неё и
-      программа деградирует мягко, это названо в spec и в notices). Лиценз
+      программа деградирует мягко, это названо в spec и в notices). Локально
+      пакета нет, поэтому в собранной локально копии его либ нет — это
+      замечание сверки, а не отказ; в CI пакет ставится из `requirements.txt`
+      и входит. Лиценз
       покрыт: MIT самого curl_cffi, «curl license» libcurl и MIT
       curl-impersonate — все три текста лежат в `licenses/` и в юр-пакете.
-- [ ] Никаких ключей/секретов в exe: `client_secret` нет; `data_api_key`/`client_id`
-      — только значения, введённые пользователем на своей машине (Developer
-      Policies III.D.1: не встраивать credentials в open source и не шарить их).
+- [x] Никаких ключей/секретов в exe: `client_secret` нет ни в коде, ни в сборке
+      (`git grep -i client_secret` — только пояснительные строки в `app/oauth.py`,
+      `app/gui.py`, схеме настроек и тексте UI; ни одного значения или параметра);
+      `AIzaSy`/`ya29.` (формат ключей Google) в репозитории нет вовсе; `data_api_key`
+      и `client_id` — только значения, введённые пользователем на своей машине
+      (Developer Policies III.D.1: не встраивать credentials в open source и не
+      шарить их). Сверка по байтам exe ничего не доказывает: строк внутри не
+      видно, PYZ сжат zlib; поэтому проверка делается по исходникам и тестам — `tests/test_oauth.py`
+      (PKCE без `client_secret` в URL и в теле exchange), `tests/test_google_account.py`
+      (значения на диске — шифротекст, метки без секретов).
 
 ### 5.3 Как проверить, что возрастные и AUP-гейты не ослаблены
 
@@ -517,9 +551,9 @@
 - [ ] Нет новых путей, которые читают/пишут `legal.json` мимо `app/legal.py`.
 - [ ] Тесты: `test_gui.py` (LEG-3 факт согласия, датированность),
       `test_bulk_ops.py`, `test_catalog_add.py`, `test_site_catalog.py`,
-      `test_add_flow.py` — прогон перед релизом; добавить dedicated-тест
-      возрационного гейта (`tests/test_adult_gate.py`, из docs/PLAN-15H.md,
-      волна 2), если его ещё нет.
+      `test_add_flow.py` и `tests/test_adult_gate.py` (16 проверок, из
+      docs/PLAN-15H.md, волна 2) — прогон перед релизом: dedicated-тест
+      возрационного гейта есть, а сам прогон перед релизом ещё не сделан.
 - [x] Регрессия текстов: сверка публичных файлов на запретную лексику
       («обходит», «любой контент», «официальный клиент», имя взрослой площадки,
       её домены) даёт 0 совпадений, кроме внутренних реестров. Реализовано в
@@ -563,7 +597,9 @@
    `licenses/` (34 файла, 27 компонентов) уезжает в юр-пакет по карте
    `licenses/manifest.json` с пинами sha256 и с названным источником каждого
    текста; сверка имени лицензии по тексту файла - в
-   `tools/build_legal_pack.py --check`.
+   `tools/build_legal_pack.py --check`. Тот же набор вшит в exe
+   (`Omnistash.spec`), чтобы копии, переданные мимо релиза, тоже несли
+   условия; состав exe сверяется по TOC (`tools/check_exe_contents.py`).
 3. Выполнено: «как есть, без гарантий» и ответственность на человеке -
    README («Ответственность и гарантии») и AUP п.7; отказ от ответственности
    за убытки - раздел «No Liability» канонического текста лицензии;
@@ -574,9 +610,12 @@
    ffmpeg и zeroconf, README и FAQ про совместимость с сетевыми
    инструментами. Юридическая рамка relay в docs/mesh-platform §7 сверяется
    с реализацией отдельным пунктом §5.1 - он остаётся открытым.
-5. `tests/test_adult_gate.py` (из docs/PLAN-15H.md, волна 2) — сейчас гейты
-   покрываются только внутри `test_bulk_ops.py`, `test_catalog_add.py`,
-   `test_site_catalog.py`, `test_gui.py`.
+5. Выполнено: dedicated-тест возрационного гейта есть -
+   `tests/test_adult_gate.py` (16 проверок, из docs/PLAN-15H.md, волна 2):
+   вкладка скрыта без `adult_ok` с датой, фильтры общих списков исключают
+   `adult_ids()`, массовые эндпоинты держат 18+ гейт одинаково; те же гейты
+   покрываются внутри `test_bulk_ops.py`, `test_catalog_add.py`,
+   `test_site_catalog.py` и `test_gui.py`.
 
 **Переформулировать (высокий риск, дешёвая правка):**
 6. Выполнено: имя и домены взрослой площадки убраны из пользовательских и

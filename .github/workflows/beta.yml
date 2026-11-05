@@ -110,6 +110,12 @@ jobs:
         shell: bash
         # нижняя граница - защита от пустой/обрезанной сборки
         run: python -c "import os; s = os.path.getsize('Omnistash.exe'); print('Omnistash.exe', s, 'bytes'); assert s > 20_000_000, s"
+      # Состав exe (docs/LEGAL-REVIEW.md §5.2): сверка по TOC после размера
+      # и до хеша артефакта - если внутрь попал чужой бинарь (ffmpeg.exe) или
+      # потерялся текст лицензии бандла, это видно до публикации и до
+      # SLSA-подписи, а не после неё.
+      - name: Сверка состава exe по TOC
+        run: python tools/check_exe_contents.py
       - name: Хеш артефакта (формат sha256sum, base64 - для SLSA)
         id: hash
         shell: bash

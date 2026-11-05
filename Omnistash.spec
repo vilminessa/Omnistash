@@ -76,6 +76,16 @@ for pkg in ("yt_dlp", "webview", "curl_cffi"):
 # к тому же процессу (база, хранилища и очередь остаются здесь).
 datas += [("ui_src", "ui_src")]
 
+# Тексты лицензий бандла внутри exe: условия MIT/BSD/Apache-2.0/MIT-0/MPL
+# требуют, чтобы их получил каждый, кто получил копию программы - не только
+# тот, кто скачал релиз или репозиторий. Тот же набор уезжает юр-пакетом
+# (tools/build_legal_pack.py), поэтому сверяются обе дороги:
+# tools/check_exe_contents.py по TOC требует каждый файл карты
+# licenses/manifest.json внутри exe, а tools/build_legal_pack.py --check
+# сверяет тексты и их sha256 в пакете. Карта - единственный список того,
+# что уезжает; в рантайме и в CI ничего не скачивается.
+datas += [("licenses", "licenses")]
+
 a = Analysis(
     ['omnistash.py'],
     pathex=[],

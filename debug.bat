@@ -40,6 +40,7 @@ echo    [6] Проверка синтаксиса: python и node
 echo    [7] Собрать превью интерфейса и открыть
 echo    [8] Превью первого запуска (диалог выбора папки)
 echo    [E] Синхронизация без окна (--sync)
+echo    [F] Собрать exe и сверить состав по TOC
 echo  ---------------------------------------------------------------
 echo    [9] git: статус и последние коммиты
 echo    [A] git: добавить всё, закоммитить, запушить
@@ -65,6 +66,8 @@ if "%sel%"=="7" goto op_preview
 if "%sel%"=="8" goto op_preview_first
 if "%sel%"=="E" goto op_sync
 if "%sel%"=="e" goto op_sync
+if "%sel%"=="F" goto op_build_exe
+if "%sel%"=="f" goto op_build_exe
 if "%sel%"=="9" goto op_git_status
 if "%sel%"=="A" goto op_git_push
 if "%sel%"=="a" goto op_git_push
@@ -147,6 +150,20 @@ goto after
 :op_sync
 echo Синхронизация без окна (синк + очередь)...
 python omnistash.py --sync
+set "rc=%errorlevel%"
+goto after
+
+rem ---------------------------------------------------------------
+rem  Сборка exe и сверка его состава
+rem ---------------------------------------------------------------
+
+:op_build_exe
+echo Сборка exe (onefile) и сверка состава по TOC...
+if not exist build mkdir build
+python -m PyInstaller Omnistash.spec --distpath . --workpath build --noconfirm > build\build_log.txt 2>&1
+set "rc=%errorlevel%"
+if not "%rc%"=="0" goto after
+python tools\check_exe_contents.py
 set "rc=%errorlevel%"
 goto after
 

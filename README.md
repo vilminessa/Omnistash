@@ -217,7 +217,10 @@ python -m PyInstaller Omnistash.spec --distpath . --workpath build --noconfirm
 Notice), `README.md`, `THIRD_PARTY_NOTICES.md`, `docs/ACCEPTABLE_USE.md`,
 `docs/LEGAL_FAQ.md`, текст лицензии вендора `hls.js` и тексты лицензий бандла
 (`licenses/` с картой `licenses/manifest.json`: каждый файл кладётся
-байт-в-байт, карта называет источник текста и его sha256). Инструмент ничего не
+байт-в-байт, карта называет источник текста и его sha256). Те же тексты
+вшиты внутрь exe (`Omnistash.spec`), чтобы копия exe, переданная мимо релиза,
+несла условия MIT/BSD/Apache/MIT-0/MPL с собой; состав exe сверяется по TOC
+(`python tools/check_exe_contents.py`). Инструмент ничего не
 скачивает: читает репозиторий и сверяет `LICENSE` с каноническим текстом
 PolyForm по закреплённому sha256 (`docs/POLYFORM-NONCOMMERCIAL-1.0.0.txt`),
 требует, чтобы уведомления называли все компоненты распространяемого состава
@@ -238,9 +241,12 @@ exe и прямые зависимости из `requirements.txt`, и отка�
   сборка (`tools/build_legal_pack.py`);
 - **beta** — по тегу `b*` (бета-линия, пре-релиз): сверка формата тега,
   что тег в main, тесты, пины вендора и сборка бандла (проба), сверка
-  юр-пакета, затем сборка exe; перед сборкой версия в рабочее дерево вшивается
-  из тега (`tools/stamp_version.py`); бандл и юр-пакет уезжают в релиз
-  отдельными ассетами;
+  юр-пакета, затем сборка exe: после проверки размера артефакта идёт шаг
+  «Сверка состава exe по TOC» (`tools/check_exe_contents.py`: чужие бинари,
+  клиентские файлы раздачи и тексты лицензий бандла внутри exe) - он стоит
+  до хеша для SLSA и до публикации ассетов; перед сборкой версия в рабочее
+  дерево вшивается из тега (`tools/stamp_version.py`); бандл и юр-пакет
+  уезжают в релиз отдельными ассетами;
 - **release** — по тегу `v*` или вручную (*workflow_dispatch*): проверки →
   `Omnistash.exe` + `omnistash-client.zip` + `omnistash-notices.zip` → ассеты
   релиза → SLSA-провенанс и `gh attestation verify`. Провенанс считается по exe
@@ -269,6 +275,7 @@ debug.bat B          # убить процессы Omnistash
 debug.bat C          # копия базы библиотеки в %LOCALAPPDATA%\Omnistash\backup
 debug.bat D          # открыть папку профиля
 debug.bat E          # синхронизация без окна (--sync)
+debug.bat F          # собрать exe и сверить его состав по TOC
 ```
 
 **Превью интерфейса** (`tools/build_preview.py` → `preview.html`, в git не
@@ -975,7 +982,7 @@ Register-ScheduledTask -TaskName "Omnistash Sync" `
 Тесты:
 
 ```powershell
-python tools/run_tests.py                          # офлайн, 1637 проверок,
+python tools/run_tests.py                          # офлайн, 1681 проверок,
 #   параллельно по ядрам (модули независимы: свой профиль во временной папке);
 #   --jobs 1 - последовательно, --only test_i18n - выборка модулей
 $env:OMNISTASH_LIVE='1'; python -m unittest tests.test_live   # на живом YouTube

@@ -7,9 +7,14 @@
 ## Техническая часть
 
 ```powershell
-python tools/run_tests.py                    # офлайн, 1637 проверок,
-                                             # параллельно по ядрам
+python tools/run_tests.py                    # офлайн, параллельно по ядрам
                                              # (--jobs 1 - последовательно)
+python tools/build_preview.py                # превью интерфейса
+python tools/build_client.py --check         # пин вендора и состав бандла
+python tools/build_legal_pack.py --check     # состав юр-пакета
+python tools/check_exe_contents.py           # состав собранного exe по TOC
+                                             # требует сборки: python -m
+                                             # PyInstaller Omnistash.spec
 ```
 
 - ветка от `main`, в одном PR — одна тема;
