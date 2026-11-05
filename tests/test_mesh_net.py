@@ -960,5 +960,49 @@ class TestEncryptedFetch(MeshNetCase):
         self.assertTrue((dest / "Клип [vid000000001].mp4").is_file())
 
 
+class TestSasConfirmationSides(MeshNetCase):
+    """Односторонность подтверждения SAS (ограничение названо в §4 docs/mesh-platform.md).
+
+    Сервер считает те же слова и показывает их оператору в журнале, но
+    доверие НЕ записывает: verified_via="sas" пишет только инициатор после
+    подтверждения человека (gui.trust_sas_confirm). Клиент до подтверждения
+    не пишет пин адреса - устройство запоминается сверкой, а не её началом.
+    Если эти ветки молча перестроятся (сервер начнёт подтверждать сам или
+    пин появится до сверки), проверка отказывает и требует пересмотра
+    текстов - поведение меняется, а не только вид.
+    """
+
+    def test_server_shows_words_but_writes_no_trust(self):
+        self.seed_holder()
+        status, _headers, body = self.raw_get(
+            "/sas/?eph=" + "ab" * 32 + "&id=" + "cd" * 32 + "&method=words")
+        self.assertEqual(status, 200, body)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(payload.get("method"), "words",
+                         "сервер обязан вернуть тот же формат сверки")
+        self.assertEqual(len(payload.get("eph") or ""), 64,
+                         "эфемерный ключ сервера (32 байта hex) обязан "
+                         "присутствовать в ответе")
+        rows = self.db_a.conn.execute(
+            "SELECT COUNT(*) AS c FROM truststore").fetchone()["c"]
+        self.assertEqual(rows, 0,
+                         "сервер записал доверие сам - подтверждение стало "
+                         "неявным со стороны принимающей машины")
+        import inspect
+        src = inspect.getsource(server._Handler._send_sas)
+        self.assertIn('log(f"SAS[', src,
+                      "сервер перестал журналировать слова для оператора - "
+                      "«сверьте на его экране» исчезло из принимающей стороны")
+
+    def test_no_pin_before_human_confirmation(self):
+        self.seed_holder()
+        addr = f"127.0.0.1:{self.port}"
+        result = client.sas_begin(addr, method="words")
+        self.assertEqual(len(result["shown"]), 12, result)
+        self.assertEqual(channel_mod.pin_get(addr), "",
+                         "пин адреса появился до подтверждения человека - "
+                         "устройство запомнилось бы без сверки")
+
+
 if __name__ == "__main__":
     unittest.main()
