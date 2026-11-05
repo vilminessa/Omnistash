@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
 import 'api_client.dart';
+import 'theme.dart';
 
 /// W0 spike: окно на Flutter (Impeller) поверх HTTP-фасада Omnistash.
 ///
@@ -21,6 +22,14 @@ void main() {
     api: _apiFromEnv(env),
     rows: int.tryParse(env['OMNISTASH_SPIKE_ROWS'] ?? '') ?? 2000,
     scrollSeconds: double.tryParse(env['OMNISTASH_SPIKE_SECONDS'] ?? '') ?? 3.0,
+    // Тема из токенов реестра (app/themes.py): выбор человека - две темы,
+    // настройка theme. Стенд переключает её переменной окружения, чтобы
+    // мерить обе палитры одним бинарем; битое значение -> дефолтная тема.
+    themeId: env['OMNISTASH_SPIKE_THEME'] ?? kDefaultThemeId,
+    // Geometry стенда W0 (высота ряда 44 px) остаётся той, что мерялась: числа
+    // в docs/FLUTTER-TRANSITION.md §9 описывают её; токены высоты строки
+    // (theme.dart: rowHeight) переснимаются на волне W2.
+    rowExtent: double.tryParse(env['OMNISTASH_SPIKE_ROW_EXTENT'] ?? '') ?? 44.0,
   ));
 }
 
@@ -38,37 +47,39 @@ ApiClient? _apiFromEnv(Map<String, String> env) {
 
 class SpikeApp extends StatelessWidget {
   const SpikeApp({super.key, required this.started, required this.api,
-    required this.rows, required this.scrollSeconds});
+    required this.rows, required this.scrollSeconds, required this.themeId,
+    required this.rowExtent});
 
   final Stopwatch started;
   final ApiClient? api;
   final int rows;
   final double scrollSeconds;
+  final String themeId;
+  final double rowExtent;
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Omnistash W0 spike',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        brightness: Brightness.dark,
-        colorSchemeSeed: const Color(0xFF22D3EE),
-      ),
+      // Никаких seed-цветов и литералов: палитра берётся из токенов темы
+      // (theme_tokens.dart), а не из colorSchemeSeed.
+      theme: buildTheme(themeId),
       home: SpikeHome(started: started, api: api, rows: rows,
-        scrollSeconds: scrollSeconds),
+        scrollSeconds: scrollSeconds, rowExtent: rowExtent),
     );
   }
 }
 
 class SpikeHome extends StatefulWidget {
   const SpikeHome({super.key, required this.started, required this.api,
-    required this.rows, required this.scrollSeconds});
+    required this.rows, required this.scrollSeconds, required this.rowExtent});
 
   final Stopwatch started;
   final ApiClient? api;
   final int rows;
   final double scrollSeconds;
+  final double rowExtent;
 
   @override
   State<SpikeHome> createState() => _SpikeHomeState();
@@ -206,11 +217,12 @@ class _SpikeHomeState extends State<SpikeHome> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Theme.of(context).colorScheme.surface,
+      // Подложка окна - роль --bg из токенов темы, не литерал.
+      backgroundColor: Theme.of(context).colorScheme.surfaceContainerLowest,
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.all(8.0),
+            padding: EdgeInsets.all(kMetrics.s3),
             child: Row(
               children: [
                 Text('Библиотека', style: Theme.of(context).textTheme.titleMedium),
@@ -224,7 +236,13 @@ class _SpikeHomeState extends State<SpikeHome> {
             child: ListView.builder(
               controller: _scroll,
               itemCount: widget.rows,
-              itemExtent: 44.0,
+              // Высота ряда стенда: W0 мерялась с 44 px, и числа в
+              // docs/FLUTTER-TRANSITION.md §9 описывают именно этот geometry.
+              // Формула токенов (rowHeight: max(rowMin, fontSize * rowFactor))
+              // ложится на волне W2 со списком программы, тогда мерка
+              // переснимается тем же стендом. Стенд переживает её переменной
+              // окружения, чтобы один бинарь мерился и с 44, и с токеном.
+              itemExtent: widget.rowExtent,
               itemBuilder: (context, index) {
                 _listBuilt++;
                 return ListTile(
@@ -237,6 +255,8 @@ class _SpikeHomeState extends State<SpikeHome> {
             ),
           ),
           SizedBox(
+            // Панель журнала в стенде фиксирована: это geometry стенда, а не
+            // токен палитры (в окне журнал размечается волной W2).
             height: 110,
             child: ListView(
               children: [
