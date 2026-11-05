@@ -1,0 +1,18 @@
+{
+  "note": "Пин Flutter SDK для волн W0/W5: версия и sha256 архива сверены по официальному реестру релизов и по скачанному файлу (замер на машине человека 05.11.2026). Рантайм ничего не скачивает: SDK нужен только при сборке.",
+  "channel": "stable",
+  "version": "3.47.9",
+  "framework_revision": "c197ca5199e9ee5661e865596c9c07294dfab51c",
+  "engine_hash": "9e025265bef30b838c0c1b68cad19decf97048f2",
+  "engine_revision": "89c39edfdf",
+  "dart_sdk_version": "3.13.7",
+  "devtools_version": "2.60.0",
+  "archive": "stable/windows/flutter_windows_3.47.9-stable.zip",
+  "archive_url": "https://storage.googleapis.com/flutter_infra_release/releases/stable/windows/flutter_windows_3.47.9-stable.zip",
+  "sha256": "d8e2b5977e09082c6440f89dc1aa887b94c8fbcc3b39222797046295a3f68a9e",
+  "archive_bytes": 1939451626,
+  "extracted_files": 18824,
+  "extracted_bytes": 3491719203,
+  "verified_date": "2026-11-05",
+  "registry_source": "https://storage.googleapis.com/flutter_infra_release/releases/releases_windows.json"
+}
