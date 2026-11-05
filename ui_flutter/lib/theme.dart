@@ -182,10 +182,45 @@ Duration durationToast() => durationOf(kMetrics.durModerate02);
 Duration durationExpand() => durationOf(kMetrics.durSlow01);
 Duration durationScrim() => durationOf(kMetrics.durSlow02);
 
+/// Имя и размер текста текущей темы: Material не хранит id схемы, поэтому
+/// клиент кладёт identity сам. Значения приходят из настройки (get_initial),
+/// а не из литералов; границы чтения - kFontBounds (app/themes.py).
+class ThemeIdentity extends ThemeExtension<ThemeIdentity> {
+  const ThemeIdentity({required this.id, required this.fontSizePx});
+
+  final String id;
+  final double fontSizePx;
+
+  @override
+  ThemeIdentity copyWith({String? id, double? fontSizePx}) => ThemeIdentity(
+      id: id ?? this.id, fontSizePx: fontSizePx ?? this.fontSizePx);
+
+  @override
+  ThemeIdentity lerp(ThemeIdentity? other, double t) {
+    if (other == null) return this;
+    return ThemeIdentity(
+      id: t < 0.5 ? id : other.id,
+      fontSizePx: fontSizePx + (other.fontSizePx - fontSizePx) * t,
+    );
+  }
+}
+
+/// id текущей темы из контекста (дефолт реестра, если identity не положен).
+String themeIdOf(BuildContext context) =>
+    Theme.of(context).extension<ThemeIdentity>()?.id ?? kDefaultThemeId;
+
+/// Размер текста из настройки, уже в границах kFontBounds.
+double fontPxOf(BuildContext context) =>
+    Theme.of(context).extension<ThemeIdentity>()?.fontSizePx ?? kMetrics.fontSize;
+
 /// Тема по значению настройки: битое значение -> дефолтная тема, как
-/// app/themes.py: normalize (окно не «серый экран»).
-ThemeData buildTheme(String? themeId) {
+/// app/themes.py: normalize (окно не «серый экран»). Размер текста
+/// ограничивается границами реестра (FONT_SIZE_MIN..MAX) тем же правилом,
+/// что на стороне бэкенда.
+ThemeData buildTheme(String? themeId, {double? fontSizePx}) {
   final id = normalizeThemeId(themeId);
+  final size = _clamped(fontSizePx ?? kMetrics.fontSize,
+      kFontBounds.sizeMin, kFontBounds.sizeMax);
   final scheme = schemeFor(id);
   return ThemeData(
     useMaterial3: true,
@@ -193,13 +228,24 @@ ThemeData buildTheme(String? themeId) {
     colorScheme: scheme,
     scaffoldBackgroundColor: roleColor(id, 'bg'),
     dividerColor: roleColor(id, 'line'),
-    textTheme: textThemeFor(id),
+    textTheme: textThemeFor(id).apply(bodyColor: roleColor(id, 'text')),
     cardTheme: cardThemeFor(id),
     inputDecorationTheme: decorationThemeFor(id),
     buttonTheme: buttonThemeFor(id),
     progressIndicatorTheme: progressThemeFor(id),
     splashFactory: NoSplash.splashFactory,
+    extensions: <ThemeExtension<dynamic>>[
+      ThemeIdentity(id: id, fontSizePx: size),
+    ],
   );
+}
+
+/// Граница числа - тот же приём, что app/themes.py: _number (битое значение
+/// возвращается дефолтом, а не падает).
+double _clamped(double value, double min, double max) {
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
 }
 
 /// Контраст роли к подложке по тем же парам, что бэкенд (themes.CONTRAST_PAIRS).

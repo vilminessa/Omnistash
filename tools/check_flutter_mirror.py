@@ -31,6 +31,21 @@ import build_flutter_theme as gen  # noqa: E402 - путь добавлен вы
 
 TOKENS = ROOT / "ui_flutter" / "lib" / "theme_tokens.dart"
 LIB = ROOT / "ui_flutter" / "lib"
+CSS = ROOT / "ui_src" / "app.css"
+JS = ROOT / "ui_src" / "app.js"
+REPO = ROOT / "app" / "repo.py"
+
+# Production-код Flutter: обязан читать токены, а не писать литералы.
+# main.dart и spike-файлы здесь нет намеренно: стенд W0 держит фиксированную
+# геометрию списка (высота ряда 44 px), и его числа описаны в
+# docs/FLUTTER-TRANSITION.md §9 - это мерка, а не дизайн-токен.
+PRODUCTION_FILES = ("theme.dart", "library_view.dart", "app.dart")
+
+# Статусы без отдельного правила в CSS (.status[data-s=...]) читаются базовой
+# подписью --muted: known и unavailable не имеют своей роли - это названо
+# здесь же, а не молча.
+DEFAULT_STATUS_ROLE = "muted"
+DEFAULT_STATUSES = ("known", "unavailable")
 
 HEX_LITERAL = re.compile(r"0x[0-9A-Fa-f]{6,8}")
 SIZE_LITERAL = re.compile(r"(fontSize|letterSpacing|height):\s*[\d.]+")
@@ -168,6 +183,113 @@ def metrics_problems(parsed: dict) -> list[str]:
     return problems
 
 
+def _clean_css(text: str) -> str:
+    """CSS без комментариев: комментарии объясняют ловушки и не код."""
+    return re.sub(r"/\s*/\*.*?\*/\s*", "", text, flags=re.S)
+
+
+def css_status_roles() -> dict[str, str]:
+    """Роли цвета статусов из ui_src/app.css (.status[data-s=...]).
+
+    Статусы без отдельного правила (known, unavailable) читаются базовой
+    подписью `.status { color: ... }` - это названо, а не молча.
+    """
+    text = _clean_css(CSS.read_text(encoding="utf-8"))
+    explicit = dict(re.findall(
+        r'\.status\[data-s="([a-z]+)"\]\s*\{\s*color:\s*var\(--([a-z0-9-]+)\)',
+        text))
+    base = re.search(r'\.status\s*\{([^}]*)\}', text)
+    base_role = None
+    if base:
+        match = re.search(r'color:\s*var\(--([a-z0-9-]+)\)', base.group(1))
+        base_role = match.group(1) if match else None
+    roles = dict(explicit)
+    for status in DEFAULT_STATUSES:
+        roles.setdefault(status, base_role or DEFAULT_STATUS_ROLE)
+    if not roles:
+        raise AssertionError("в ui_src/app.css нет правил .status[data-s=...] - "
+                             "сверка карты статусов потеряла источник")
+    return roles
+
+
+def dart_status_roles(text: str) -> dict[str, str]:
+    match = re.search(
+        r"const Map<String, String> kStatusRoles = <String, String>\{(.*)\}",
+        _clean_css(text), flags=re.S)
+    if not match:
+        raise AssertionError("в library_view.dart нет kStatusRoles - карта "
+                             "цветов статусов потеряна")
+    return dict(re.findall(r"'([a-z]+)':\s*'([a-z0-9-]+)'", match.group(1)))
+
+
+def status_roles_problems(view_text: str | None = None) -> list[str]:
+    """Карта статусов Flutter совпадает с CSS (тот же источник правды)."""
+    expected = css_status_roles()
+    text = (view_text if view_text is not None
+            else (LIB / "library_view.dart").read_text(encoding="utf-8"))
+    got = dart_status_roles(text)
+    problems = []
+    for status, role_name in sorted(expected.items()):
+        value = got.get(status)
+        if value is None:
+            problems.append(f"статус {status}: роли нет в kStatusRoles - "
+                            f"CSS красит её как {role_name}")
+        elif value != role_name:
+            problems.append(f"статус {status}: Flutter {value} != CSS {role_name}")
+    extra = sorted(set(got) - set(expected))
+    if extra:
+        problems.append(f"kStatusRoles держит статусы вне CSS: {extra}")
+    for role_name in sorted(set(got.values())):
+        for theme_id in themes.ids():
+            roles = {key.lstrip("-") for key in themes.css_vars(theme_id)}
+            if role_name not in roles:
+                problems.append(f"kStatusRoles: роль {role_name} не в теме "
+                                f"{theme_id} - статус строки потеряет цвет")
+    return problems
+
+
+def contract_source_problems(view_text: str | None = None) -> list[str]:
+    """Форма ответа списка и размеры страниц/опроса сверяются с источниками.
+
+    Ключ `rows` и `total` - из app/repo.py: list_videos; размер страницы -
+    из `PAGE` в ui_src/app.js; период опроса - из `POLL_MS` там же. Клиент
+    обязан повторять значения, а не изобретать свои.
+    """
+    view = (view_text if view_text is not None
+            else (LIB / "library_view.dart").read_text(encoding="utf-8"))
+    repo_src = REPO.read_text(encoding="utf-8")
+    js_src = JS.read_text(encoding="utf-8")
+    problems = []
+    if not re.search(r"const String kRowsKey\s*=\s*'rows'", view):
+        problems.append("library_view.dart: ключ строк не 'rows' - форма ответа "
+                        "фасада выдумана клиентом")
+    if '"rows": rows' not in repo_src:
+        problems.append("app/repo.py: list_videos не возвращает \"rows\" - "
+                        "сверка потеряла источник формы ответа")
+    if '"total":' not in repo_src:
+        problems.append("app/repo.py: list_videos не возвращает \"total\" - "
+                        "сверка потеряла источник счётчика строк")
+    js_page = re.search(r"var PAGE\s*=\s*(\d+)", js_src)
+    dart_page = re.search(r"const int kPageLimit\s*=\s*(\d+)", view)
+    if not js_page or not dart_page:
+        problems.append("размер страницы не найден в одном из источников "
+                        "(ui_src/app.js: PAGE или library_view: kPageLimit)")
+    elif js_page.group(1) != dart_page.group(1):
+        problems.append(f"kPageLimit {dart_page.group(1)} != PAGE "
+                        f"{js_page.group(1)} из ui_src/app.js: два клиента тянут "
+                        "разное число строк за запрос")
+    js_poll = re.search(r"var POLL_MS\s*=\s*(\d+)", js_src)
+    dart_poll = re.search(r"const int kPollIntervalMs\s*=\s*(\d+)", view)
+    if not js_poll or not dart_poll:
+        problems.append("период опроса не найден в одном из источников "
+                        "(ui_src/app.js: POLL_MS или library_view: kPollIntervalMs)")
+    elif js_poll.group(1) != dart_poll.group(1):
+        problems.append(f"kPollIntervalMs {dart_poll.group(1)} != POLL_MS "
+                        f"{js_poll.group(1)} из ui_src/app.js: состояние опрачивается "
+                        "с разной частотой")
+    return problems
+
+
 def generation_problems() -> list[str]:
     """Ассет совпадает с генерацией байт-в-байт (детерминированный вывод)."""
     if not TOKENS.is_file():
@@ -180,35 +302,43 @@ def generation_problems() -> list[str]:
 
 
 def literal_problems(lib: pathlib.Path = LIB) -> list[str]:
-    """Production-код Flutter не держит литералов цвета, размера и длительности."""
+    """Production-код Flutter не держит литералов цвета, размера и длительности.
+
+    Стенд (main.dart и spike-файлы) под проверкой не стоит: его геометрия
+    названа в docs/FLUTTER-TRANSITION.md §9 и в README, это мерка, а не токен.
+    """
     problems = []
-    tokens_file = lib / "theme_tokens.dart"
-    for path in sorted(lib.glob("*.dart")):
-        if path == tokens_file:
+    for name in PRODUCTION_FILES:
+        path = lib / name
+        if not path.is_file():
+            problems.append(f"{name} не построен: production-код темы и экрана "
+                            "потерян")
+            continue
+        if path.name == "theme_tokens.dart":
             continue
         text = path.read_text(encoding="utf-8")
-        if path.name == "theme.dart":
-            for match in HEX_LITERAL.finditer(text):
-                problems.append(f"{path.name}: hex-литерал {match.group(0)} - "
-                                "роль должна читаться из токенов темы")
-            for match in SIZE_LITERAL.finditer(text):
-                problems.append(f"{path.name}: размер написан числом "
-                                f"({match.group(0)}) - читается из kMetrics")
-            for match in DURATION_LITERAL.finditer(text):
-                problems.append(f"{path.name}: длительность написана числом "
-                                f"({match.group(0)}) - читается из kMetrics")
-            names = set(ROLE_CALL.findall(text))
-            known = {name.lstrip("-") for name in themes.PALETTE_VARS}
-            unknown = sorted(names - known)
-            if unknown:
-                problems.append(f"{path.name}: имена ролей вне реестра "
-                                f"{unknown}")
-            for name in sorted(names):
-                for theme_id in themes.ids():
-                    roles = {key.lstrip("-") for key in themes.css_vars(theme_id)}
-                    if name not in roles:
-                        problems.append(f"{path.name}: роль {name} не в теме "
-                                        f"{theme_id} - часть окна потеряет цвет")
+        for match in HEX_LITERAL.finditer(text):
+            problems.append(f"{path.name}: hex-литерал {match.group(0)} - роль "
+                            "должна читаться из токенов темы")
+        for match in SIZE_LITERAL.finditer(text):
+            problems.append(f"{path.name}: размер написан числом "
+                            f"({match.group(0)}) - читается из kMetrics или из "
+                            "настройки (ThemeIdentity)")
+        for match in DURATION_LITERAL.finditer(text):
+            problems.append(f"{path.name}: длительность написана числом "
+                            f"({match.group(0)}) - читается из kMetrics или из "
+                            "канонного POLL_MS")
+        names = set(ROLE_CALL.findall(text))
+        known = {name.lstrip("-") for name in themes.PALETTE_VARS}
+        unknown = sorted(names - known)
+        if unknown:
+            problems.append(f"{path.name}: имена ролей вне реестра {unknown}")
+        for role_name in sorted(names):
+            for theme_id in themes.ids():
+                roles = {key.lstrip("-") for key in themes.css_vars(theme_id)}
+                if role_name not in roles:
+                    problems.append(f"{path.name}: роль {role_name} не в теме "
+                                    f"{theme_id} - часть окна потеряет цвет")
     return problems
 
 
@@ -250,6 +380,8 @@ def problems() -> list[str]:
     out += registry_problems(parsed)
     out += metrics_problems(parsed)
     out += literal_problems()
+    out += status_roles_problems()
+    out += contract_source_problems()
     out += contract_problems()
     return out
 

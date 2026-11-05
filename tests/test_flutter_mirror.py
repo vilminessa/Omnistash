@@ -18,10 +18,16 @@
   * проводка вызовов фасада в Dart повторяет канонную форму тела
     (пустое тело `{}` когда аргумента нет, `[аргумент]` когда есть -
     ui_src/app.js:547);
+  * экран библиотеки читает форму ответа фасада из app/repo.py (`rows`,
+    `total`), размер страницы из `PAGE` и период опроса из `POLL_MS`
+    ui_src/app.js - не изобретает свои числа;
+  * карта цветов статусов строки совпадает с правилами `.status[data-s=...]`
+    в ui_src/app.css (known и unavailable читаются базовой подписью muted);
   * choices поля theme в схеме настроек - тот же порядок, что список тем в
     Flutter, иначе настройка не применится к Flutter-окну;
-  * расхождение называется: битый hex, переставленный порядок id и изменённая
-    метрика дают отказ с текстом, а не молчание.
+  * расхождение называется: битый hex, переставленный порядок id, изменённая
+    метрика, изменённый размер страницы, выдуманный ключ `rows` и литерал в
+    production-коде дают отказ с текстом, а не молчание.
 """
 
 import pathlib
@@ -108,15 +114,82 @@ class FlutterMirrorTest(unittest.TestCase):
                 self.assertTrue(self.parsed["metrics"][name].startswith("Cubic("),
                                 f"{name}: кривая движения не перенесена из CSS")
 
-    def test_theme_code_has_no_literals(self):
-        """theme.dart читает токены, а не пишет цвета и размеры числом."""
+    def test_production_code_has_no_literals(self):
+        """production-код Flutter читает токены, а не пишет цвета и размеры числом."""
         self.assertEqual(mirror.literal_problems(), [], mirror.literal_problems())
-        text = mirror.LIB.joinpath("theme.dart").read_text(encoding="utf-8")
-        names = set(mirror.ROLE_CALL.findall(text))
-        self.assertTrue(names, "theme.dart не читает ни одной роли темы - "
-                               "палитра берётся не из токенов")
-        self.assertTrue(names <= {name.lstrip("-") for name in themes.PALETTE_VARS},
-                        f"theme.dart читает роли вне реестра: {sorted(names)}")
+        for name in mirror.PRODUCTION_FILES:
+            text = (mirror.LIB / name).read_text(encoding="utf-8")
+            names = set(mirror.ROLE_CALL.findall(text))
+            self.assertTrue(
+                names <= {key.lstrip("-") for key in themes.PALETTE_VARS},
+                f"{name} читает роли вне реестра: {sorted(names)}")
+        theme_text = (mirror.LIB / "theme.dart").read_text(encoding="utf-8")
+        self.assertTrue(mirror.ROLE_CALL.findall(theme_text),
+                        "theme.dart не читает ни одной роли темы - палитра "
+                        "берётся не из токенов")
+
+    def test_status_roles_match_css(self):
+        """Карта цветов статусов строки - тот же источник, что app.css."""
+        css = mirror.css_status_roles()
+        view = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
+        self.assertEqual(mirror.dart_status_roles(view), css,
+                         "карта статусов Flutter расходится с ui_src/app.css")
+        self.assertEqual(mirror.status_roles_problems(), [],
+                         mirror.status_roles_problems())
+        # known и unavailable не имеют отдельного правила - базовая подпись.
+        self.assertEqual(css["known"], "muted",
+                         "статус known должен читаться ролью muted")
+        self.assertEqual(css["unavailable"], "muted",
+                         "статус unavailable должен читаться ролью muted")
+
+    def test_page_and_poll_match_the_canonical_sources(self):
+        """Размер страницы и период опроса взяты из ui_src/app.js, не из головы."""
+        self.assertEqual(mirror.contract_source_problems(), [],
+                         mirror.contract_source_problems())
+        js = (SRC / "ui_src" / "app.js").read_text(encoding="utf-8")
+        view = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
+        self.assertRegex(js, r"var PAGE\s*=\s*120",
+                         "источник PAGE не назван в ui_src/app.js")
+        self.assertIn("const int kPageLimit = 120;", view,
+                      "Flutter тянет не ту страницу: PAGE из app.js не применён")
+        self.assertRegex(js, r"var POLL_MS\s*=\s*500",
+                         "источник POLL_MS не назван в ui_src/app.js")
+        self.assertIn("const int kPollIntervalMs = 500;", view,
+                      "Flutter опрашивает с другой частотой: POLL_MS из app.js")
+
+    def test_rows_key_matches_the_repo_source(self):
+        """Форма ответа списка строк сверяется с app/repo.py: list_videos."""
+        repo_src = (SRC / "app" / "repo.py").read_text(encoding="utf-8")
+        self.assertIn('"rows": rows', repo_src,
+                      "app/repo.py не возвращает rows - источник формы потерян")
+        self.assertIn('"total":', repo_src,
+                      "app/repo.py не возвращает total - счётчик строк потерян")
+        view = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
+        self.assertIn("const String kRowsKey = 'rows'", view,
+                      "Flutter читает не rows: форма ответа выдумана клиентом")
+
+    def test_broken_status_map_is_named(self):
+        view = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
+        broken = view.replace("'downloaded': 'ok'", "'downloaded': 'info'")
+        problems = mirror.status_roles_problems(broken)
+        self.assertTrue(any("downloaded" in line for line in problems),
+                        f"расхождение статуса не названо: {problems}")
+
+    def test_changed_page_size_is_named(self):
+        view = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
+        broken = view.replace("const int kPageLimit = 120;",
+                              "const int kPageLimit = 300;")
+        problems = mirror.contract_source_problems(broken)
+        self.assertTrue(any("kPageLimit" in line for line in problems),
+                        f"расхождение страницы не названо: {problems}")
+
+    def test_invented_rows_key_is_named(self):
+        view = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
+        broken = view.replace("const String kRowsKey = 'rows'",
+                              "const String kRowsKey = 'videos'")
+        problems = mirror.contract_source_problems(broken)
+        self.assertTrue(any("rows" in line for line in problems),
+                        f"выдуманный ключ не назван: {problems}")
 
     def test_facade_contract_matches_the_canonical_body(self):
         """Dart шлет тело той же формы, что браузерный клиент и сервер."""
@@ -163,6 +236,10 @@ class FlutterMirrorTest(unittest.TestCase):
         (tmp / "theme.dart").write_text(
             "const Color c = Color(0xff123456);\n"
             "const TextStyle t = TextStyle(fontSize: 13);\n", encoding="utf-8")
+        (tmp / "library_view.dart").write_text(
+            "const Map<String, String> kStatusRoles = <String, String>{\n"
+            "  'downloaded': 'ok',\n};\n", encoding="utf-8")
+        (tmp / "app.dart").write_text("void main() {}\n", encoding="utf-8")
         problems = mirror.literal_problems(tmp)
         self.assertEqual(len(problems), 2, f"литералы не названы: {problems}")
         self.assertTrue(any("hex-литерал" in line for line in problems), problems)

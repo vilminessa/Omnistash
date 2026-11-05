@@ -8,7 +8,18 @@ import 'package:crypto/crypto.dart';
 /// (`{}` когда аргумента нет), заголовок `Bearer <токен>`.
 /// Скоупы решает сервер; здесь клиент только называет цель и читает
 /// честный отказ с причиной.
-class ApiClient {
+/// Клиент HTTP-фасада `--serve`: POST /api/<имя>, Bearer, доверие по пину.
+///
+/// Проводка повторяет браузерный клиент (ui_src/app.js:547) и серверный
+/// разбор тела (app/http/server.py: _body): `{}` когда аргумента нет,
+/// `[аргумент]` когда есть. Скоупы решает сервер, клиент только называет
+/// цель; отказ скоупа приходит текстом ответа и показывается как причина.
+abstract class Facade {
+  /// Вызвать цель фасада. `arg == null` - цель без аргумента (тело `{}`).
+  Future<Map<String, Object?>> call(String name, Object? arg);
+}
+
+class ApiClient implements Facade {
   ApiClient({
     required this.host,
     required this.port,
@@ -26,6 +37,7 @@ class ApiClient {
   /// DER-пин годится только для одного прогона).
   final String certSha256;
 
+  @override
   Future<Map<String, Object?>> call(String name, Object? arg) async {
     final client = HttpClient()..badCertificateCallback = _trust;
     try {

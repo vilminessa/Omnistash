@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
 import 'api_client.dart';
+import 'app.dart';
 import 'theme.dart';
 
 /// W0 spike: окно на Flutter (Impeller) поверх HTTP-фасада Omnistash.
@@ -17,20 +18,30 @@ import 'theme.dart';
 void main() {
   final started = Stopwatch()..start();
   final env = Platform.environment;
-  runApp(SpikeApp(
-    started: started,
-    api: _apiFromEnv(env),
-    rows: int.tryParse(env['OMNISTASH_SPIKE_ROWS'] ?? '') ?? 2000,
-    scrollSeconds: double.tryParse(env['OMNISTASH_SPIKE_SECONDS'] ?? '') ?? 3.0,
-    // Тема из токенов реестра (app/themes.py): выбор человека - две темы,
-    // настройка theme. Стенд переключает её переменной окружения, чтобы
-    // мерить обе палитры одним бинарем; битое значение -> дефолтная тема.
-    themeId: env['OMNISTASH_SPIKE_THEME'] ?? kDefaultThemeId,
-    // Geometry стенда W0 (высота ряда 44 px) остаётся той, что мерялась: числа
-    // в docs/FLUTTER-TRANSITION.md §9 описывают её; токены высоты строки
-    // (theme.dart: rowHeight) переснимаются на волне W2.
-    rowExtent: double.tryParse(env['OMNISTASH_SPIKE_ROW_EXTENT'] ?? '') ?? 44.0,
-  ));
+  if (env['OMNISTASH_SPIKE'] == '1') {
+    // Измерительный стенд W0 (мерку снимает build/scratch/spike/measure.py,
+    // он выставляет эту переменную): тот же транспорт и та же палитра, но
+    // геометрия списка фиксирована, чтобы числа из docs/FLUTTER-TRANSITION.md
+    // §9 оставались описанием одного и того же бинаря.
+    runApp(SpikeApp(
+      started: started,
+      api: _apiFromEnv(env),
+      rows: int.tryParse(env['OMNISTASH_SPIKE_ROWS'] ?? '') ?? 2000,
+      scrollSeconds: double.tryParse(env['OMNISTASH_SPIKE_SECONDS'] ?? '') ?? 3.0,
+      // Тема из токенов реестра (app/themes.py): выбор человека - две темы,
+      // настройка theme. Стенд переключает её переменной окружения, чтобы
+      // мерить обе палитры одним бинарем; битое значение -> дефолтная тема.
+      themeId: env['OMNISTASH_SPIKE_THEME'] ?? kDefaultThemeId,
+      // Geometry стенда W0 (высота ряда 44 px) остаётся той, что мерялась: числа
+      // в docs/FLUTTER-TRANSITION.md §9 описывают её; токены высоты строки
+      // (theme.dart: rowHeight) переснимаются на волне W2 со списком программы.
+      rowExtent: double.tryParse(env['OMNISTASH_SPIKE_ROW_EXTENT'] ?? '') ?? 44.0,
+    ));
+    return;
+  }
+  // Производственный экран (W2, шаг 1): библиотека из живого фасада; тема и
+  // размер текста приходят из настройки бэкенда (app.dart: OmnistashApp).
+  runApp(OmnistashApp(facade: _apiFromEnv(env)));
 }
 
 ApiClient? _apiFromEnv(Map<String, String> env) {
