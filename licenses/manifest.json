@@ -1,540 +1,540 @@
 {
-  "tool": "сбор текстов лицензий бандла (шаг LC2), запущен вручную",
-  "note": "тексты кладутся байт-в-байт и закрепляются по sha256; из сети взято только то, чего нет в установленном дистрибутиве; в рантайме и в CI ничего не скачивается",
-  "collected": "2026-11-05",
-  "entries": [
+ "tool": "сбор текстов лицензий бандла (шаг LC2), запущен вручную",
+ "note": "тексты кладутся байт-в-байт из источника и закрепляются по sha256 по LF-байтам репозитория (.gitattributes: licenses/**, vendor и канонический текст - eol=lf); из сети взято только то, чего нет в установленном дистрибутиве; в рантайме и в CI ничего не скачивается",
+ "collected": "2026-11-05",
+ "entries": [
+  {
+   "component": "OpenSSL",
+   "package": "OpenSSL",
+   "version": "",
+   "license": "Apache-2.0",
+   "source": {
+    "kind": "upstream по URL",
+    "detail": "https://raw.githubusercontent.com/openssl/openssl/master/LICENSE.txt",
+    "fetched": "2026-11-05"
+   },
+   "files": [
     {
-      "component": "OpenSSL",
-      "package": "OpenSSL",
-      "version": "",
-      "license": "Apache-2.0",
-      "source": {
-        "kind": "upstream по URL",
-        "detail": "https://raw.githubusercontent.com/openssl/openssl/master/LICENSE.txt",
-        "fetched": "2026-11-05"
-      },
-      "files": [
-        {
-          "path": "licenses/openssl/LICENSE.txt",
-          "bytes": 10175,
-          "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
-        }
-      ]
-    },
-    {
-      "component": "PyInstaller",
-      "package": "pyinstaller",
-      "version": "6.22.2",
-      "license": "GPLv2-or-later with a special exception which allows to use PyInstaller to build and distribute non-free programs (including commercial ones) (из метадаты пакета)",
-      "source": {
-        "kind": "установленный дистрибутив",
-        "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\pyinstaller-6.22.2.dist-info"
-      },
-      "files": [
-        {
-          "path": "licenses/PyInstaller/COPYING.txt",
-          "bytes": 32138,
-          "sha256": "dcf75fdb959db1e3b41c0f8505069d2ece781b5ec6b3d0a4d30975cfc6580245"
-        }
-      ]
-    },
-    {
-      "component": "PySocks",
-      "package": "PySocks",
-      "version": "1.7.1",
-      "license": "BSD (из метадаты пакета)",
-      "source": {
-        "kind": "установленный дистрибутив",
-        "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\PySocks-1.7.1.dist-info"
-      },
-      "files": [
-        {
-          "path": "licenses/PySocks/LICENSE",
-          "bytes": 1401,
-          "sha256": "7027e214e014eb78b7adcc1ceda5aca713a79fc4f6a0c52c9da5b3e707e6ffe9"
-        }
-      ]
-    },
-    {
-      "component": "Python",
-      "package": "CPython",
-      "version": "3.14.2",
-      "license": "PSF License Agreement",
-      "source": {
-        "kind": "интерпретатор, из которого собирается exe",
-        "detail": "C:\\Python314\\LICENSE.txt",
-        "fetched": "2026-11-05"
-      },
-      "files": [
-        {
-          "path": "licenses/python/LICENSE.txt",
-          "bytes": 35407,
-          "sha256": "935cf13e19f8c31b497d20b05d73623431a226b230c3599bc30fa3348979bc68"
-        }
-      ]
-    },
-    {
-      "component": "UPX",
-      "package": "UPX",
-      "version": "",
-      "license": "GPL-2.0-or-later + исключение для сжатых программ",
-      "source": {
-        "kind": "upstream по URL",
-        "detail": "https://raw.githubusercontent.com/upx/upx/devel/COPYING",
-        "fetched": "2026-11-05"
-      },
-      "files": [
-        {
-          "path": "licenses/upx/COPYING",
-          "bytes": 18092,
-          "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643"
-        },
-        {
-          "path": "licenses/upx/LICENSE",
-          "bytes": 5448,
-          "sha256": "905d4a66d5324e154d976bbf88829d4d9263815a2b97cc40954f06d4a23c28eb"
-        }
-      ]
-    },
-    {
-      "component": "altgraph",
-      "package": "altgraph",
-      "version": "0.17.5",
-      "license": "MIT (из метадаты пакета)",
-      "source": {
-        "kind": "установленный дистрибутив",
-        "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\altgraph-0.17.5.dist-info"
-      },
-      "files": [
-        {
-          "path": "licenses/altgraph/LICENSE",
-          "bytes": 1002,
-          "sha256": "6c194d6db0c64d45535d10c95142b9b0cda7b7dcc7f1ddee302b3d536f3dbe46"
-        }
-      ]
-    },
-    {
-      "component": "bottle",
-      "package": "bottle",
-      "version": "0.13.4",
-      "license": "MIT (из метадаты пакета)",
-      "source": {
-        "kind": "установленный дистрибутив",
-        "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\bottle-0.13.4.dist-info"
-      },
-      "files": [
-        {
-          "path": "licenses/bottle/LICENSE",
-          "bytes": 1066,
-          "sha256": "af150257b1f7cce92b6207854f2e8f90ea9ae52d7cac758d13a47bd12e2a2443"
-        }
-      ]
-    },
-    {
-      "component": "certifi",
-      "package": "certifi",
-      "version": "2026.7.22",
-      "license": "MPL-2.0 (из метадаты пакета)",
-      "source": {
-        "kind": "установленный дистрибутив",
-        "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\certifi-2026.7.22.dist-info"
-      },
-      "files": [
-        {
-          "path": "licenses/certifi/LICENSE",
-          "bytes": 989,
-          "sha256": "e93716da6b9c0d5a4a1df60fe695b370f0695603d21f6f83f053e42cfc10caf7"
-        }
-      ]
-    },
-    {
-      "component": "cffi",
-      "package": "cffi",
-      "version": "2.1.1",
-      "license": "MIT-0 (из метадаты пакета)",
-      "source": {
-        "kind": "установленный дистрибутив",
-        "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\cffi-2.1.1.dist-info"
-      },
-      "files": [
-        {
-          "path": "licenses/cffi/LICENSE",
-          "bytes": 1123,
-          "sha256": "5ba24ddc57067f9249add644c3afc41a5d6dc37e23433ef759d95df370b0af63"
-        }
-      ]
-    },
-    {
-      "component": "charset-normalizer",
-      "package": "charset-normalizer",
-      "version": "3.5.2",
-      "license": "MIT (из метадаты пакета)",
-      "source": {
-        "kind": "установленный дистрибутив",
-        "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\charset_normalizer-3.5.2.dist-info"
-      },
-      "files": [
-        {
-          "path": "licenses/charset-normalizer/LICENSE",
-          "bytes": 1092,
-          "sha256": "18577485d3704f1a479ded8e573c0976cfed315fd2fd17983fa988da4c2f70d1"
-        }
-      ]
-    },
-    {
-      "component": "clr_loader",
-      "package": "clr_loader",
-      "version": "0.3.1",
-      "license": "MIT (из текста файла)",
-      "source": {
-        "kind": "установленный дистрибутив",
-        "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\clr_loader-0.3.1.dist-info"
-      },
-      "files": [
-        {
-          "path": "licenses/clr_loader/LICENSE",
-          "bytes": 1079,
-          "sha256": "dd6bdca10cdc3b24c6b0b6cef5fd611b7feb6917f127833283ddcdb310d3b453"
-        }
-      ]
-    },
-    {
-      "component": "cryptography",
-      "package": "cryptography",
-      "version": "50.0.1",
-      "license": "Apache-2.0 OR BSD-3-Clause (из метадаты пакета)",
-      "source": {
-        "kind": "установленный дистрибутив",
-        "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\cryptography-50.0.1.dist-info"
-      },
-      "files": [
-        {
-          "path": "licenses/cryptography/LICENSE",
-          "bytes": 197,
-          "sha256": "3e0c7c091a948b82533ba98fd7cbb40432d6f1a9acbf85f5922d2f99a93ae6bb"
-        },
-        {
-          "path": "licenses/cryptography/LICENSE.APACHE",
-          "bytes": 11360,
-          "sha256": "aac73b3148f6d1d7111dbca32099f68d26c644c6813ae1e4f05f6579aa2663fe"
-        },
-        {
-          "path": "licenses/cryptography/LICENSE.BSD",
-          "bytes": 1532,
-          "sha256": "602c4c7482de6479dd2e9793cda275e5e63d773dacd1eca689232ab7008fb4fb"
-        }
-      ]
-    },
-    {
-      "component": "curl-impersonate",
-      "package": "curl-impersonate",
-      "version": "",
-      "license": "MIT",
-      "source": {
-        "kind": "upstream по URL",
-        "detail": "https://raw.githubusercontent.com/lexiforest/curl-impersonate/main/LICENSE",
-        "fetched": "2026-11-05"
-      },
-      "files": [
-        {
-          "path": "licenses/curl-impersonate/LICENSE",
-          "bytes": 1077,
-          "sha256": "c25fc35eb1692c95fa1406efca2f08cc14afda2c71d5cb1ae44da60358d1787b"
-        }
-      ]
-    },
-    {
-      "component": "curl_cffi",
-      "package": "curl_cffi",
-      "version": "",
-      "license": "MIT",
-      "source": {
-        "kind": "upstream по URL",
-        "detail": "https://raw.githubusercontent.com/lexiforest/curl_cffi/master/LICENSE",
-        "fetched": "2026-11-05"
-      },
-      "files": [
-        {
-          "path": "licenses/curl_cffi/LICENSE",
-          "bytes": 1106,
-          "sha256": "3e88b029b50b6afd36d6b18642ce4c8b6eee4c903f1cfabef5b811f61e07050b"
-        }
-      ]
-    },
-    {
-      "component": "idna",
-      "package": "idna",
-      "version": "3.19",
-      "license": "BSD-3-Clause (из метадаты пакета)",
-      "source": {
-        "kind": "установленный дистрибутив",
-        "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\idna-3.19.dist-info"
-      },
-      "files": [
-        {
-          "path": "licenses/idna/LICENSE.md",
-          "bytes": 1541,
-          "sha256": "1a9a4f0e3d479a27240ddd59a9137a66ab4a0f9dfdc8ca6188cc0bfd85187f04"
-        }
-      ]
-    },
-    {
-      "component": "libcurl",
-      "package": "libcurl",
-      "version": "",
-      "license": "curl license",
-      "source": {
-        "kind": "upstream по URL",
-        "detail": "https://raw.githubusercontent.com/curl/curl/master/COPYING",
-        "fetched": "2026-11-05"
-      },
-      "files": [
-        {
-          "path": "licenses/curl/COPYING",
-          "bytes": 1088,
-          "sha256": "82f2f4427d6545ee5aaac4f0b80428da6cc8ba41c2cf5da3a03680ec327b9681"
-        }
-      ]
-    },
-    {
-      "component": "packaging",
-      "package": "packaging",
-      "version": "26.3",
-      "license": "Apache-2.0 OR BSD-2-Clause (из метадаты пакета)",
-      "source": {
-        "kind": "установленный дистрибутив",
-        "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\packaging-26.3.dist-info"
-      },
-      "files": [
-        {
-          "path": "licenses/packaging/LICENSE",
-          "bytes": 197,
-          "sha256": "cad1ef5bd340d73e074ba614d26f7deaca5c7940c3d8c34852e65c4909686c48"
-        },
-        {
-          "path": "licenses/packaging/LICENSE.APACHE",
-          "bytes": 10174,
-          "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
-        },
-        {
-          "path": "licenses/packaging/LICENSE.BSD",
-          "bytes": 1344,
-          "sha256": "b70e7e9b742f1cc6f948b34c16aa39ffece94196364bc88ff0d2180f0028fac5"
-        }
-      ]
-    },
-    {
-      "component": "pefile",
-      "package": "pefile",
-      "version": "2024.8.26",
-      "license": "MIT (из метадаты пакета)",
-      "source": {
-        "kind": "установленный дистрибутив",
-        "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\pefile-2024.8.26.dist-info"
-      },
-      "files": [
-        {
-          "path": "licenses/pefile/LICENSE",
-          "bytes": 1083,
-          "sha256": "b44409c067c6da52bfb54bb6624fb11a7b52157c3a13ae1400232f8196e86ad3"
-        }
-      ]
-    },
-    {
-      "component": "proxy_tools",
-      "package": "proxy_tools",
-      "version": "",
-      "license": "BSD-2-Clause",
-      "source": {
-        "kind": "upstream по URL",
-        "detail": "https://raw.githubusercontent.com/jtushman/proxy_tools/master/LICENSE.txt",
-        "fetched": "2026-11-05"
-      },
-      "files": [
-        {
-          "path": "licenses/proxy_tools/LICENSE.txt",
-          "bytes": 1436,
-          "sha256": "a428fb8a2e762af3eb0a6edbbb88e9b42ccfee80fd9b423958bcacf9b9abbfe4"
-        }
-      ]
-    },
-    {
-      "component": "pycparser",
-      "package": "pycparser",
-      "version": "3.0",
-      "license": "BSD-3-Clause (из метадаты пакета)",
-      "source": {
-        "kind": "установленный дистрибутив",
-        "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\pycparser-3.0.dist-info"
-      },
-      "files": [
-        {
-          "path": "licenses/pycparser/LICENSE",
-          "bytes": 1543,
-          "sha256": "0c846399369ea76ddd7b5c44fe6d16497415fcf015f5cbb508c24bf98b81c5b1"
-        }
-      ]
-    },
-    {
-      "component": "pythonnet",
-      "package": "pythonnet",
-      "version": "3.1.0",
-      "license": "MIT (из метадаты пакета)",
-      "source": {
-        "kind": "установленный дистрибутив",
-        "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\pythonnet-3.1.0.dist-info"
-      },
-      "files": [
-        {
-          "path": "licenses/pythonnet/AUTHORS.md",
-          "bytes": 5096,
-          "sha256": "65a13631f078bed51e9a4033dea257e57a7f23097f3003b1ce1ba1c8a9136c93"
-        },
-        {
-          "path": "licenses/pythonnet/LICENSE",
-          "bytes": 1104,
-          "sha256": "e1dc3a6ff017a6800dc27a7220500f512b95fbcd996d38ebbbff85c693245369"
-        }
-      ]
-    },
-    {
-      "component": "pywebview",
-      "package": "pywebview",
-      "version": "6.2.1",
-      "license": "BSD 3-Clause License (из метадаты пакета)",
-      "source": {
-        "kind": "установленный дистрибутив",
-        "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\pywebview-6.2.1.dist-info"
-      },
-      "files": [
-        {
-          "path": "licenses/pywebview/LICENSE",
-          "bytes": 1518,
-          "sha256": "4a988dd3598832cd3653de20dc33cb677d0fb53ab5551c879ca31280ae653675"
-        }
-      ]
-    },
-    {
-      "component": "pywin32-ctypes",
-      "package": "pywin32-ctypes",
-      "version": "0.2.3",
-      "license": "BSD-3-Clause (из метадаты пакета)",
-      "source": {
-        "kind": "установленный дистрибутив",
-        "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\pywin32_ctypes-0.2.3.dist-info"
-      },
-      "files": [
-        {
-          "path": "licenses/pywin32-ctypes/LICENSE.txt",
-          "bytes": 1644,
-          "sha256": "dfa83b3e2709adfcdb838d9ad55823ca674abb780e60563d9dd9544ccbf785e9"
-        }
-      ]
-    },
-    {
-      "component": "requests",
-      "package": "requests",
-      "version": "2.34.2",
-      "license": "Apache-2.0 (из метадаты пакета)",
-      "source": {
-        "kind": "установленный дистрибутив",
-        "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\requests-2.34.2.dist-info"
-      },
-      "files": [
-        {
-          "path": "licenses/requests/LICENSE",
-          "bytes": 10142,
-          "sha256": "09e8a9bcec8067104652c168685ab0931e7868f9c8284b66f5ae6edae5f1130b"
-        },
-        {
-          "path": "licenses/requests/NOTICE",
-          "bytes": 38,
-          "sha256": "f5110972dedad2b4e9d314518daf3b7d72d6e02e499acd802181de6f74571dcc"
-        }
-      ]
-    },
-    {
-      "component": "setuptools",
-      "package": "setuptools",
-      "version": "84.0.0",
-      "license": "MIT (из метадаты пакета)",
-      "source": {
-        "kind": "установленный дистрибутив",
-        "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\setuptools-84.0.0.dist-info"
-      },
-      "files": [
-        {
-          "path": "licenses/setuptools/LICENSE",
-          "bytes": 1023,
-          "sha256": "86da0f01aeae46348a3c3d465195dc1ceccde79f79e87769a64b8da04b2a4741"
-        }
-      ]
-    },
-    {
-      "component": "urllib3",
-      "package": "urllib3",
-      "version": "2.7.0",
-      "license": "MIT (из метадаты пакета)",
-      "source": {
-        "kind": "установленный дистрибутив",
-        "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\urllib3-2.7.0.dist-info"
-      },
-      "files": [
-        {
-          "path": "licenses/urllib3/LICENSE.txt",
-          "bytes": 1093,
-          "sha256": "130e3a64d5fdd5d096a752694634a7d9df284469de86e5732100268041e3d686"
-        }
-      ]
-    },
-    {
-      "component": "yt-dlp",
-      "package": "yt-dlp",
-      "version": "2026.8.19",
-      "license": "Unlicense (из метадаты пакета)",
-      "source": {
-        "kind": "установленный дистрибутив",
-        "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\yt_dlp-2026.8.19.dist-info"
-      },
-      "files": [
-        {
-          "path": "licenses/yt-dlp/LICENSE",
-          "bytes": 1211,
-          "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
-        }
-      ]
+     "path": "licenses/openssl/LICENSE.txt",
+     "bytes": 10175,
+     "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
     }
-  ],
-  "notRequired": [
+   ]
+  },
+  {
+   "component": "PyInstaller",
+   "package": "pyinstaller",
+   "version": "6.22.2",
+   "license": "GPLv2-or-later with a special exception which allows to use PyInstaller to build and distribute non-free programs (including commercial ones) (из метадаты пакета)",
+   "source": {
+    "kind": "установленный дистрибутив",
+    "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\pyinstaller-6.22.2.dist-info"
+   },
+   "files": [
     {
-      "component": "SQLite",
-      "license": "Public Domain",
-      "reason": "общественное достояние: текста лицензии нет и он не требуется"
-    },
-    {
-      "component": "Microsoft WebView2",
-      "license": "условия Microsoft",
-      "reason": "Microsoft не публикует текст условий отдельным файлом: они показываются диалогом на странице загрузки Runtime и названы в THIRD_PARTY_NOTICES.md; среда выполнения (Evergreen) проектом не поставляется"
-    },
-    {
-      "component": "hls.js",
-      "license": "Apache-2.0",
-      "reason": "текст лицензии лежит рядом с файлом в исходниках: ui_src/vendor/hls.js.LICENSE.txt (пин по sha256 в его метадате) и входит в юр-пакет отдельным файлом"
-    },
-    {
-      "component": "ffmpeg",
-      "license": "GPL v2+",
-      "reason": "проект не поставляет: ставится пользователем отдельно, лицензию соблюдает тот, кто скачал"
-    },
-    {
-      "component": "zeroconf",
-      "license": "LGPL-2.1+",
-      "reason": "проект не поставляет и не входит в exe: ставится pip'ом по команде пользователя"
-    },
-    {
-      "component": "magic-wormhole",
-      "license": "MIT",
-      "reason": "не входит в exe: ставится в изолированный venv профиля по команде пользователя, транзитивные зависимости остаются в venv"
+     "path": "licenses/PyInstaller/COPYING.txt",
+     "bytes": 32138,
+     "sha256": "dcf75fdb959db1e3b41c0f8505069d2ece781b5ec6b3d0a4d30975cfc6580245"
     }
-  ]
+   ]
+  },
+  {
+   "component": "PySocks",
+   "package": "PySocks",
+   "version": "1.7.1",
+   "license": "BSD (из метадаты пакета)",
+   "source": {
+    "kind": "установленный дистрибутив",
+    "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\PySocks-1.7.1.dist-info"
+   },
+   "files": [
+    {
+     "path": "licenses/PySocks/LICENSE",
+     "bytes": 1401,
+     "sha256": "7027e214e014eb78b7adcc1ceda5aca713a79fc4f6a0c52c9da5b3e707e6ffe9"
+    }
+   ]
+  },
+  {
+   "component": "Python",
+   "package": "CPython",
+   "version": "3.14.2",
+   "license": "PSF License Agreement",
+   "source": {
+    "kind": "интерпретатор, из которого собирается exe",
+    "detail": "C:\\Python314\\LICENSE.txt",
+    "fetched": "2026-11-05"
+   },
+   "files": [
+    {
+     "path": "licenses/python/LICENSE.txt",
+     "bytes": 34824,
+     "sha256": "939d8e9fa591cbaff0d51e777edb4c1002045d2600ce43a1ae28530cecfc5b88"
+    }
+   ]
+  },
+  {
+   "component": "UPX",
+   "package": "UPX",
+   "version": "",
+   "license": "GPL-2.0-or-later + исключение для сжатых программ",
+   "source": {
+    "kind": "upstream по URL",
+    "detail": "https://raw.githubusercontent.com/upx/upx/devel/COPYING",
+    "fetched": "2026-11-05"
+   },
+   "files": [
+    {
+     "path": "licenses/upx/COPYING",
+     "bytes": 18092,
+     "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643"
+    },
+    {
+     "path": "licenses/upx/LICENSE",
+     "bytes": 5448,
+     "sha256": "905d4a66d5324e154d976bbf88829d4d9263815a2b97cc40954f06d4a23c28eb"
+    }
+   ]
+  },
+  {
+   "component": "altgraph",
+   "package": "altgraph",
+   "version": "0.17.5",
+   "license": "MIT (из метадаты пакета)",
+   "source": {
+    "kind": "установленный дистрибутив",
+    "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\altgraph-0.17.5.dist-info"
+   },
+   "files": [
+    {
+     "path": "licenses/altgraph/LICENSE",
+     "bytes": 1002,
+     "sha256": "6c194d6db0c64d45535d10c95142b9b0cda7b7dcc7f1ddee302b3d536f3dbe46"
+    }
+   ]
+  },
+  {
+   "component": "bottle",
+   "package": "bottle",
+   "version": "0.13.4",
+   "license": "MIT (из метадаты пакета)",
+   "source": {
+    "kind": "установленный дистрибутив",
+    "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\bottle-0.13.4.dist-info"
+   },
+   "files": [
+    {
+     "path": "licenses/bottle/LICENSE",
+     "bytes": 1066,
+     "sha256": "af150257b1f7cce92b6207854f2e8f90ea9ae52d7cac758d13a47bd12e2a2443"
+    }
+   ]
+  },
+  {
+   "component": "certifi",
+   "package": "certifi",
+   "version": "2026.7.22",
+   "license": "MPL-2.0 (из метадаты пакета)",
+   "source": {
+    "kind": "установленный дистрибутив",
+    "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\certifi-2026.7.22.dist-info"
+   },
+   "files": [
+    {
+     "path": "licenses/certifi/LICENSE",
+     "bytes": 989,
+     "sha256": "e93716da6b9c0d5a4a1df60fe695b370f0695603d21f6f83f053e42cfc10caf7"
+    }
+   ]
+  },
+  {
+   "component": "cffi",
+   "package": "cffi",
+   "version": "2.1.1",
+   "license": "MIT-0 (из метадаты пакета)",
+   "source": {
+    "kind": "установленный дистрибутив",
+    "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\cffi-2.1.1.dist-info"
+   },
+   "files": [
+    {
+     "path": "licenses/cffi/LICENSE",
+     "bytes": 1123,
+     "sha256": "5ba24ddc57067f9249add644c3afc41a5d6dc37e23433ef759d95df370b0af63"
+    }
+   ]
+  },
+  {
+   "component": "charset-normalizer",
+   "package": "charset-normalizer",
+   "version": "3.5.2",
+   "license": "MIT (из метадаты пакета)",
+   "source": {
+    "kind": "установленный дистрибутив",
+    "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\charset_normalizer-3.5.2.dist-info"
+   },
+   "files": [
+    {
+     "path": "licenses/charset-normalizer/LICENSE",
+     "bytes": 1071,
+     "sha256": "6d0d41bfe170ac6c7dc248c9a63e254d0fb45a60d50a8257d0af92c6e249b887"
+    }
+   ]
+  },
+  {
+   "component": "clr_loader",
+   "package": "clr_loader",
+   "version": "0.3.1",
+   "license": "MIT (из текста файла)",
+   "source": {
+    "kind": "установленный дистрибутив",
+    "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\clr_loader-0.3.1.dist-info"
+   },
+   "files": [
+    {
+     "path": "licenses/clr_loader/LICENSE",
+     "bytes": 1079,
+     "sha256": "dd6bdca10cdc3b24c6b0b6cef5fd611b7feb6917f127833283ddcdb310d3b453"
+    }
+   ]
+  },
+  {
+   "component": "cryptography",
+   "package": "cryptography",
+   "version": "50.0.1",
+   "license": "Apache-2.0 OR BSD-3-Clause (из метадаты пакета)",
+   "source": {
+    "kind": "установленный дистрибутив",
+    "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\cryptography-50.0.1.dist-info"
+   },
+   "files": [
+    {
+     "path": "licenses/cryptography/LICENSE",
+     "bytes": 197,
+     "sha256": "3e0c7c091a948b82533ba98fd7cbb40432d6f1a9acbf85f5922d2f99a93ae6bb"
+    },
+    {
+     "path": "licenses/cryptography/LICENSE.APACHE",
+     "bytes": 11360,
+     "sha256": "aac73b3148f6d1d7111dbca32099f68d26c644c6813ae1e4f05f6579aa2663fe"
+    },
+    {
+     "path": "licenses/cryptography/LICENSE.BSD",
+     "bytes": 1532,
+     "sha256": "602c4c7482de6479dd2e9793cda275e5e63d773dacd1eca689232ab7008fb4fb"
+    }
+   ]
+  },
+  {
+   "component": "curl-impersonate",
+   "package": "curl-impersonate",
+   "version": "",
+   "license": "MIT",
+   "source": {
+    "kind": "upstream по URL",
+    "detail": "https://raw.githubusercontent.com/lexiforest/curl-impersonate/main/LICENSE",
+    "fetched": "2026-11-05"
+   },
+   "files": [
+    {
+     "path": "licenses/curl-impersonate/LICENSE",
+     "bytes": 1077,
+     "sha256": "c25fc35eb1692c95fa1406efca2f08cc14afda2c71d5cb1ae44da60358d1787b"
+    }
+   ]
+  },
+  {
+   "component": "curl_cffi",
+   "package": "curl_cffi",
+   "version": "",
+   "license": "MIT",
+   "source": {
+    "kind": "upstream по URL",
+    "detail": "https://raw.githubusercontent.com/lexiforest/curl_cffi/master/LICENSE",
+    "fetched": "2026-11-05"
+   },
+   "files": [
+    {
+     "path": "licenses/curl_cffi/LICENSE",
+     "bytes": 1106,
+     "sha256": "3e88b029b50b6afd36d6b18642ce4c8b6eee4c903f1cfabef5b811f61e07050b"
+    }
+   ]
+  },
+  {
+   "component": "idna",
+   "package": "idna",
+   "version": "3.19",
+   "license": "BSD-3-Clause (из метадаты пакета)",
+   "source": {
+    "kind": "установленный дистрибутив",
+    "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\idna-3.19.dist-info"
+   },
+   "files": [
+    {
+     "path": "licenses/idna/LICENSE.md",
+     "bytes": 1541,
+     "sha256": "1a9a4f0e3d479a27240ddd59a9137a66ab4a0f9dfdc8ca6188cc0bfd85187f04"
+    }
+   ]
+  },
+  {
+   "component": "libcurl",
+   "package": "libcurl",
+   "version": "",
+   "license": "curl license",
+   "source": {
+    "kind": "upstream по URL",
+    "detail": "https://raw.githubusercontent.com/curl/curl/master/COPYING",
+    "fetched": "2026-11-05"
+   },
+   "files": [
+    {
+     "path": "licenses/curl/COPYING",
+     "bytes": 1088,
+     "sha256": "82f2f4427d6545ee5aaac4f0b80428da6cc8ba41c2cf5da3a03680ec327b9681"
+    }
+   ]
+  },
+  {
+   "component": "packaging",
+   "package": "packaging",
+   "version": "26.3",
+   "license": "Apache-2.0 OR BSD-2-Clause (из метадаты пакета)",
+   "source": {
+    "kind": "установленный дистрибутив",
+    "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\packaging-26.3.dist-info"
+   },
+   "files": [
+    {
+     "path": "licenses/packaging/LICENSE",
+     "bytes": 197,
+     "sha256": "cad1ef5bd340d73e074ba614d26f7deaca5c7940c3d8c34852e65c4909686c48"
+    },
+    {
+     "path": "licenses/packaging/LICENSE.APACHE",
+     "bytes": 10174,
+     "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+     "path": "licenses/packaging/LICENSE.BSD",
+     "bytes": 1344,
+     "sha256": "b70e7e9b742f1cc6f948b34c16aa39ffece94196364bc88ff0d2180f0028fac5"
+    }
+   ]
+  },
+  {
+   "component": "pefile",
+   "package": "pefile",
+   "version": "2024.8.26",
+   "license": "MIT (из метадаты пакета)",
+   "source": {
+    "kind": "установленный дистрибутив",
+    "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\pefile-2024.8.26.dist-info"
+   },
+   "files": [
+    {
+     "path": "licenses/pefile/LICENSE",
+     "bytes": 1083,
+     "sha256": "b44409c067c6da52bfb54bb6624fb11a7b52157c3a13ae1400232f8196e86ad3"
+    }
+   ]
+  },
+  {
+   "component": "proxy_tools",
+   "package": "proxy_tools",
+   "version": "",
+   "license": "BSD-2-Clause",
+   "source": {
+    "kind": "upstream по URL",
+    "detail": "https://raw.githubusercontent.com/jtushman/proxy_tools/master/LICENSE.txt",
+    "fetched": "2026-11-05"
+   },
+   "files": [
+    {
+     "path": "licenses/proxy_tools/LICENSE.txt",
+     "bytes": 1436,
+     "sha256": "a428fb8a2e762af3eb0a6edbbb88e9b42ccfee80fd9b423958bcacf9b9abbfe4"
+    }
+   ]
+  },
+  {
+   "component": "pycparser",
+   "package": "pycparser",
+   "version": "3.0",
+   "license": "BSD-3-Clause (из метадаты пакета)",
+   "source": {
+    "kind": "установленный дистрибутив",
+    "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\pycparser-3.0.dist-info"
+   },
+   "files": [
+    {
+     "path": "licenses/pycparser/LICENSE",
+     "bytes": 1543,
+     "sha256": "0c846399369ea76ddd7b5c44fe6d16497415fcf015f5cbb508c24bf98b81c5b1"
+    }
+   ]
+  },
+  {
+   "component": "pythonnet",
+   "package": "pythonnet",
+   "version": "3.1.0",
+   "license": "MIT (из метадаты пакета)",
+   "source": {
+    "kind": "установленный дистрибутив",
+    "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\pythonnet-3.1.0.dist-info"
+   },
+   "files": [
+    {
+     "path": "licenses/pythonnet/AUTHORS.md",
+     "bytes": 5096,
+     "sha256": "65a13631f078bed51e9a4033dea257e57a7f23097f3003b1ce1ba1c8a9136c93"
+    },
+    {
+     "path": "licenses/pythonnet/LICENSE",
+     "bytes": 1104,
+     "sha256": "e1dc3a6ff017a6800dc27a7220500f512b95fbcd996d38ebbbff85c693245369"
+    }
+   ]
+  },
+  {
+   "component": "pywebview",
+   "package": "pywebview",
+   "version": "6.2.1",
+   "license": "BSD 3-Clause License (из метадаты пакета)",
+   "source": {
+    "kind": "установленный дистрибутив",
+    "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\pywebview-6.2.1.dist-info"
+   },
+   "files": [
+    {
+     "path": "licenses/pywebview/LICENSE",
+     "bytes": 1518,
+     "sha256": "4a988dd3598832cd3653de20dc33cb677d0fb53ab5551c879ca31280ae653675"
+    }
+   ]
+  },
+  {
+   "component": "pywin32-ctypes",
+   "package": "pywin32-ctypes",
+   "version": "0.2.3",
+   "license": "BSD-3-Clause (из метадаты пакета)",
+   "source": {
+    "kind": "установленный дистрибутив",
+    "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\pywin32_ctypes-0.2.3.dist-info"
+   },
+   "files": [
+    {
+     "path": "licenses/pywin32-ctypes/LICENSE.txt",
+     "bytes": 1616,
+     "sha256": "cc03ae891a362c85d508a4e47af954314a2e4ccbd445140cb8dca7e2baee19f7"
+    }
+   ]
+  },
+  {
+   "component": "requests",
+   "package": "requests",
+   "version": "2.34.2",
+   "license": "Apache-2.0 (из метадаты пакета)",
+   "source": {
+    "kind": "установленный дистрибутив",
+    "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\requests-2.34.2.dist-info"
+   },
+   "files": [
+    {
+     "path": "licenses/requests/LICENSE",
+     "bytes": 10142,
+     "sha256": "09e8a9bcec8067104652c168685ab0931e7868f9c8284b66f5ae6edae5f1130b"
+    },
+    {
+     "path": "licenses/requests/NOTICE",
+     "bytes": 38,
+     "sha256": "f5110972dedad2b4e9d314518daf3b7d72d6e02e499acd802181de6f74571dcc"
+    }
+   ]
+  },
+  {
+   "component": "setuptools",
+   "package": "setuptools",
+   "version": "84.0.0",
+   "license": "MIT (из метадаты пакета)",
+   "source": {
+    "kind": "установленный дистрибутив",
+    "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\setuptools-84.0.0.dist-info"
+   },
+   "files": [
+    {
+     "path": "licenses/setuptools/LICENSE",
+     "bytes": 1023,
+     "sha256": "86da0f01aeae46348a3c3d465195dc1ceccde79f79e87769a64b8da04b2a4741"
+    }
+   ]
+  },
+  {
+   "component": "urllib3",
+   "package": "urllib3",
+   "version": "2.7.0",
+   "license": "MIT (из метадаты пакета)",
+   "source": {
+    "kind": "установленный дистрибутив",
+    "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\urllib3-2.7.0.dist-info"
+   },
+   "files": [
+    {
+     "path": "licenses/urllib3/LICENSE.txt",
+     "bytes": 1093,
+     "sha256": "130e3a64d5fdd5d096a752694634a7d9df284469de86e5732100268041e3d686"
+    }
+   ]
+  },
+  {
+   "component": "yt-dlp",
+   "package": "yt-dlp",
+   "version": "2026.8.19",
+   "license": "Unlicense (из метадаты пакета)",
+   "source": {
+    "kind": "установленный дистрибутив",
+    "detail": "C:\\Users\\VilmiPcc\\AppData\\Roaming\\Python\\Python314\\site-packages\\yt_dlp-2026.8.19.dist-info"
+   },
+   "files": [
+    {
+     "path": "licenses/yt-dlp/LICENSE",
+     "bytes": 1211,
+     "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
+    }
+   ]
+  }
+ ],
+ "notRequired": [
+  {
+   "component": "SQLite",
+   "license": "Public Domain",
+   "reason": "общественное достояние: текста лицензии нет и он не требуется"
+  },
+  {
+   "component": "Microsoft WebView2",
+   "license": "условия Microsoft",
+   "reason": "Microsoft не публикует текст условий отдельным файлом: они показываются диалогом на странице загрузки Runtime и названы в THIRD_PARTY_NOTICES.md; среда выполнения (Evergreen) проектом не поставляется"
+  },
+  {
+   "component": "hls.js",
+   "license": "Apache-2.0",
+   "reason": "текст лицензии лежит рядом с файлом в исходниках: ui_src/vendor/hls.js.LICENSE.txt (пин по sha256 в его метадате) и входит в юр-пакет отдельным файлом"
+  },
+  {
+   "component": "ffmpeg",
+   "license": "GPL v2+",
+   "reason": "проект не поставляет: ставится пользователем отдельно, лицензию соблюдает тот, кто скачал"
+  },
+  {
+   "component": "zeroconf",
+   "license": "LGPL-2.1+",
+   "reason": "проект не поставляет и не входит в exe: ставится pip'ом по команде пользователя"
+  },
+  {
+   "component": "magic-wormhole",
+   "license": "MIT",
+   "reason": "не входит в exe: ставится в изолированный venv профиля по команде пользователя, транзитивные зависимости остаются в venv"
+  }
+ ]
 }
