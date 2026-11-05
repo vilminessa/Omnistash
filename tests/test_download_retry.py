@@ -105,12 +105,26 @@ class TestCookieFallback(RetryCase):
                          ("firefox",), "первый рабочий браузер")
 
     def test_410_with_chosen_browser_is_honest_error(self):
-        # Куки выбранного браузера уже подключены с самого начала - повтор
-        # с ними же бессмыслен, ошибка возвращается сразу.
+        """Куки выбранного браузера подключены с самого начала.
+
+        Повтор с теми же куками того же браузера бессмыслен - сверяется
+        именно это, а не число запросов: цепочка дорог добавляет другие
+        дороги (имитация отпечатка, зеркало, другой формат), и их наличие
+        зависит от состава среды - имитация работает только когда
+        установлен curl_cffi. Число дорог названо в результате прогона.
+        """
         result, captured = self.run_plan(
             ["err410"], settings={"browser_cookies": "firefox"})
         self.assertIsNotNone(result["error"])
-        self.assertEqual(len(captured), 1, "бесмысленных повторов нет")
+        self.assertGreaterEqual(len(captured), 1,
+                                "площадка не получила ни одного запроса")
+        browsers = [c.get("cookiesfrombrowser") for c in captured]
+        self.assertEqual(browsers.count(("firefox",)), 1,
+                          "куки выбранного браузера отправлены второй раз - "
+                          "это бессмысленный повтор")
+        self.assertTrue(all(c.get("cookiesfrombrowser") != ("firefox",)
+                              for c in captured[1:]),
+                        "повтор отправляет те же куки того же браузера")
 
     def test_410_without_browsers_is_honest_error(self):
         with mock.patch.object(google_auth, "BROWSER_CHOICES", ()):

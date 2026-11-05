@@ -1,0 +1,39 @@
+# Переводы строк в репозитории: пины по sha256 сверяются по байтам файла.
+# На Windows (и на раннере CI) git с core.autocrlf=true превращает LF в CRLF
+# при checkout - закреплённый текст лицензии становится не тем байтом, который
+# сверяют карты и тесты. Поэтому файлы, чьи байты закреплены, обязаны
+# оставаться LF на любой машине.
+* text=auto
+
+# Закреплено по sha256: карта licenses/manifest.json, пин вендора hls.js
+# (ui_src/vendor/hls.js.meta.json) и канонический текст лицензии.
+licenses/** text eol=lf
+docs/POLYFORM-NONCOMMERCIAL-1.0.0.txt text eol=lf
+ui_src/vendor/** text eol=lf
+
+# Исходники, документы, воркфлоу и файлы раздачи UI: их читают тесты,
+# --serve и tools/build_legal_pack.py - байты должны совпадать локально и в CI.
+LICENSE text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Консольная пачка Windows (debug.bat) читается cmd.exe - ей нужен CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Бинари переводом строк не правятся: их sha256 тоже сверяется.
+*.ico binary
+*.png binary
+*.jpg binary
+*.exe binary
+*.dll binary
+*.pyd binary
+*.pyz binary
+*.zip binary

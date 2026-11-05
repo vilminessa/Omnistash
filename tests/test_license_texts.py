@@ -26,6 +26,7 @@ Weak-notice лицензии (MIT, BSD, Apache, MPL) требуют, чтобы 
 import importlib.util
 import json
 import shutil
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -411,6 +412,65 @@ class TestDocsForLicenseTexts(unittest.TestCase):
                 glued.append((path.name, fragment.replace("\n", " ")))
             self.assertEqual(glued, [],
                              f"{path.name}: склейка латиницы с кириллицей {glued[:3]}")
+
+
+class TestPinnedFilesStayLF(unittest.TestCase):
+    """Файлы, чьи байты закреплены по sha256, при checkout обязаны быть LF.
+
+    На Windows git с core.autocrlf=true конвертирует LF в CRLF при checkout:
+    в CI текст лицензии оказывался не тем байтом, который закрепляет карта,
+    и сверка пинов падала. Правило проверяется через git check-attr - по
+    реальному правилу git для пути, а не по тексту .gitattributes.
+    """
+
+    # Пути, чьи байты закреплены вне карты лицензий.
+    EXTRA = [
+        "docs/POLYFORM-NONCOMMERCIAL-1.0.0.txt",
+        "LICENSE",
+        "ui_src/vendor/hls.js",
+        "ui_src/vendor/hls.js.meta.json",
+        "ui_src/vendor/hls.js.LICENSE.txt",
+    ]
+
+    def pinned_paths(self) -> list[str]:
+        paths = list(self.EXTRA)
+        for entry in card()["entries"]:
+            for item in entry.get("files") or []:
+                paths.append(str(item.get("path") or ""))
+        paths.append("licenses/manifest.json")
+        return sorted(set(paths))
+
+    def check_attr(self, paths: list[str]) -> dict[str, str]:
+        git = shutil.which("git")
+        self.assertIsNotNone(git, "git не найден - правило checkout не сверить")
+        proc = subprocess.run([git, "check-attr", "eol", "--", *paths],
+                              cwd=str(ROOT), capture_output=True, text=True,
+                              encoding="utf-8", errors="replace")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        out: dict[str, str] = {}
+        for line in proc.stdout.splitlines():
+            # форма строки: <path>: eol: <value>
+            path_, _, value = line.rpartition(": ")
+            if path_.endswith(": eol"):
+                out[path_[:-5]] = value
+        return out
+
+    def test_every_pinned_file_is_declared_lf(self):
+        paths = self.pinned_paths()
+        self.assertGreaterEqual(len(paths), 30,
+                                "страж сверяет меньше закреплённых файлов, чем их есть")
+        attrs = self.check_attr(paths)
+        for name in paths:
+            value = attrs.get(name) or attrs.get(name.replace("/", "\\"))
+            self.assertEqual(value, "lf",
+                             f"{name}: правило checkout даёт {value} - на Windows и в CI "
+                             "файл станет CRLF, и пин по sha256 разойдётся с байтами")
+
+    def test_console_batch_keeps_crlf(self):
+        attrs = self.check_attr(["debug.bat"])
+        value = attrs.get("debug.bat") or attrs.get("debug\\bat")
+        self.assertEqual(value, "crlf",
+                         "debug.bat без CRLF - cmd.exe читает пачку неверно")
 
 
 if __name__ == "__main__":
