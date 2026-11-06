@@ -31,15 +31,28 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // даёт DefaultImpeller, если не выставить - сравнение на аргументах
   // командной строки ничего не доказывало.
   char impeller_buf[16];
-  if (::GetEnvironmentVariableA("OMNISTASH_IMPELLER", impeller_buf,
-                                sizeof(impeller_buf)) > 0) {
-    if (::strcmp(impeller_buf, "on") == 0) {
+  const bool spike =
+      ::GetEnvironmentVariableA("OMNISTASH_SPIKE", impeller_buf,
+                                sizeof(impeller_buf)) > 0 &&
+      ::strcmp(impeller_buf, "1") == 0;
+  char engine_buf[16];
+  if (::GetEnvironmentVariableA("OMNISTASH_IMPELLER", engine_buf,
+                                sizeof(engine_buf)) > 0) {
+    if (::strcmp(engine_buf, "on") == 0) {
       project.set_impeller_switch(flutter::ImpellerSwitch::Enabled);
-    } else if (::strcmp(impeller_buf, "off") == 0) {
+    } else if (::strcmp(engine_buf, "off") == 0) {
       project.set_impeller_switch(flutter::ImpellerSwitch::Disabled);
     } else {
       project.set_impeller_switch(flutter::ImpellerSwitch::Default);
     }
+  } else if (!spike) {
+    // Решение человека (06.11.2026): в продуктовом окне - Skia. На этой
+    // машине замерено: Skia 60.0 fps и RSS дерева 76.8 МБ против Impeller
+    // 49.3-51.7 fps и 111-115 МБ (docs/FLUTTER-TRANSITION.md §9). Стенд W0
+    // (OMNISTASH_SPIKE=1) держит default - Impeller, иначе цифры §9
+    // описывали бы уже не ту ветку, под которой они сняты; ветки стенда
+    // переключаются и явно (OMNISTASH_IMPELLER=on/off).
+    project.set_impeller_switch(flutter::ImpellerSwitch::Disabled);
   }
 
   FlutterWindow window(project);
