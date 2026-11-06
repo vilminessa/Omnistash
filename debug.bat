@@ -39,6 +39,12 @@ echo    [5] Тесты: все, включая живые на YouTube
 echo    [6] Проверка синтаксиса: python и node
 echo    [7] Собрать превью интерфейса и открыть
 echo    [8] Превью первого запуска (диалог выбора папки)
+echo    [G] Flutter: сверка токенов, колонок и табов с источниками
+echo    [H] Flutter: анализ и тесты экрана (нужен SDK на сборочное время)
+echo    [I] Flutter: собрать release exe окна (нужен SDK)
+echo    [J] Ассеты: иконки .ico, SVG, тема Бренд, токены Flutter
+echo    [K] Бандл клиента и юр-пак: сверка и воркфлоу
+echo    [L] Запустить окно с живым фасадом (--serve)
 echo    [E] Синхронизация без окна (--sync)
 echo    [F] Собрать exe и сверить состав по TOC
 echo  ---------------------------------------------------------------
@@ -64,6 +70,18 @@ if "%sel%"=="5" goto op_tests_all
 if "%sel%"=="6" goto op_syntax
 if "%sel%"=="7" goto op_preview
 if "%sel%"=="8" goto op_preview_first
+if "%sel%"=="G" goto op_flutter_mirror
+if "%sel%"=="g" goto op_flutter_mirror
+if "%sel%"=="H" goto op_flutter_check
+if "%sel%"=="h" goto op_flutter_check
+if "%sel%"=="I" goto op_flutter_build
+if "%sel%"=="i" goto op_flutter_build
+if "%sel%"=="J" goto op_assets
+if "%sel%"=="j" goto op_assets
+if "%sel%"=="K" goto op_packs
+if "%sel%"=="k" goto op_packs
+if "%sel%"=="L" goto op_serve
+if "%sel%"=="l" goto op_serve
 if "%sel%"=="E" goto op_sync
 if "%sel%"=="e" goto op_sync
 if "%sel%"=="F" goto op_build_exe
@@ -144,6 +162,76 @@ goto after
 :op_preview_first
 echo Сборка превью в режиме первого запуска...
 python tools\build_preview.py --first --open
+set "rc=%errorlevel%"
+goto after
+
+rem ---------------------------------------------------------------
+rem  Flutter (волны W0-W2: стенд, экран, страж) - SDK нужен на сборочное
+rem  время и пинится версией и sha256 архива (tools/flutter_pin.json);
+rem  рантайм окна ничего не скачивает. Пункты G-K гоняются и без SDK: G
+rem  читает ассет как текст (работает на GitHub-раннере), J и K сверяют
+rem  ассеты и паки; H и I требуют локальный SDK.
+rem ---------------------------------------------------------------
+
+:op_flutter_mirror
+echo Сверка Dart-ассета с реестром тем, CSS, LIST_COLS, ORDER_COLS, схемой и табами...
+python tools\check_flutter_mirror.py
+set "rc=%errorlevel%"
+goto after
+
+:op_flutter_check
+echo Flutter: анализ и widget-тесты экрана (analyze, test)...
+cd ui_flutter
+call flutter analyze
+set "rc=%errorlevel%"
+if not "%rc%"=="0" (cd .. & goto after)
+call flutter test
+set "rc=%errorlevel%"
+cd ..
+goto after
+
+:op_flutter_build
+echo Flutter: сборка release exe окна (движок Skia по решению человека)...
+cd ui_flutter
+call flutter build windows --release
+set "rc=%errorlevel%"
+cd ..
+echo Артефакт: ui_flutter\build\windows\x64\runner\Release\omnistash_ui.exe
+goto after
+
+:op_assets
+echo Иконки .ico из темы Бренд, SVG-ассеты, реестр темы и токены Flutter...
+python tools\make_icon.py
+set "rc=%errorlevel%"
+if not "%rc%"=="0" goto after
+python tools\make_icon.py --check
+set "rc=%errorlevel%"
+if not "%rc%"=="0" goto after
+python tools\build_icon_svgs.py --check
+set "rc=%errorlevel%"
+if not "%rc%"=="0" goto after
+python tools\build_brand_theme.py --check
+set "rc=%errorlevel%"
+if not "%rc%"=="0" goto after
+python tools\build_flutter_theme.py --check
+set "rc=%errorlevel%"
+goto after
+
+:op_packs
+echo Бандл клиента и юр-пак: сверка без изменений, затем воркфлоу...
+python tools\build_client.py --check
+set "rc=%errorlevel%"
+if not "%rc%"=="0" goto after
+python tools\build_legal_pack.py --check
+set "rc=%errorlevel%"
+if not "%rc%"=="0" goto after
+python tools\check_workflows.py
+set "rc=%errorlevel%"
+goto after
+
+:op_serve
+echo Запуск окна с живым фасадом --serve (HTTPS слушатель рядом с окном)...
+python omnistash.py --serve
 set "rc=%errorlevel%"
 goto after
 

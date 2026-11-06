@@ -356,5 +356,37 @@ class FlutterMirrorTest(unittest.TestCase):
                         problems)
 
 
+    def test_console_and_readme_name_the_flutter_steps(self):
+        """Консоль debug.bat и README называют Flutter-пункты и ассет-сверки.
+
+        Прежде консоль знала только Python-шаги, хотя ui_flutter, ассеты и паки
+        уже в репозитории: без пунктов G-K человек не мог сверить токены,
+        колонки и табы, собрать иконки или сверить бандл одной командой - и
+        README не называл эти команды. Расхождение называется текстом, как
+        прочие стражи этого модуля.
+        """
+        debug = (SRC / "debug.bat").read_text(encoding="utf-8", errors="replace")
+        self.assertIn("python tools\\check_flutter_mirror.py", debug,
+                      "консоль не сверяет Dart-ассет с источниками (пункт G)")
+        self.assertIn("flutter analyze", debug,
+                      "консоль не гоняет flutter analyze (пункт H)")
+        self.assertIn("flutter test", debug,
+                      "консоль не гоняет flutter test (пункт H)")
+        self.assertIn("flutter build windows --release", debug,
+                      "консоль не собирает release exe окна (пункт I)")
+        self.assertIn("python tools\\make_icon.py", debug,
+                      "консоль не собирает иконки .ico из темы Бренд (пункт J)")
+        self.assertIn("python tools\\build_flutter_theme.py --check", debug,
+                      "консоль не сверяет токены Flutter с генерацией (пункт J)")
+        self.assertIn("python tools\\build_client.py --check", debug,
+                      "консоль не сверяет бандл клиента (пункт K)")
+        self.assertIn("python tools\\build_legal_pack.py --check", debug,
+                      "консоль не сверяет юр-пак (пункт K)")
+        readme = (SRC / "README.md").read_text(encoding="utf-8")
+        for point in ("debug.bat G", "debug.bat H", "debug.bat I",
+                      "debug.bat J", "debug.bat K"):
+            self.assertIn(point, readme, f"README не называет пункт консоли {point}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
