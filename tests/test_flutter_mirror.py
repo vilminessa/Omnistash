@@ -23,11 +23,21 @@
     ui_src/app.js - не изобретает свои числа;
   * карта цветов статусов строки совпадает с правилами `.status[data-s=...]`
     в ui_src/app.css (known и unavailable читаются базовой подписью muted);
+  * сортируемые колонки Flutter (`kSortableColumns`) - тот же порядок и
+    подписи, что `LIST_COLS` в ui_src/app.js, и те же ключи, что белый
+    список сервера `ORDER_COLS` в app/repo.py; гейты колонок (`col_*`) и
+    ключи сохранения порядка (`sort_col`, `sort_dir`) существуют в схеме
+    настроек; колонка `check` без sortable исключена из сверки - названо;
+  * табы Flutter (`kTabLabels`, `kTabStubs`) - тот же порядок подписей, что
+    `TAB_RU` в ui_src/app.js (динамические вкладки площадок `platform`
+    исключены - названо); каждая не построенная вкладка называет волну, а
+    построенная Библиотека (W2) заглушки не имеет;
   * choices поля theme в схеме настроек - тот же порядок, что список тем в
     Flutter, иначе настройка не применится к Flutter-окну;
   * расхождение называется: битый hex, переставленный порядок id, изменённая
-    метрика, изменённый размер страницы, выдуманный ключ `rows` и литерал в
-    production-коде дают отказ с текстом, а не молчание.
+    метрика, изменённый размер страницы, выдуманный ключ `rows`, переименованная
+    или лишняя колонка, битый гейт, переставленные табы, заглушка без волны и
+    литерал в production-коде дают отказ с текстом, а не молчание.
 """
 
 import pathlib
@@ -191,6 +201,104 @@ class FlutterMirrorTest(unittest.TestCase):
         self.assertTrue(any("rows" in line for line in problems),
                         f"выдуманный ключ не назван: {problems}")
 
+    def test_sortable_columns_match_js_and_repo(self):
+        """Колонки Flutter - тот же порядок и подписи, что LIST_COLS, и те же
+        ключи, что белый список сервера ORDER_COLS."""
+        js_cols = mirror.js_list_columns()
+        view = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
+        dart = mirror.dart_sortable_columns(view)
+        self.assertEqual(dart, js_cols,
+                         "колонки Flutter расходятся с LIST_COLS из ui_src/app.js")
+        self.assertEqual(sorted(col for _label, col, _gate in dart),
+                         sorted(mirror.repo_order_cols()),
+                         "ключи сортировки Flutter != белый список ORDER_COLS")
+        self.assertEqual(mirror.sortable_columns_problems(), [],
+                         mirror.sortable_columns_problems())
+        # Колонка check без sortable исключена из сверки - это названо в страже.
+        self.assertNotIn("check", [col for _label, col, _gate in js_cols],
+                         "колонка выбора не сортируется и не должна быть в списке")
+
+    def test_column_gates_and_sort_keys_are_schema_keys(self):
+        """Гейты колонок и ключи сохранения порядка существуют в схеме."""
+        schema = {item["key"] for item in settings_schema.FIELDS}
+        for _label, _col, gate in mirror.js_list_columns():
+            if gate:
+                self.assertIn(gate, schema, f"гейт {gate} не в схеме настроек")
+        self.assertIn("sort_col", schema,
+                      "схема не имеет sort_col - сохранение порядка пишет в никуда")
+        self.assertIn("sort_dir", schema,
+                      "схема не имеет sort_dir - сохранение порядка пишет в никуда")
+
+    def test_tabs_match_js_and_stubs_name_the_wave(self):
+        """Порядок табов - TAB_RU; заглушки покрывают unbuilt вкладки и
+        называют волну; построенная Библиотека заглушки не имеет."""
+        tabs_text = (mirror.LIB / "tabs.dart").read_text(encoding="utf-8")
+        self.assertEqual(mirror.dart_tab_labels(tabs_text),
+                         mirror.js_tab_labels(),
+                         "порядок табов Flutter расходится с TAB_RU из app.js")
+        self.assertEqual(mirror.tabs_problems(), [], mirror.tabs_problems())
+        stubs = mirror.dart_tab_stubs(tabs_text)
+        labels = mirror.dart_tab_labels(tabs_text)
+        self.assertEqual(sorted(stubs), sorted(labels[1:]),
+                         "заглушки не покрывают все не построенные вкладки")
+        self.assertNotIn(labels[0], stubs,
+                         "построенная Библиотека (W2) имеет заглушку - она прячет экран")
+        for label, text in stubs.items():
+            self.assertRegex(text, r"волна W\d",
+                             f"заглушка {label} не называет волну")
+
+    def test_column_label_drift_is_named(self):
+        view = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
+        broken = view.replace("(label: 'Название', col: 'title', gate: '')",
+                              "(label: 'Имя', col: 'title', gate: '')")
+        problems = mirror.sortable_columns_problems(broken)
+        self.assertTrue(any("Название" in line for line in problems),
+                        f"переименованная колонка не названа: {problems}")
+
+    def test_column_key_drift_is_named(self):
+        view = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
+        broken = view.replace("(label: 'Тип', col: 'media_kind', gate: '')",
+                              "(label: 'Тип', col: 'media', gate: '')")
+        problems = mirror.sortable_columns_problems(broken)
+        self.assertTrue(any("ORDER_COLS" in line for line in problems),
+                        f"ключ вне белого списка сервера не назван: {problems}")
+
+    def test_column_gate_typo_is_named(self):
+        view = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
+        broken = view.replace("'col_views'", "'col_view'")
+        problems = mirror.sortable_columns_problems(broken)
+        self.assertTrue(any("col_view" in line and "схеме" in line for line in problems),
+                        f"битый гейт колонки не назван: {problems}")
+
+    def test_tab_order_drift_is_named(self):
+        tabs_text = (mirror.LIB / "tabs.dart").read_text(encoding="utf-8")
+        broken = tabs_text.replace("'Очередь', 'Настройки'",
+                                   "'Настройки', 'Очередь'")
+        problems = mirror.tabs_problems(broken)
+        self.assertTrue(any("порядок табов" in line for line in problems),
+                        f"переставленные табы не названы: {problems}")
+
+    def test_stub_without_wave_is_named(self):
+        tabs_text = (mirror.LIB / "tabs.dart").read_text(encoding="utf-8")
+        broken = tabs_text.replace("не построен: волна W2",
+                                   "не построен: когда-нибудь")
+        problems = mirror.tabs_problems(broken)
+        self.assertTrue(any("не называет волну" in line for line in problems),
+                        f"заглушка без волны не названа: {problems}")
+
+    def test_built_tab_with_stub_is_named(self):
+        tabs_text = (mirror.LIB / "tabs.dart").read_text(encoding="utf-8")
+        broken = tabs_text.replace(
+            "const Map<String, String> kTabStubs = <String, String>{\n"
+            "  'Синхронизация':",
+            "const Map<String, String> kTabStubs = <String, String>{\n"
+            "  'Библиотека': 'Экран библиотеки не построен: волна W2',\n"
+            "  'Синхронизация':")
+        problems = mirror.tabs_problems(broken)
+        self.assertTrue(any("Библиотека" in line and "заглушку" in line
+                            for line in problems),
+                        f"заглушка на построенной вкладке не названа: {problems}")
+
     def test_facade_contract_matches_the_canonical_body(self):
         """Dart шлет тело той же формы, что браузерный клиент и сервер."""
         self.assertEqual(mirror.contract_problems(), [], mirror.contract_problems())
@@ -240,6 +348,7 @@ class FlutterMirrorTest(unittest.TestCase):
             "const Map<String, String> kStatusRoles = <String, String>{\n"
             "  'downloaded': 'ok',\n};\n", encoding="utf-8")
         (tmp / "app.dart").write_text("void main() {}\n", encoding="utf-8")
+        (tmp / "tabs.dart").write_text("void main() {}\n", encoding="utf-8")
         problems = mirror.literal_problems(tmp)
         self.assertEqual(len(problems), 2, f"литералы не названы: {problems}")
         self.assertTrue(any("hex-литерал" in line for line in problems), problems)

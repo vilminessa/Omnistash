@@ -8,9 +8,13 @@ Impeller меряются на машине человека), поэтому р
 сверяется текстом ассета без тулчейна: ui_flutter/lib/theme_tokens.dart
 парсится как текст и сравнивается с app/themes.py (роли, подписи, флаги dark,
 пары контраста, границы шрифта, формула строки) и с ui_src/app.css (:root -
-метрики DESIGN-UI §2). Плюс проверка, что production-код Flutter не держит
-литералов: ни hex-цвета вне токенов, ни размера или длительности числом -
-имена ролей читаются из реестра.
+метрики DESIGN-UI §2). С волной W2 сюда легли и экраны: форма ответа списка
+(`rows`/`total` из app/repo.py), `PAGE`/`POLL_MS` из ui_src/app.js, карта
+статусов против `.status[data-s=...]`, сортируемые колонки против `LIST_COLS`
+и `ORDER_COLS`, гейты и sort_col/sort_dir против схемы настроек и табы против
+`TAB_RU`. Плюс проверка, что production-код Flutter не держит литералов: ни
+hex-цвета вне токенов, ни размера или длительности числом - имена ролей
+читаются из реестра.
 
 Это тот же приём, что tests/test_ui_settings_mirror.py для браузерного клиента:
 значение берётся из одного источника, а второй сверяется с ним, иначе два
@@ -39,7 +43,7 @@ REPO = ROOT / "app" / "repo.py"
 # main.dart и spike-файлы здесь нет намеренно: стенд W0 держит фиксированную
 # геометрию списка (высота ряда 44 px), и его числа описаны в
 # docs/FLUTTER-TRANSITION.md §9 - это мерка, а не дизайн-токен.
-PRODUCTION_FILES = ("theme.dart", "library_view.dart", "app.dart")
+PRODUCTION_FILES = ("theme.dart", "library_view.dart", "app.dart", "tabs.dart")
 
 # Статусы без отдельного правила в CSS (.status[data-s=...]) читаются базовой
 # подписью --muted: known и unavailable не имеют своей роли - это названо
@@ -290,6 +294,176 @@ def contract_source_problems(view_text: str | None = None) -> list[str]:
     return problems
 
 
+# Колонка «check» в LIST_COLS не имеет sortable - она не сортируется, и
+# сверка колоннок исключает её; это названо здесь, а не молча.
+NON_SORTABLE_COL = "check"
+# platform в TAB_RU - динамические вкладки площадок (app.js:5955), не часть
+# основной панели табов; сверка табов исключает их; это названо здесь же.
+DYNAMIC_TAB = "platform"
+
+
+def js_list_columns() -> list[tuple[str, str, str]]:
+    """Сортируемые колонки из `LIST_COLS` в ui_src/app.js: (label, col, gate)."""
+    js = JS.read_text(encoding="utf-8")
+    block = re.search(r"var LIST_COLS = \[(.*?)\];", js, flags=re.S)
+    if not block:
+        raise AssertionError("в ui_src/app.js нет блока LIST_COLS - "
+                             "сверка колонок потеряла источник")
+    entries = re.findall(
+        r'\{\s*key:\s*"([a-z0-9_-]+)"[^}]*?label:\s*"([^"]*)"'
+        r'(?:[^}]*?sortable:\s*"([a-z_]+)")?(?:[^}]*?setting:\s*"([a-z_]+)")?\s*\}',
+        block.group(1))
+    columns = [(label, sortable, setting)
+               for key, label, sortable, setting in entries if sortable]
+    if not columns:
+        raise AssertionError("в LIST_COLS нет ни одной sortable колонки - "
+                             "источник сверки пуст")
+    return columns
+
+
+def repo_order_cols() -> list[str]:
+    """Белый список колонок сортировки сервера: ключи ORDER_COLS в app/repo.py."""
+    src = REPO.read_text(encoding="utf-8")
+    block = re.search(r"ORDER_COLS: dict\[str, str\] = \{(.*?)\n\}", src,
+                      flags=re.S)
+    if not block:
+        raise AssertionError("в app/repo.py нет ORDER_COLS - белый список "
+                             "сервера потерян, сверка не имеет источника")
+    keys = re.findall(r'"([a-z_]+)":\s', block.group(1))
+    if not keys:
+        raise AssertionError("ORDER_COLS пуст - сервер не принимает ни одной "
+                             "колонки сортировки")
+    return keys
+
+
+def dart_sortable_columns(text: str) -> list[tuple[str, str, str]]:
+    """Сортируемые колонки из `kSortableColumns` в library_view.dart."""
+    block = re.search(
+        r"const List<\(\{String label, String col, String gate\}\)>\s*"
+        r"kSortableColumns\s*=\s*<\(\{String label, String col, String gate\}\)>\[(.*?)\];",
+        text, flags=re.S)
+    if not block:
+        raise AssertionError("в library_view.dart нет kSortableColumns - "
+                             "список колонок Flutter потерян")
+    return [tuple(match) for match in re.findall(
+        r"\(\s*label:\s*'([^']*)',\s*col:\s*'([^']*)',\s*gate:\s*'([^']*)'\s*\)",
+        block.group(1))]
+
+
+def sortable_columns_problems(view_text: str | None = None) -> list[str]:
+    """Колонки Flutter сверены с ui_src/app.js и с белым списком сервера.
+
+    Порядок и подписи - из `LIST_COLS`; ключи сортировки - обязаны входить в
+    `ORDER_COLS` app/repo.py (иначе сервер молча держит default order);
+    гейты колонок - существующие ключи схемы настроек; sort_col/sort_dir -
+    тоже в схеме, иначе сохранение порядка пишет несуществующую настройку.
+    """
+    expected = js_list_columns()
+    view = (view_text if view_text is not None
+            else (LIB / "library_view.dart").read_text(encoding="utf-8"))
+    got = dart_sortable_columns(view)
+    problems = []
+    if got != expected:
+        problems.append(f"колонки Flutter {got} != LIST_COLS из ui_src/app.js "
+                        f"{expected}: порядок или подписи расходятся - два "
+                        "клиента рисуют разные колонки и разно порядок строк")
+    dart_keys = [col for _label, col, _gate in got]
+    repo_keys = repo_order_cols()
+    missing = sorted(set(repo_keys) - set(dart_keys))
+    extra = sorted(set(dart_keys) - set(repo_keys))
+    if missing:
+        problems.append(f"Flutter не сортирует ключи {missing}, которые "
+                        "принимает сервер (app/repo.py: ORDER_COLS) - клик по "
+                        "колонке теряет половину порядка браузера")
+    if extra:
+        problems.append(f"Flutter шлёт ключи {extra}, которых нет в белом "
+                        "списке сервера ORDER_COLS - сервер молча держит "
+                        "default order, и список выглядит рассортированным зря")
+    schema_keys = {item["key"] for item in settings_schema.FIELDS}
+    for label, _col, gate in got:
+        if gate and gate not in schema_keys:
+            problems.append(f"колонка {label}: гейт {gate} не в схеме "
+                            "настроек - колонка не скрывается по настройке")
+    js_gates = {gate for _label, _col, gate in expected if gate}
+    unknown = sorted(js_gates - schema_keys)
+    if unknown:
+        problems.append(f"гейты {unknown} из LIST_COLS не в схеме настроек - "
+                        "сверка потеряла источник скрытия колонок")
+    for key in ("sort_col", "sort_dir"):
+        if key not in schema_keys:
+            problems.append(f"схема настроек не имеет ключа {key} - "
+                            "сохранение порядка сортировки пишет в никуда")
+    return problems
+
+
+def js_tab_labels() -> list[str]:
+    """Подписи табов из `TAB_RU` в ui_src/app.js:5739, в порядке словаря."""
+    js = JS.read_text(encoding="utf-8")
+    block = re.search(r"var TAB_RU = \{(.*?)\};", js, flags=re.S)
+    if not block:
+        raise AssertionError("в ui_src/app.js нет TAB_RU - подписи табов "
+                             "потеряны, сверка не имеет источника")
+    return [label for key, label in re.findall(r'([a-z_]+):\s*"([^"]*)"',
+                                               block.group(1))
+            if key != DYNAMIC_TAB]
+
+
+def dart_tab_labels(tabs_text: str) -> list[str]:
+    match = re.search(r"const List<String> kTabLabels = <String>\[(.*?)\];",
+                      tabs_text, flags=re.S)
+    if not match:
+        raise AssertionError("в tabs.dart нет kTabLabels - порядок табов потерян")
+    return re.findall(r"'([^']*)'", match.group(1))
+
+
+def dart_tab_stubs(tabs_text: str) -> dict[str, str]:
+    """Заглушки unbuilt вкладок: подпись -> первый фрагмент текста панели."""
+    match = re.search(
+        r"const Map<String, String> kTabStubs = <String, String>\{(.*?)\};",
+        tabs_text, flags=re.S)
+    if not match:
+        raise AssertionError("в tabs.dart нет kTabStubs - заглушки не "
+                             "построенных вкладок потеряны")
+    return dict(re.findall(r"'([^']+)':\s*'([^']*)'", match.group(1)))
+
+
+def tabs_problems(tabs_text: str | None = None) -> list[str]:
+    """Табы Flutter сверены с TAB_RU; заглушки называют, а не молчат.
+
+    Первая вкладка (Библиотека) построена на W2 - заглушки для неё быть не
+    должно; каждая unbuilt вкладка обязана называть волну, иначе человек не
+    знает, когда экран появится, и пустая панель выглядит «пустым экраном».
+    """
+    if tabs_text is None:
+        tabs_file = LIB / "tabs.dart"
+        if not tabs_file.is_file():
+            return ["tabs.dart не построен: табы окна (W2, шаг 2) отсутствуют"]
+        tabs_text = tabs_file.read_text(encoding="utf-8")
+    problems = []
+    labels = dart_tab_labels(tabs_text)
+    expected = js_tab_labels()
+    if labels != expected:
+        problems.append(f"порядок табов Flutter {labels} != TAB_RU из "
+                        f"ui_src/app.js {expected} (без динамических вкладок "
+                        "площадок): два клиента показывают вкладки в разном порядке")
+    stubs = dart_tab_stubs(tabs_text)
+    if labels and labels[0] in stubs:
+        problems.append(f"вкладка {labels[0]} имеет заглушку, но её экран "
+                        "построен на W2: заглушка прячет построенную панель")
+    missing = [label for label in labels[1:] if label not in stubs]
+    if missing:
+        problems.append(f"вкладки {missing} не имеют заглушки: не построенный "
+                        "экран показан молча - это выглядит пустым экраном")
+    extra = sorted(set(stubs) - set(labels[1:]))
+    if extra:
+        problems.append(f"kTabStubs держит подписи вне табов: {extra}")
+    for label, text in stubs.items():
+        if not re.search(r"волна W\d", text):
+            problems.append(f"заглушка {label} не называет волну: человек не "
+                            "знает, когда экран будет построен")
+    return problems
+
+
 def generation_problems() -> list[str]:
     """Ассет совпадает с генерацией байт-в-байт (детерминированный вывод)."""
     if not TOKENS.is_file():
@@ -382,6 +556,8 @@ def problems() -> list[str]:
     out += literal_problems()
     out += status_roles_problems()
     out += contract_source_problems()
+    out += sortable_columns_problems()
+    out += tabs_problems()
     out += contract_problems()
     return out
 
@@ -401,7 +577,9 @@ def main(argv: list[str]) -> int:
         return 0
     print("токены Flutter совпадают с app/themes.py, ui_src/app.css и "
           f"списком тем настроек ({len(parsed['ids'])} тем, "
-          f"{len(parsed['metrics'])} метрик, {len(parsed['pairs'])} пар)")
+          f"{len(parsed['metrics'])} метрик, {len(parsed['pairs'])} пар); "
+          f"колонки ({len(js_list_columns())}) и табы ({len(js_tab_labels())}) "
+          "сверены с ui_src/app.js, ORDER_COLS app/repo.py и схемой настроек")
     return 0
 
 

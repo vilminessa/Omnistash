@@ -12,9 +12,11 @@
 /// названа целиком (имя, статус, канал, длительность, рейтинг), выбор
 /// передаётся как `selected`, строка доступна с клавиатуры (ListTile с
 /// `onTap` фокусируется и активируется Enter/Space), полоса состояния -
-/// живый регион (`live`) как `aria-live` у журнала. Табы, сортировка колонок
-/// и `aria-sort` - следующий шаг W2: здесь порядок строк приходит от сервера
-/// (`v.uploaded_at DESC, v.id DESC`), а не из клиента.
+/// живый регион (`liveRegion`) как `aria-live` у журнала. Сортировка
+/// колонок построена на шаге W2 (ниже): порядок строк приходит от сервера
+/// через аргумент `order` - тот же, что `ensureRange` в ui_src/app.js, а
+/// при пустой колонке сервер держит `uploaded_at DESC`, как браузерный
+/// клиент с `order: null`. Табы - `tabs.dart` (шаг 2).
 
 library;
 
@@ -37,6 +39,30 @@ const int kPageLimit = 120;
 /// Период опроса состояния: тот же `POLL_MS` из ui_src/app.js:36 (500 мс),
 /// сверяется tools/check_flutter_mirror.py - молча не «по памяти клиента».
 const int kPollIntervalMs = 500;
+
+/// Сортируемые колонки списка - тот же порядок, подписи, ключи и гейты,
+/// что `LIST_COLS` в ui_src/app.js:3170 (колонка `check` без sortable в
+/// сверке исключена - она не сортируется, это названо в страже). Запись:
+/// подпись, ключ `ORDER_COLS` из app/repo.py (белый список сервера), имя
+/// настройки-гейта или '' без гейта. Именованная форма записи `({...})` -
+/// позиционная с именами полей в этом SDK не компилируется (названо прогоном
+/// flutter analyze). Сверку порядка, ключей и гейтов ведёт
+/// tools/check_flutter_mirror.py против ui_src/app.js и app/repo.py.
+const List<({String label, String col, String gate})> kSortableColumns =
+    <({String label, String col, String gate})>[
+  (label: 'Статус', col: 'status', gate: ''),
+  (label: 'Тип', col: 'media_kind', gate: ''),
+  (label: 'Название', col: 'title', gate: ''),
+  (label: 'Канал', col: 'channel', gate: ''),
+  (label: 'Время', col: 'duration', gate: ''),
+  (label: 'Дата', col: 'date', gate: ''),
+  (label: 'Размер', col: 'size', gate: ''),
+  (label: 'Просмотры', col: 'views', gate: 'col_views'),
+  (label: 'Лайки', col: 'likes', gate: 'col_likes'),
+  (label: 'Комменты', col: 'comments', gate: 'col_comments'),
+  (label: 'Теги', col: 'tag', gate: 'col_tags'),
+  (label: 'Синк', col: 'sync', gate: 'col_sync'),
+];
 
 /// Роль цвета статуса строки - тот же источник, что `.status[data-s=...]`
 /// в ui_src/app.css (downloaded -> ok, queued -> info, downloading -> warn,
@@ -76,9 +102,18 @@ String durationOf(Object? seconds) {
 /// Строка состояния (полоса под шапкой): журнал дельтой от `poll`, последняя
 /// запись; пустой журнал называется, а не прячется.
 class LibraryHome extends StatefulWidget {
-  const LibraryHome({super.key, required this.facade});
+  const LibraryHome({
+    super.key,
+    required this.facade,
+    this.settings = const <String, Object?>{},
+  });
 
   final Facade facade;
+
+  /// Снимок настроек из `get_initial`: гейты колонок (`col_*` - колонка
+  /// скрыта только при значении `false`, как `colVisible` в ui_src/app.js)
+  /// и сохранённый порядок (`sort_col`, `sort_dir`).
+  final Map<String, Object?> settings;
 
   @override
   State<LibraryHome> createState() => _LibraryHomeState();
@@ -89,13 +124,24 @@ class _LibraryHomeState extends State<LibraryHome> {
   int _total = 0;
   int? _selectedId;
   String? _error;
+  String? _persistError;
   String _journal = 'журнал пуст';
   bool _loading = true;
   Timer? _poll;
 
+  /// Порядок сортировки: тот же тогл, что `toggleSort` в ui_src/app.js:3256 -
+  /// та же колонка разворачивает направление, новая колонка начинает с
+  /// `desc`; при пустой колонке сервер держит default order (uploaded_at
+  /// DESC) - как браузерный клиент с `order: null`.
+  String _sortCol = '';
+  String _sortDir = 'desc';
+
   @override
   void initState() {
     super.initState();
+    final col = widget.settings['sort_col'];
+    _sortCol = col is String ? col : '';
+    _sortDir = widget.settings['sort_dir'] == 'asc' ? 'asc' : 'desc';
     _loadFirst();
     _poll = Timer.periodic(Duration(milliseconds: kPollIntervalMs), (_) => _pollJournal());
   }
@@ -106,11 +152,38 @@ class _LibraryHomeState extends State<LibraryHome> {
     super.dispose();
   }
 
+  /// Настройки -> состояние списка, как `syncSortAndCols` в
+  /// ui_src/app.js:3273: снимок из `get_initial` приходит асинхронно, и
+  /// сохранённый порядок применяется к первому запросу перезагрузкой
+  /// страниц (страницы под новым порядком не имеют смысла).
+  @override
+  void didUpdateWidget(LibraryHome oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final col = widget.settings['sort_col'];
+    final newCol = col is String ? col : '';
+    final newDir = widget.settings['sort_dir'] == 'asc' ? 'asc' : 'desc';
+    if (newCol != _sortCol || newDir != _sortDir) {
+      setState(() {
+        _sortCol = newCol;
+        _sortDir = newDir;
+      });
+      _loadFirst();
+    }
+  }
+
+  /// Аргумент `order` для `list_videos` - та же форма, что `ensureRange` в
+  /// ui_src/app.js:3308: ключ присутствует всегда, `null` при пустой
+  /// колонке (сервер тогда держит `uploaded_at DESC NULLS LAST`).
+  Map<String, Object?>? _orderArg() => _sortCol.isEmpty
+      ? null
+      : <String, Object?>{'col': _sortCol, 'dir': _sortDir};
+
   Future<void> _loadFirst() async {
     setState(() => _loading = true);
     try {
-      final res = await widget.facade.call('list_videos',
-          <String, Object?>{'offset': 0, 'limit': kPageLimit});
+      final res = await widget.facade.call('list_videos', <String, Object?>{
+        'offset': 0, 'limit': kPageLimit, 'order': _orderArg(),
+      });
       final refusal = _refusalOf(res);
       if (refusal != null) {
         setState(() {
@@ -137,8 +210,9 @@ class _LibraryHomeState extends State<LibraryHome> {
     final offset = _rows.length;
     if (offset >= _total) return;
     try {
-      final res = await widget.facade.call('list_videos',
-          <String, Object?>{'offset': offset, 'limit': kPageLimit});
+      final res = await widget.facade.call('list_videos', <String, Object?>{
+        'offset': offset, 'limit': kPageLimit, 'order': _orderArg(),
+      });
       final refusal = _refusalOf(res);
       if (refusal != null) {
         setState(() => _error = refusal);
@@ -151,6 +225,46 @@ class _LibraryHomeState extends State<LibraryHome> {
     } catch (error) {
       setState(() => _error = 'следующая страница не загружена: $error');
     }
+  }
+
+  /// Тогл сортировки - поведение `toggleSort` из ui_src/app.js:3256: та же
+  /// колонка разворачивает направление, новая - начинает с `desc`. Страницы
+  /// под новым порядком не имеют смысла, поэтому первая страница
+  /// перезагружается; выбор живёт в настройках и переживает перезапуск -
+  /// `save_setting` `sort_col`/`sort_dir` тем же ключом, что браузер.
+  Future<void> _toggleSort(String col) async {
+    final same = _sortCol == col;
+    final dir = (same && _sortDir == 'desc') ? 'asc' : 'desc';
+    setState(() {
+      _sortCol = col;
+      _sortDir = dir;
+    });
+    await _loadFirst();
+    await _persistSort(col, dir);
+  }
+
+  /// Сохранение порядка. Читателю ключ `save_setting` сервер отказывает
+  /// (403 «не выдан скоуп server_config» или отказ внутри 200): локальный
+  /// порядок остаётся применённым к запросу, а отказ называется текстом -
+  /// молчания нет.
+  Future<void> _persistSort(String col, String dir) async {
+    final refusals = <String>[];
+    for (final entry in <Map<String, Object?>>[
+      <String, Object?>{'key': 'sort_col', 'value': col},
+      <String, Object?>{'key': 'sort_dir', 'value': dir},
+    ]) {
+      try {
+        final res = await widget.facade.call('save_setting', entry);
+        final refusal = _refusalOf(res);
+        if (refusal != null) refusals.add(refusal);
+      } catch (error) {
+        refusals.add('$error');
+      }
+    }
+    setState(() => _persistError = refusals.isEmpty
+        ? null
+        : 'порядок применён к списку, но не сохранён в настройках: '
+            '${refusals.join('; ')}');
   }
 
   Future<void> _pollJournal() async {
@@ -243,6 +357,50 @@ class _LibraryHomeState extends State<LibraryHome> {
     );
   }
 
+  /// Строка сортируемых колонок - эквивалент `renderGridHead` из
+  /// ui_src/app.js:3230: `role="columnheader"` + `aria-sort` на ячейке
+  /// заголовка. Отдельного флага `aria-sort` в семантике Flutter нет
+  /// (`SemanticsSortKey` задаёт только порядок обхода), поэтому направление
+  /// передаётся текстом подписи со стрелкой ▲/▼ - названо расхождением.
+  /// Скрытые гейтом `col_*` колонки не рисуются - тот же `colVisible`.
+  Widget _buildSortHead(BuildContext context) {
+    final theme = Theme.of(context);
+    final visible = kSortableColumns.where(
+        (c) => c.gate.isEmpty || widget.settings[c.gate] != false);
+    return Padding(
+      padding: EdgeInsets.symmetric(horizontal: kMetrics.s4),
+      child: Wrap(
+        spacing: kMetrics.s2,
+        runSpacing: kMetrics.s2,
+        children: <Widget>[
+          for (final c in visible)
+            TextButton(
+              // Клавиатура: TextButton фокусируется и активируется
+              // Enter/Space - тот же доступ, что `tabindex="0"` у ячейки.
+              onPressed: () => _toggleSort(c.col),
+              child: Semantics(
+                // Эквивалент role="columnheader" + aria-sort из
+                // renderGridHead (ui_src/app.js:3230): флаг header внутри
+                // child сливается с узлом кнопки в один узел (проверено
+                // widget-тестом: [isButton, isHeader] на узле с подписью;
+                // обёртка снаружи давала бы отдельный узел без кнопки).
+                // Отдельного флага aria-sort в семантике Flutter нет
+                // (SemanticsSortKey задаёт только порядок обхода), поэтому
+                // направление передаётся текстом подписи со стрелкой ▲/▼ -
+                // названо расхождением.
+                header: true,
+                child: Text(
+                  '${c.label}${_sortCol == c.col ? (_sortDir == 'asc' ? ' ▲' : ' ▼') : ''}',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                      fontWeight: _sortCol == c.col ? FontWeight.w600 : null),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -270,10 +428,18 @@ class _LibraryHomeState extends State<LibraryHome> {
               ],
             ),
           ),
+          _buildSortHead(context),
           if (_error != null)
             Padding(
               padding: EdgeInsets.symmetric(horizontal: kMetrics.s4, vertical: kMetrics.s2),
               child: Text('Отказ: $_error',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.error)),
+            ),
+          if (_persistError != null)
+            Padding(
+              padding: EdgeInsets.symmetric(horizontal: kMetrics.s4, vertical: kMetrics.s2),
+              child: Text(_persistError!,
                   style: theme.textTheme.bodySmall?.copyWith(
                       color: theme.colorScheme.error)),
             ),

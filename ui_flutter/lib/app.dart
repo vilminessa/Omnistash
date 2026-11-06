@@ -1,12 +1,14 @@
-/// OmnistashApp (W2, шаг 1): Flutter-окно поверх живого фасада `--serve`.
+/// OmnistashApp (W2): Flutter-окно поверх живого фасада `--serve`.
 ///
 /// Тема и размер текста читаются из настройки бэкенда (`get_initial` ->
 /// `settings.theme`, `settings.font_size`, app/gui.py: get_initial), поэтому
 /// браузерное окно и Flutter-окно красятся одной выбранной палитрой - выбор
 /// человека «две темы, выбор в настройках» (docs/FLUTTER-TRANSITION.md §W1).
-/// Битое значение настройки возвращается дефолтом (theme.dart:
-/// normalizeThemeId и границы kFontBounds), молчания нет: отказ называет
-/// текст сервера.
+/// Снимок настроек целиком передаётся вкладкам: состав колонок (гейты
+/// `col_*`) и сохранённый порядок (`sort_col`, `sort_dir`) читаются из него,
+/// как `syncSortAndCols` в ui_src/app.js:3273. Битое значение настройки
+/// возвращается дефолтом (theme.dart: normalizeThemeId и границы
+/// kFontBounds), молчания нет: отказ называет текст сервера.
 ///
 /// Если фасад не передан (адрес, ключ и пин не в окружении), экран называет
 /// причину и не показывает пустой список: `--serve` не поднят, а не «данных
@@ -17,7 +19,7 @@ library;
 import 'package:flutter/material.dart';
 
 import 'api_client.dart';
-import 'library_view.dart';
+import 'tabs.dart';
 import 'theme.dart';
 
 class OmnistashApp extends StatefulWidget {
@@ -34,11 +36,21 @@ class _OmnistashAppState extends State<OmnistashApp> {
   String _themeId = kDefaultThemeId;
   double? _fontSizePx;
   String? _error;
+  Map<String, Object?> _settings = const <String, Object?>{};
 
   @override
   void initState() {
     super.initState();
     if (widget.facade != null) _loadSettings();
+  }
+
+  /// Новый фасад (тест подменяет транспорт, в production-окне фасад не
+  /// меняется): снимок настроек перечитывается - он обязан соответствовать
+  /// тому бэкенду, к которому ходит экран.
+  @override
+  void didUpdateWidget(OmnistashApp oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.facade != oldWidget.facade) _loadSettings();
   }
 
   Future<void> _loadSettings() async {
@@ -57,6 +69,9 @@ class _OmnistashAppState extends State<OmnistashApp> {
       setState(() {
         _themeId = normalizeThemeId(theme is String ? theme : null);
         _fontSizePx = size is num ? size.toDouble() : null;
+        _settings = settings is Map<String, Object?>
+            ? settings
+            : const <String, Object?>{};
         _error = null;
       });
     } catch (error) {
@@ -74,7 +89,7 @@ class _OmnistashAppState extends State<OmnistashApp> {
       theme: theme,
       home: facade == null
           ? _NoServerHome(themeId: _themeId, error: _error)
-          : LibraryHome(facade: facade),
+          : OmnistashTabs(facade: facade, settings: _settings),
     );
   }
 }

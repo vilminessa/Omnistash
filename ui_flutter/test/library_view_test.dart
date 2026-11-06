@@ -1,72 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:omnistash_ui/api_client.dart';
 import 'package:omnistash_ui/app.dart';
 import 'package:omnistash_ui/library_view.dart';
 import 'package:omnistash_ui/theme.dart';
 
-/// Подмена фасада для теста экрана: та же форма ответа, что app/repo.py
-/// list_videos ({"total","rows"}) и app/gui.py get_initial (settings).
-class FakeFacade implements Facade {
-  FakeFacade({
-    this.theme = 'coolors',
-    this.fontSize = 13.0,
-    this.total = 0,
-    this.pages = const <List<Map<String, Object?>>>[],
-    this.refusal,
-    this.logs = const <String>['мок: запись журнала'],
-  });
-
-  final String theme;
-  final double fontSize;
-  final int total;
-  final List<List<Map<String, Object?>>> pages;
-  final String? refusal;
-  final List<String> logs;
-  final List<String> calls = <String>[];
-
-  @override
-  Future<Map<String, Object?>> call(String name, Object? arg) async {
-    calls.add(name);
-    switch (name) {
-      case 'get_initial':
-        return <String, Object?>{
-          'settings': <String, Object?>{'theme': theme, 'font_size': fontSize},
-        };
-      case 'list_videos':
-        if (refusal != null) {
-          return <String, Object?>{'error': refusal!};
-        }
-        final offset = (arg as Map<String, Object?>)['offset'] as int;
-        final index = offset ~/ kPageLimit;
-        final rows = index < pages.length
-            ? pages[index]
-            : const <Map<String, Object?>>[];
-        return <String, Object?>{kTotalKey: total, kRowsKey: rows};
-      case 'poll':
-        return <String, Object?>{'logs': logs, 'rev': logs.length};
-      default:
-        return <String, Object?>{'error': 'цель не подменена в тесте: $name'};
-    }
-  }
-}
-
-Map<String, Object?> row(int id, {
-  String status = 'known',
-  String label = 'в индексе',
-}) =>
-    <String, Object?>{
-      'id': id,
-      'title': 'Клип $id',
-      'status': status,
-      'status_label': label,
-      'channel': 'Канал ${id % 3}',
-      'duration_s': 125 + id,
-      'media_label': 'видео',
-      'user_rating': 0,
-      'has_thumb': id % 2 == 0,
-    };
+import 'fake_facade.dart';
 
 Future<void> _pump(WidgetTester tester) async {
   // Полоса состояния ходит к poll каждые kPollIntervalMs: pumpAndSettle не
@@ -185,9 +124,11 @@ void main() {
     expect(_counter(tester), '$kPageLimit из 250',
         reason: 'первая страница не равна kPageLimit: PAGE из app.js не применён');
     // Кнопка следующей страницы строится только когда попадает на экран
-    // (ListView.builder виртуализирует): тест докручивает список до неё.
-    await tester.scrollUntilVisible(find.textContaining('Ещё ('), 200.0,
-        scrollable: find.byType(Scrollable).first);
+    // (ListView.builder виртуализирует): тест прокручивает список drag-ом.
+    await tester.drag(find.byType(ListView), const Offset(0.0, -2500.0));
+    await _pump(tester);
+    await tester.drag(find.byType(ListView), const Offset(0.0, -2500.0));
+    await _pump(tester);
     expect(find.text('Ещё (${250 - kPageLimit})'), findsOneWidget,
         reason: 'total больше loaded: экрана без пути к следующей странице нет');
     await tester.tap(find.text('Ещё (${250 - kPageLimit})'));
@@ -241,5 +182,150 @@ void main() {
         reason: 'без фасада строки не должны появляться из подменённых данных');
     expect(find.textContaining('тема:'), findsOneWidget,
         reason: 'экран не называет, какая палитра применена без сервера');
+  });
+
+  testWidgets('сортировка: новая колонка - desc, та же - разворот, '
+      'первая страница перезагружается', (tester) async {
+    final facade = FakeFacade(total: 2, pages: <List<Map<String, Object?>>>[
+      <Map<String, Object?>>[row(0), row(1)],
+    ]);
+    await tester.pumpWidget(OmnistashApp(facade: facade));
+    await _pump(tester);
+
+    // Порядок по умолчанию: order:null - сервер держит uploaded_at DESC,
+    // как браузерный ensureRange (ui_src/app.js:3308).
+    expect(facade.sortRequests, <Map<String, Object?>?>[null],
+        reason: 'без выбранной колонки клиент должен послать order: null');
+
+    await tester.tap(find.text('Название'));
+    await _pump(tester);
+    expect(facade.sortRequests.last, <String, Object?>{'col': 'title', 'dir': 'desc'},
+        reason: 'новая колонка не началась с desc (toggleSort из app.js:3256)');
+    expect(find.text('Название ▼'), findsOneWidget,
+        reason: 'активная колонка не названа стрелкой - AT читает только подпись');
+    expect(facade.calls.where((name) => name == 'list_videos').length, 2,
+        reason: 'страницы под новым порядком не перезагружены');
+    expect(facade.savedSettings.map((entry) => entry['key']),
+        <String>['sort_col', 'sort_dir'],
+        reason: 'порядок не сохранён теми же ключами настроек, что браузер');
+    expect(facade.savedSettings.map((entry) => entry['value']),
+        <String>['title', 'desc']);
+
+    await tester.tap(find.text('Название ▼'));
+    await _pump(tester);
+    expect(facade.sortRequests.last, <String, Object?>{'col': 'title', 'dir': 'asc'},
+        reason: 'та же колонка не развернула направление');
+    expect(find.text('Название ▲'), findsOneWidget);
+
+    await tester.tap(find.text('Статус'));
+    await _pump(tester);
+    expect(facade.sortRequests.last, <String, Object?>{'col': 'status', 'dir': 'desc'},
+        reason: 'смена колонки должна начать с desc, а не наследовать asc');
+    expect(find.text('Статус ▼'), findsOneWidget);
+    expect(find.text('Название ▲'), findsNothing,
+        reason: 'прежняя активная колонка осталась подсвечена');
+  });
+
+  testWidgets('начальный порядок приходит из настроек get_initial',
+      (tester) async {
+    final facade = FakeFacade(total: 1, sortCol: 'date', sortDir: 'asc',
+        pages: <List<Map<String, Object?>>>[
+          <Map<String, Object?>>[row(0)],
+        ]);
+    await tester.pumpWidget(OmnistashApp(facade: facade));
+    await _pump(tester);
+
+    expect(facade.calls.where((name) => name == 'list_videos').length, 2,
+        reason: 'сохранённый порядок из настроек не перезагрузил первую страницу '
+            '(syncSortAndCols в ui_src/app.js:3273)');
+    expect(facade.sortRequests.last, <String, Object?>{'col': 'date', 'dir': 'asc'},
+        reason: 'sort_col/sort_dir из settings не применены к запросу');
+    expect(find.text('Дата ▲'), findsOneWidget,
+        reason: 'колонка из сохранённой настройки не подсвечена');
+    expect(facade.savedSettings, isEmpty,
+        reason: 'экран не должен сохранять порядок без клика пользователя');
+  });
+
+  testWidgets('гейт настройки col_views=false скрывает колонку (colVisible)',
+      (tester) async {
+    final hidden = FakeFacade(total: 1,
+        settingsExtra: <String, Object?>{'col_views': false},
+        pages: <List<Map<String, Object?>>>[
+          <Map<String, Object?>>[row(0)],
+        ]);
+    await tester.pumpWidget(OmnistashApp(facade: hidden));
+    await _pump(tester);
+    expect(find.text('Просмотры'), findsNothing,
+        reason: 'col_views=false не скрыл колонку: браузер colVisible !== false');
+
+    final shown = FakeFacade(total: 1,
+        settingsExtra: <String, Object?>{'col_views': true},
+        pages: <List<Map<String, Object?>>>[
+          <Map<String, Object?>>[row(0)],
+        ]);
+    await tester.pumpWidget(OmnistashApp(facade: shown));
+    await _pump(tester);
+    expect(find.text('Просмотры'), findsOneWidget,
+        reason: 'колонка со включённой настройкой исчезла молча');
+  });
+
+  testWidgets('отказ save_setting назван текстом, порядок остаётся применён',
+      (tester) async {
+    // Отказ внутри 200 (поле error) и отказ транспортом (403 по скоупу) -
+    // обе формы называются, локальный порядок применён к запросу.
+    final refused = FakeFacade(total: 2,
+        persistError: 'не выдан скоуп server_config',
+        pages: <List<Map<String, Object?>>>[
+          <Map<String, Object?>>[row(0), row(1)],
+        ]);
+    await tester.pumpWidget(OmnistashApp(facade: refused));
+    await _pump(tester);
+    await tester.tap(find.text('Название'));
+    await _pump(tester);
+
+    expect(find.textContaining('порядок применён к списку, но не сохранён'),
+        findsOneWidget,
+        reason: 'отказ сохранения порядка скрыт: экран выглядел сохранённым');
+    expect(find.textContaining('не выдан скоуп server_config'), findsOneWidget,
+        reason: 'причина отказа не названа текстом сервера');
+    expect(refused.sortRequests.last, <String, Object?>{'col': 'title', 'dir': 'desc'},
+        reason: 'отказ сохранения не должен отменять применённый порядок запроса');
+    expect(find.text('Название ▼'), findsOneWidget);
+
+    final thrown = FakeFacade(total: 2, persistThrow: true,
+        pages: <List<Map<String, Object?>>>[
+          <Map<String, Object?>>[row(0), row(1)],
+        ]);
+    await tester.pumpWidget(OmnistashApp(facade: thrown));
+    await _pump(tester);
+    await tester.tap(find.text('Название'));
+    await _pump(tester);
+
+    expect(find.textContaining('сервер ответил 403'), findsOneWidget,
+        reason: 'транспортный отказ 403 не назван: молчание вместо причины');
+    expect(thrown.sortRequests.last, <String, Object?>{'col': 'title', 'dir': 'desc'},
+        reason: 'транспортный отказ сохранения не должен отменять порядок запроса');
+  });
+
+  testWidgets('заголовок колонки - роль header, направление в подписи',
+      (tester) async {
+    final facade = FakeFacade(total: 1, pages: <List<Map<String, Object?>>>[
+      <Map<String, Object?>>[row(0)],
+    ]);
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(OmnistashApp(facade: facade));
+    await _pump(tester);
+    await tester.tap(find.text('Время'));
+    await _pump(tester);
+
+    // Эквивалент role="columnheader" + aria-sort из renderGridHead
+    // (ui_src/app.js:3230): флаг header есть, отдельного флага aria-sort в
+    // Flutter нет - направление читается текстом подписи со стрелкой.
+    final flags = tester.getSemantics(find.bySemanticsLabel('Время ▼')).flagsCollection;
+    expect(flags.isHeader, true,
+        reason: 'колонка не названа заголовком - AT не объявит columnheader');
+    expect(flags.isButton, true,
+        reason: 'колонка не активна как кнопка - с клавиатуры не переключить');
+    handle.dispose();
   });
 }
