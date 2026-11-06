@@ -522,6 +522,28 @@ class TestChannelsRecent(RepoCase):
                          "свежий синк канала - первым")
         self.assertEqual(rows[0]["n"], 1)
 
+    def test_equal_timestamp_order_is_stable(self):
+        """Ничья по одинаковой метке recent разрешает стабильный ключ, а не план.
+
+        Строки, сохранённые одной пачкой, имеют равный recent; без третьего
+        ключа ORDER BY ничью решает план SQLite, и разные сборки (локальная и
+        GitHub-раннер) показывают каналы в разном порядке. Измерено отказом
+        CI run 42213175159: на раннере первым встал канал с недоступной
+        лентой, и прогон каталога упал до чтения прочитанного канала
+        (test_channels_partial_surfaces_in_status). Один порядок на любой
+        машине задаёт c.remote_id.
+        """
+        same = "2026-10-10T00:00:00"
+        self._channel_videos("UC" + "b" * 22, "Второй", same)
+        self._channel_videos("UC" + "a" * 22, "Первый", same)
+        self._channel_videos("UC" + "c" * 22, "Третий", same)
+        first = [row["remote_id"] for row in repo.channels_recent(self.conn, "youtube")]
+        again = [row["remote_id"] for row in repo.channels_recent(self.conn, "youtube")]
+        self.assertEqual(first, again,
+                         "порядок каналов при равной метке не детерминирован между вызовами")
+        self.assertEqual(first, ["UC" + "a" * 22, "UC" + "b" * 22, "UC" + "c" * 22],
+                         "при равной метке порядок обязан задавать стабильный ключ remote_id")
+
     def test_channel_without_videos_but_added_as_source(self):
         """Канал добавлен ссылкой (источник-загрузки), видео ещё нет."""
         repo.ensure_playlist(self.conn, {

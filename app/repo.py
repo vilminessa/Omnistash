@@ -361,6 +361,16 @@ def channels_recent(conn: sqlite3.Connection, platform: str | None = None,
     Порядок - по последнему синку/скачиванию строки канала: «свежие
     загрузки» человека. Канал без строк и без источника-загрузок не
     участвует: каталог по нему показывать нечего.
+
+    Тай-брейк c.remote_id: строки, сохранённые одной пачкой (upsert), дают
+    одинаковую метку recent, и без третьего ключа ничью разрешает план
+    SQLite - разные сборки (локальная и GitHub-раннер) показывают каналы в
+    разном порядке.
+    Это было измерено отказом CI run 42213175159 (test_site_catalog
+    test_channels_partial_surfaces_in_status: на раннере первым встал
+    канал с blocked-лентой, прогон упал до чтения второго канала, и список
+    вышел пустым вместо «прочитанный канал остаётся»). Порядок обязан быть
+    один на любой машине: тот, что задан стабильным ключом, а не планом.
     """
     where = "WHERE c.platform=?" if platform else ""
     args = [platform] if platform else []
@@ -376,7 +386,7 @@ def channels_recent(conn: sqlite3.Connection, platform: str | None = None,
               {where}
               GROUP BY c.id
               HAVING n > 0 OR p.id IS NOT NULL
-              ORDER BY recent DESC, n DESC
+              ORDER BY recent DESC, n DESC, c.remote_id ASC
               LIMIT ?""", args)]
 
 
