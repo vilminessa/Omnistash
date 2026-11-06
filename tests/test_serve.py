@@ -832,6 +832,30 @@ class TestTokenStore(unittest.TestCase):
                           "отзов не снял право у живого слушателя")
         self.assertEqual(reader.count(), 0)
 
+    def test_fast_write_sequence_seen_even_in_one_fs_tick(self):
+        """Сверка перечитывания по байтам содержимого, а не по mtime.
+
+        На NTFS две записи в один такт файловой системы дают одинаковый
+        st_mtime_ns: реестр, сверяемый по времени файла, не увидел бы отзов,
+        записанный сразу после выдачи. Это было измерено отказом CI
+        (run 42209642957: test_another_writer_is_seen_without_restart на
+        GitHub-раннере). Повторение короткой последовательности без пауз
+        фиксирует детерминированность: живой слушатель обязан видеть и выдачу,
+        и снятие права в любом порядке записей.
+        """
+        reader = self.store()
+        writer = self.store()
+        for attempt in range(30):
+            token = writer.issue(["read"], label=f"читатель {attempt}")
+            self.assertIsNotNone(reader.verify(token.value),
+                                 f"выдача {attempt} не видна живому слушателю")
+            self.assertTrue(writer.revoke(token.id),
+                            f"отзов {attempt} не вернулся success")
+            self.assertIsNone(reader.verify(token.value),
+                              f"отзов {attempt} не снял право у живого слушателя")
+        self.assertEqual(reader.count(), 0,
+                         "после sequence в реестре не должно остаться ключей")
+
     def test_max_tokens_default_is_small(self):
         """Перебор ключей ограничен: 8 живущих ключей - не «сколько угодно»."""
         self.assertEqual(serve_tokens.MAX_TOKENS, 8)

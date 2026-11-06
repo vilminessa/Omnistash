@@ -61,12 +61,14 @@ class TokenStore:
         self._tokens: dict[str, Token] = {}
         self._dirty = False
         self._loaded_at = 0
+        self._loaded_raw: bytes | None = None
         self._load()
 
     # -- хранение ------------------------------------------------------------
 
     def _mtime(self) -> int:
-        """Момент изменения файла реестра (0 - файла ещё нет)."""
+        """Момент изменения файла реестра (0 - файла ещё нет). Хранится для
+        отчёта; перечитывание сверяется байтами, а не им (см. _reload_if_changed)."""
         try:
             return self._path.stat().st_mtime_ns
         except OSError:
@@ -79,11 +81,20 @@ class TokenStore:
         тот же файл. Реестр, прочитанный один раз при старте, показал бы
         «ключа нет» для freshly выданного токена - это молчание о праве,
         которого уже есть.
+
+        Сверка байтами, а не mtime: на NTFS две записи в один такт
+        файловой системы дают одинаковый st_mtime_ns, и отзов, записанный
+        сразу после выдачи, остался бы невидим для живого слушателя. Это
+        было измерено отказом CI (run 42209642957, test_serve
+        test_another_writer_is_seen_without_restart: «отзов не снял право у
+        живого слушателя» на GitHub-раннере, локально проходил по таймингу) -
+        молчание о снятом праве опаснее лишнего чтения: файл реестра мал
+        (не более MAX_TOKENS записей), сравнение байтов дешёвое, а decrypt
+        вызывается только когда содержимое действительно изменилось.
         """
-        mtime = self._mtime()
-        if mtime != self._loaded_at:
+        raw = self._read_raw()
+        if raw != self._loaded_raw:
             self._load()
-            self._loaded_at = mtime
 
     def _read_raw(self) -> bytes | None:
         try:
@@ -96,6 +107,7 @@ class TokenStore:
     def _load(self) -> None:
         raw = self._read_raw()
         self._loaded_at = self._mtime()
+        self._loaded_raw = raw
         if not raw:
             self._tokens = {}
             return
@@ -140,6 +152,10 @@ class TokenStore:
             raise TokenStoreError(f"файл токенов не записан: {exc}") from exc
         self._dirty = False
         self._loaded_at = self._mtime()
+        # Байты, записанные этим экземпляром - то, что он считает прочитанным:
+        # иначе следующий вход перечитал бы и расшифровал файл, который сам же
+        # только что записал (содержимое то же, но DPAPI шифрует с шумом).
+        self._loaded_raw = sealed
 
     # -- права ---------------------------------------------------------------
     # Каждый вход перечитывает реестр, если файл изменился: ключ выдаёт pairing
