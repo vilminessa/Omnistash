@@ -297,6 +297,12 @@ debug.bat C          # копия базы библиотеки в %LOCALAPPDATA
 debug.bat D          # открыть папку профиля
 debug.bat E          # синхронизация без окна (--sync)
 debug.bat F          # собрать exe и сверить его состав по TOC
+debug.bat G          # flutter-страж: токены, колонки и табы против app.js/repo/CSS
+debug.bat H          # flutter analyze + test (нужен локальный SDK в PATH)
+debug.bat I          # flutter build windows --release (продуктовый exe, Skia)
+debug.bat J          # ассеты: .ico из темы «Бренд», SVG-иконки, бренд-тема, токены
+debug.bat K          # бандл клиента и юр-пак (--check) и сверка воркфлоу
+debug.bat L          # окно с живым фасадом --serve (HTTPS слушатель рядом)
 ```
 
 **Превью интерфейса** (`tools/build_preview.py` → `preview.html`, в git не
@@ -304,6 +310,14 @@ debug.bat F          # собрать exe и сверить его состав 
 подключён, и app.js сам подставляет мок-бэкенд. Так интерфейс можно
 смотреть и править без запущенного Python; `--first` показывает стартовый
 диалог первого запуска, `?empty=1` — и вручную.
+
+Пункты G, J, K не требуют Flutter SDK: `check_flutter_mirror.py` читает
+Dart-ассет как текст (тот же приём гоняется в CI, где UI-тесты не
+запускаются), а J и K сверяют ассеты и паки локальными инструментами. H и I
+нуждают локальный SDK — Flutter пинится версией и sha256 архива
+(`tools/flutter_pin.json`: stable 3.47.9), SDK ставится на сборочное время,
+рантайм окна ничего не скачивает; продуктовый exe собирается на Skia по
+решению человека от 06.11.2026 (меры обеих веток — `docs/FLUTTER-TRANSITION.md §9`).
 
 ### Канал link: данные двух ПК для тестов
 
@@ -1003,7 +1017,7 @@ Register-ScheduledTask -TaskName "Omnistash Sync" `
 Тесты:
 
 ```powershell
-python tools/run_tests.py                          # офлайн, 1763 проверок (прогон 06.11.2026, skipped=17),
+python tools/run_tests.py                          # офлайн, 1764 проверок (прогон 06.11.2026, skipped=17),
 #   параллельно по ядрам (модули независимы: свой профиль во временной папке);
 #   --jobs 1 - последовательно, --only test_i18n - выборка модулей
 $env:OMNISTASH_LIVE='1'; python -m unittest tests.test_live   # на живом YouTube
