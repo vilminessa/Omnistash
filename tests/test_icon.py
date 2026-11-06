@@ -1,14 +1,19 @@
-"""Иконка exe: assets/omnistash.ico сверяется с генерацией tools/make_icon.py.
+"""Иконки exe: assets/omnistash.ico и assets/stashroom.ico сверяются с генерацией.
 
 Что проверяется (без PyInstaller и без чужих библиотек - формат читается struct):
-  * это действительно ICO (reserved=0, type=1), карточки 32 бит с AND-маской;
-  * размеры карточек = заявленные SIZES, смещения entries совпадают с данными;
-  * рисунок детерминирован: повторная генерация тех же размеров даёт те же
-    байты - иконка либо совпадает с инструментом, либо кто-то правил вручную;
-  * специка ссылается на asset: сборка exe без иконки - случай частичного
-    checkout, но нормальная сборка обязана её брать;
-  * центр квадрата непрозрачный и цвет из палитры тёмной темы, углы канвы
-    прозрачны (иконка не прямоугольный блок с углами).
+  * это действительно ICO (reserved=0, type=1), карточки 32 бит с AND-маской,
+    размеры карточек = заявленные SIZES, смещения entries совпадают с данными;
+  * ассеты сверяются с генерацией байт-в-байт целиком (оба файла, все
+    размеры) - рисунка детерминирована, и «иконка какая-то есть» не считается
+    успехом: битый или ручной ассет называется;
+  * палитра генератора - реестр темы «Бренд» (app/themes.py: coolors): имена
+    ролей глифов существуют в теме, hex совпадает переменная-в-переменную;
+  * Omnistash: поле cream читается точным тоном реестра, стрелка - accent,
+    ряды - text и muted, рамка - line-strong; углы канвы прозрачны;
+  * Stashroom: тот же квадрат рядов без стрелки - точного accent в ассете нет
+    (хранилище без закачки, это названо в генераторе), рамка и ряды navy;
+  * специка ссылается на omnistash.ico и терпит его отсутствие (частичный
+    checkout); сборка Stashroom (W5) получит stashroom.ico отдельно.
 """
 
 import struct
@@ -22,7 +27,10 @@ sys.path.insert(0, str(SRC / "tools"))
 import make_icon  # noqa: E402 - путь добавлен выше
 from app import themes  # noqa: E402
 
-ASSET = SRC / "assets" / "omnistash.ico"
+ASSETS = {
+    "omnistash": SRC / "assets" / "omnistash.ico",
+    "stashroom": SRC / "assets" / "stashroom.ico",
+}
 SPEC = SRC / "Omnistash.spec"
 HEADER_BYTES = 40
 
@@ -71,61 +79,110 @@ def decoded(data: bytes, size: int) -> list[tuple[int, int, int, int]]:
     raise AssertionError(f"картки {size} нет в asset")
 
 
-class TestIconAsset(unittest.TestCase):
+class TestIconAssets(unittest.TestCase):
     def setUp(self):
-        if not ASSET.exists():
-            self.skipTest("assets/omnistash.ico не собран (python tools/make_icon.py)")
-        self.data = ASSET.read_bytes()
+        self.data = {}
+        for name, path in ASSETS.items():
+            if not path.exists():
+                self.skipTest(f"assets/{name}.ico не собран (python tools/make_icon.py)")
+            self.data[name] = path.read_bytes()
 
-    def test_icon_is_a_list_of_bmp_cards(self):
-        listed = entries(self.data)
-        self.assertEqual([size for size, _h, _s, _o in listed],
-                         list(make_icon.SIZES))
-        cursor = 6 + 16 * len(listed)
-        for size, _height, card, offset in listed:
-            self.assertEqual(offset, cursor,
-                             f"смещение картки {size} не совпадает с данными")
-            self.assertEqual(card, card_bytes(size),
-                             f"картка {size} не равна BMP + маске")
-            cursor += card
-        self.assertEqual(cursor, len(self.data),
-                         "в конце файла есть лишние байты (или карток меньше)")
+    def test_both_icons_are_lists_of_bmp_cards(self):
+        for name, data in self.data.items():
+            listed = entries(data)
+            self.assertEqual([size for size, _h, _s, _o in listed],
+                             list(make_icon.SIZES),
+                             f"{name}: карточки не равны заявленным SIZES")
+            cursor = 6 + 16 * len(listed)
+            for size, _height, card, offset in listed:
+                self.assertEqual(offset, cursor,
+                                 f"{name}: смещение картки {size} не совпадает")
+                self.assertEqual(card, card_bytes(size),
+                                 f"{name}: картка {size} не равна BMP + маске")
+                cursor += card
+            self.assertEqual(cursor, len(data),
+                             f"{name}: в конце файла лишние байты (или карток меньше)")
 
-    def test_asset_matches_the_generator(self):
-        """Детерминированность: те же размеры - те же байты картки."""
-        generated = make_icon.build((16, 32))
-        for size in (16, 32):
-            made = [entry for entry in entries(generated) if entry[0] == size][0]
-            asset = [entry for entry in entries(self.data) if entry[0] == size][0]
-            self.assertEqual(generated[made[3]:made[3] + made[2]],
-                             self.data[asset[3]:asset[3] + asset[2]],
-                             f"картка {size} отличается от генерации tools/make_icon.py")
+    def test_assets_match_generation_byte_for_byte(self):
+        """Ассеты сверяются с генерацией целиком: детерминированность, не «есть файл»."""
+        for name, data in self.data.items():
+            self.assertEqual(make_icon.build(name), data,
+                             f"{name}.ico отличается от генерации tools/make_icon.py - "
+                             "ассет правил кто-то руками или битый")
 
-    def test_pixel_shape_reads_at_small_size(self):
-        """Центр непрозрачен, углы канвы прозрачны, поле тёмное, акцент есть.
+    def test_palette_is_the_brand_registry(self):
+        """Роли глифов существуют в теме «Бренд» и hex читается из реестра."""
+        brand = themes.css_vars(make_icon.BRAND_THEME)
+        self.assertEqual(make_icon.role("accent"), (*hex_rgb(brand["--accent"]), 255),
+                         "accent генератора не равен реестру coolors")
+        self.assertEqual(make_icon.role("bg"), (*hex_rgb(brand["--bg"]), 255),
+                         "bg генератора не равен реестру coolors")
+        for glyph in make_icon.GLYPHS.values():
+            for key, value in glyph.items():
+                if value is None:
+                    continue
+                self.assertIn(f"--{value}", brand,
+                              f"роль {value} глифа не существует в теме «Бренд»")
+        # Контраст значимой графики на cream (WCAG SC 1.4.11) держат те же
+        # роли, что сверяет tests/test_brand_theme.py - иконка не изобретает тонов.
+        ratio = themes.contrast_ratio
+        self.assertGreaterEqual(ratio(brand["--accent"], brand["--bg"]), 3.0,
+                                "red стрелка на cream ниже порога 3:1 - значимая графика")
+        self.assertGreaterEqual(ratio(brand["--text"], brand["--bg"]), 3.0,
+                                "navy ряды на cream ниже порога 3:1 - значимая графика")
 
-        Точные цвета проверяются только на чистых участках без сглаживания:
-        пиксел на границе двух цветов - это среднее двух тонов палитры, и
-        такого цвета в палитре нет. Поэтому проверяется наличие ключевых
-        тонов и потолок яркости (иконка тёмная, не светлая).
+    def test_omnistash_pixels_read_the_brand_glyph(self):
+        """Поле, стрелка, ряды и рамка Omnistash - точные тона реестра на чистых участках.
+
+        Пиксел на границе двух цветов - среднее двух тонов палитры, поэтому
+        проверяются чистые участки (центр ряда, ствол стрелки, середина рамки)
+        и яркость поля, а не каждый пиксел.
         """
-        pixels = decoded(self.data, 16)
-        centre = pixels[8 * 16 + 8]
-        self.assertEqual(centre[3], 255, "центр иконки прозрачен")
-        dark = {theme["id"]: theme for theme in themes.themes()}["dark"]["vars"]
+        pixels = decoded(self.data["omnistash"], 16)
+        brand = themes.css_vars(make_icon.BRAND_THEME)
+        self.assertEqual(pixels[3 * 16 + 3][:3], hex_rgb(brand["--bg"]),
+                         "поле квадрата не cream из реестра")
+        self.assertEqual(pixels[8 * 16 + 8][:3], hex_rgb(brand["--muted"]),
+                         "верхний ряд стека не muted - стек не различает ряды")
+        self.assertEqual(pixels[13 * 16 + 8][:3], hex_rgb(brand["--text"]),
+                         "второй ряд стека не navy из реестра - ряды библиотеки не читаются")
+        # Ствол стрелки (10% канвы) и полоса рамки (2%) тонкие: на 16 пикселах
+        # пиксел никогда не лежит в них целиком - их точные тона сверяются на
+        # 256-картке, где пиксел внутри чистой области.
+        big = decoded(self.data["omnistash"], 256)
+        self.assertEqual(big[60 * 256 + 128][:3], hex_rgb(brand["--accent"]),
+                         "ствол стрелки не красится accent - Omnistash без закачки")
+        self.assertEqual(big[16 * 256 + 128][:3], hex_rgb(brand["--line-strong"]),
+                         "рамка квадрата не blue-strong - иконка не читается на светлом фоне")
         opaque = {pixel[:3] for pixel in pixels if pixel[3] > 0}
-        self.assertIn(hex_rgb(dark["--bg"]), opaque,
-                      "поля квадрата (тёмного фона) в иконке нет")
-        self.assertIn(hex_rgb(dark["--accent"]), opaque,
-                      "акцента (стрелки) в иконке нет")
-        text = hex_rgb(dark["--text"])
-        bright = [rgb for rgb in opaque
-                  if rgb[0] > text[0] or rgb[1] > text[1] or rgb[2] > text[2]]
-        self.assertEqual(bright, [], f"светлые пикселы вне темы: {bright}")
-        darkish = [pixel for pixel in pixels
-                   if pixel[3] > 0 and (pixel[0] + pixel[1] + pixel[2]) < 200]
-        self.assertGreater(len(darkish), len(pixels) // 4,
-                           "тёмного поля в иконке меньше четверти канвы")
+        bg = hex_rgb(brand["--bg"])
+        brighter = [rgb for rgb in opaque
+                    if rgb[0] > bg[0] or rgb[1] > bg[1] or rgb[2] > bg[2]]
+        self.assertEqual(brighter, [],
+                         f"пикселы ярче cream вне палитры: {brighter}")
+        cream = [pixel for pixel in pixels if pixel[3] > 0 and pixel[:3] == bg]
+        self.assertGreater(len(cream), len(pixels) // 4,
+                           "поля cream в иконке меньше четверти канвы - светлой подложки нет")
+        for corner in ((0, 0), (0, 15), (15, 0), (15, 15)):
+            self.assertEqual(pixels[corner[1] * 16 + corner[0]][3], 0,
+                             f"угол {corner} непрозрачен - иконка не скруглённая")
+
+    def test_stashroom_pixels_are_shelves_without_arrow(self):
+        """Stashroom: ряды и navy рамка, точного accent нет - хранилище без закачки."""
+        pixels = decoded(self.data["stashroom"], 16)
+        brand = themes.css_vars(make_icon.BRAND_THEME)
+        self.assertEqual(pixels[3 * 16 + 3][:3], hex_rgb(brand["--bg"]),
+                         "поле Stashroom не cream из реестра")
+        self.assertEqual(pixels[8 * 16 + 8][:3], hex_rgb(brand["--muted"]),
+                         "верхний ряд стека Stashroom не muted - ряды не различаются")
+        self.assertEqual(pixels[13 * 16 + 8][:3], hex_rgb(brand["--text"]),
+                         "второй ряд стека Stashroom не navy - ряды не читаются")
+        big = decoded(self.data["stashroom"], 256)
+        self.assertEqual(big[16 * 256 + 128][:3], hex_rgb(brand["--text"]),
+                         "рамка Stashroom не navy - два глифа неразличимы по рамке")
+        opaque = {pixel[:3] for pixel in pixels if pixel[3] > 0}
+        self.assertNotIn(hex_rgb(brand["--accent"]), opaque,
+                         "Stashroom держит red стрелку: глиф называет закачку, которой нет")
         for corner in ((0, 0), (0, 15), (15, 0), (15, 15)):
             self.assertEqual(pixels[corner[1] * 16 + corner[0]][3], 0,
                              f"угол {corner} непрозрачен - иконка не скруглённая")
@@ -142,13 +199,15 @@ class TestIconAsset(unittest.TestCase):
 
 class TestIconDeterminism(unittest.TestCase):
     def test_regeneration_is_byte_identical(self):
-        first = make_icon.build((16, 48))
-        second = make_icon.build((16, 48))
-        self.assertEqual(first, second, "генерация иконки не детерминирована")
+        for name in make_icon.GLYPHS:
+            first = make_icon.build(name, (16, 48))
+            second = make_icon.build(name, (16, 48))
+            self.assertEqual(first, second,
+                             f"генерация {name} не детерминирована")
 
     def test_mask_rows_are_padded_to_four_bytes(self):
         """Строка AND-маски выровнена по 4 байтам (48 -> 8 байт, не 6)."""
-        card = make_icon._bmp_card(48, make_icon.render(48))
+        card = make_icon._bmp_card(48, make_icon.render(48, make_icon.GLYPHS["omnistash"]))
         mask_len = len(card) - HEADER_BYTES - 48 * 48 * 4
         self.assertEqual(mask_len, ((48 + 31) // 32) * 4 * 48)
 

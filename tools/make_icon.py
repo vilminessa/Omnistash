@@ -1,12 +1,20 @@
-r"""Иконка Omnistash: .ico собирается из палитры окна (app/themes.py).
+r"""Иконки Omnistash и Stashroom: .ico собираются из палитры темы «Бренд».
 
-    python tools/make_icon.py            # пишет assets/omnistash.ico
-    python tools/make_icon.py --stdout   # байты в stdout (для тестов и diff)
+    python tools/make_icon.py            # пишет assets/omnistash.ico и assets/stashroom.ico
+    python tools/make_icon.py --stdout   # байты omnistash.ico в stdout (для diff)
 
-Рисунка своя (не чужой набор иконок): закруглённый квадрат с фоном тёмной
-темы и три ряда-строки библиотеки в нижней половине, над ними стрелка вниз -
-«складывается в хранилище». Цвета берутся из палитры тёмной темы, поэтому
-иконка совпадает с окном программы.
+Рисунка своя (не чужой набор иконок): закруглённый квадрат с полем кремовой
+подложки, три ряда-строки библиотеки в нижней половине; над ними стрелка
+вниз - «складывается в хранилище» (Omnistash). Stashroom - тот же квадрат
+рядов без стрелки: хранилище без закачки, рамка navy вместо blue. Цвета
+берутся из реестра темы `coolors` (app/themes.py), поэтому иконка совпадает
+с брендной палитрой окна - решение человека от 06.11.2026 (перекраска
+одобрена, палитра прежде лежала в литералах тёмной темы).
+
+Контраст значимой графики на cream (--bg): navy ряды и рамка Stashroom
+12.25, red стрелка 5.51, blue рамка Omnistash ~3.6, top row muted ~4.3 -
+все выше порога 3:1 (WCAG SC 1.4.11); числа сверяет app/themes.py и
+tests/test_brand_theme.py, иконка не изобретает своих тонов.
 
 Формат: классический ICO с BMP-картками (32 бита, BGRA + AND-маска). PNG-картки
 не используются - BMP читается всеми Windows-оболочками и PyInstaller без
@@ -14,37 +22,67 @@ r"""Иконка Omnistash: .ico собирается из палитры окн
 large-иконок проводника.
 
 Рисунка детерминирована (без случайностей и без дат): повторный запуск даёт
-байт-в-байт тот же файл, поэтому тест сверяет asset с генерацией, а не «иконка
-какая-то есть».
+байт-в-байт тот же файл, поэтому тест сверяет ассеты с генерацией целиком,
+а не «иконка какая-то есть».
 """
 
 from __future__ import annotations
 
 import hashlib
-import os
 import struct
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-ASSET = ROOT / "assets" / "omnistash.ico"
+sys.path.insert(0, str(ROOT))
+
+from app import themes  # noqa: E402 - путь добавлен выше
+
 SIZES = (16, 32, 48, 64, 128, 256)
 SUPERSAMPLE = 4          # 4x4 подпиксела на пиксел - сглаживание краёв
+BRAND_THEME = "coolors"  # тема «Бренд» из реестра app/themes.py
+EMPTY = (0, 0, 0, 0)     # вне иконки - прозрачно
 
-# Палитра тёмной темы (app/themes.py: themes()["dark"]).
-BG = (12, 22, 34, 255)        # --bg
-# Тон прежнего --line (#22344a) до пересчёта палитры шагом 1 DESIGN-UI:
-# иконка держит его намеренно - ассет сверяет тест с генератором бит-в-бит,
-# перекраска ассета под новый --line (#45617f) меняла бы exe без нужды.
-LINE = (34, 52, 74, 255)
-# Ряды стека светлее поля: на 16 пикселах три строки библиотеки должны
-# читаться, поэтому tone поднят относительно --widget (27,47,71).
-ROW = (46, 70, 96, 255)
-ROW_TOP_TONE = (58, 84, 112, 255)
-ACCENT = (98, 141, 124, 255)  # --accent
-EMPTY = (0, 0, 0, 0)          # вне иконки - прозрачно
+# Роль -> пиксел RGBA: тон берётся из реестра переменная-в-переменную,
+# литералов палитры в генераторе нет - тот же приём, что токены Flutter
+# (tools/build_flutter_theme.py).
+def hex_rgb(value: str) -> tuple[int, int, int]:
+    return tuple(int(value[index:index + 2], 16) for index in (1, 3, 5))
 
-# Геометрия в нормированных координатах канвы 0..1.
+
+def brand_vars() -> dict[str, str]:
+    return themes.css_vars(BRAND_THEME)
+
+
+def role(name: str) -> tuple[int, int, int, int]:
+    return (*hex_rgb(brand_vars()[f"--{name}"]), 255)
+
+
+# Глифы: имена ролей, а не hex - сверка с реестром ведётся тестом.
+GLYPHS: dict[str, dict[str, object]] = {
+    "omnistash": {
+        "field": "bg",
+        "rim": "line-strong",
+        "rows": "text",
+        "row_top": "muted",
+        "arrow": "accent",
+    },
+    "stashroom": {
+        "field": "bg",
+        "rim": "text",
+        "rows": "text",
+        "row_top": "muted",
+        "arrow": None,   # хранилище без закачки - стрелки нет, это названо
+    },
+}
+
+ASSETS = {
+    "omnistash": ROOT / "assets" / "omnistash.ico",
+    "stashroom": ROOT / "assets" / "stashroom.ico",
+}
+
+# Геометрия в нормированных координатах канвы 0..1 - та же, что мерилась
+# прежней рисункой (ряды и стрелка читались на 16 пикселах).
 INSET = 0.055               # отступ квадрата от края канвы
 RADIUS = 0.17               # скругление углов квадрата
 ROW_TOP = 0.46              # верхний ряд стека
@@ -88,25 +126,27 @@ def _inside_arrow(x: float, y: float) -> bool:
     return False
 
 
-def _pixel(x: float, y: float) -> tuple[int, int, int, int]:
-    """Цвет точки канвы (0..1): стрелка -> ряды -> рамка -> фон -> прозрачно."""
+def _pixel(x: float, y: float, glyph: dict[str, object]) -> tuple[int, int, int, int]:
+    """Цвет точки канвы (0..1): стрелка -> ряды -> рамка -> поле -> прозрачно."""
     left, top, right, bottom = INSET, INSET, 1.0 - INSET, 1.0 - INSET
     if not _inside_round_rect(x, y, left, top, right, bottom, RADIUS):
         return EMPTY
-    if _inside_arrow(x, y):
-        return ACCENT
+    arrow = glyph["arrow"]
+    if arrow is not None and _inside_arrow(x, y):
+        return role(str(arrow))
     for index in range(3):
         row_top = ROW_TOP + index * (ROW_H + ROW_GAP)
         if _inside_bar(x, y, ROW_LEFT, row_top, ROW_RIGHT, row_top + ROW_H):
-            # верхний ряд светлее - стек читается как три строки библиотеки
-            return ROW_TOP_TONE if index == 0 else ROW
-    # тонкая рамка по краю квадрата - иконка читается и на светлом фоне
+            # верхний ряд светлее (muted) - стек читается как три строки
+            return role(str(glyph["row_top"] if index == 0 else glyph["rows"]))
+    # тонкая рамка по краю квадрата - иконка читается и на светлом фоне,
+    # и на тёмном (рамка navy у Stashroom держит 12.25 на cream)
     inner = _inside_round_rect(x, y, left + 0.02, top + 0.02,
                                right - 0.02, bottom - 0.02, RADIUS * 0.92)
-    return LINE if not inner else BG
+    return role(str(glyph["rim"])) if not inner else role(str(glyph["field"]))
 
 
-def render(size: int) -> list[tuple[int, int, int, int]]:
+def render(size: int, glyph: dict[str, object]) -> list[tuple[int, int, int, int]]:
     """RGBA-пикселы канвы size x size (сглаживание 4x4 подпикселами)."""
     total = size * SUPERSAMPLE          # подпикселов на сторону канвы
     pixels: list[tuple[int, int, int, int]] = []
@@ -118,7 +158,7 @@ def render(size: int) -> list[tuple[int, int, int, int]]:
                 y = (row * SUPERSAMPLE + sy + 0.5) / total
                 for sx in range(SUPERSAMPLE):
                     x = (column * SUPERSAMPLE + sx + 0.5) / total
-                    colour = _pixel(x, y)
+                    colour = _pixel(x, y, glyph)
                     if colour[3] == 0:
                         continue
                     covered += 1
@@ -164,9 +204,10 @@ def _bmp_card(size: int, pixels: list[tuple[int, int, int, int]]) -> bytes:
     return header + xor_bytes + bytes(mask)
 
 
-def build(sizes: tuple[int, ...] = SIZES) -> bytes:
-    """Собрать .ico: DirectoryEntry[] + данные картинок."""
-    cards = [(_bmp_card(size, render(size)), size) for size in sizes]
+def build(name: str, sizes: tuple[int, ...] = SIZES) -> bytes:
+    """Собрать .ico для глифа: DirectoryEntry[] + данные картинок."""
+    glyph = GLYPHS[name]
+    cards = [(_bmp_card(size, render(size, glyph)), size) for size in sizes]
     entries = bytearray()
     offset = 6 + 16 * len(cards)
     for card, size in cards:
@@ -188,18 +229,29 @@ def main(argv: list[str]) -> int:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         except (OSError, ValueError):
             pass
-    data = build()
     if "--stdout" in argv[1:]:
-        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.write(build("omnistash"))
         return 0
-    ASSET.parent.mkdir(exist_ok=True)
-    previous = ASSET.read_bytes() if ASSET.exists() else None
-    ASSET.write_bytes(data)
-    digest = hashlib.sha256(data).hexdigest()[:12]
-    changed = "изменена" if previous is not None and previous != data else \
-              ("создана" if previous is None else "не изменилась")
-    print(f"assets/omnistash.ico: {len(data)} байт, sizes {sizes_text()}, "
-          f"sha256 {digest}, {changed}")
+    lines = []
+    for name, path in ASSETS.items():
+        data = build(name)
+        if "--check" in argv[1:]:
+            if path.is_file() and path.read_bytes() == data:
+                lines.append(f"{path.name}: совпадает с генерацией")
+            else:
+                print(f"{path.name}: не совпадает с генерацией tools/make_icon.py "
+                      "- python tools/make_icon.py", file=sys.stderr)
+                return 1
+            continue
+        path.parent.mkdir(exist_ok=True)
+        previous = path.read_bytes() if path.exists() else None
+        path.write_bytes(data)
+        digest = hashlib.sha256(data).hexdigest()[:12]
+        changed = ("изменена" if previous is not None and previous != data
+                   else "создана" if previous is None else "не изменилась")
+        lines.append(f"{path.name}: {len(data)} байт, sizes {sizes_text()}, "
+                     f"sha256 {digest}, {changed}")
+    print("; ".join(lines))
     return 0
 
 

@@ -13,7 +13,8 @@ sys.path.insert(0, SPECPATH)
 from version import __version__  # noqa: E402
 
 # Иконка exe - собственный asset, собирается tools/make_icon.py из палитры
-# тёмной темы (app/themes.py). Файла нет (например, частичный checkout) - exe
+# темы «Бренд» (app/themes.py: coolors, решение и дизайн подтверждены
+# человеком 06.11.2026). Файла нет (например, частичный checkout) - exe
 # собирается без иконки: это честный случай, а не ошибка сборки.
 _icon = os.path.join(SPECPATH, "assets", "omnistash.ico")
 
