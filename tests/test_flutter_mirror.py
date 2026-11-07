@@ -32,11 +32,29 @@
     `TAB_RU` в ui_src/app.js (динамические вкладки площадок `platform`
     исключены - названо); каждая не построенная вкладка называет волну, а
     построенная Библиотека (W2) заглушки не имеет;
+  * карточка видео (шаг W2 3): подписи kv - порядок `add(...)` из `openDetail`,
+    поля канона, которые не рисуются, названы волной; ряд действий - подписи
+    из `data-detail`, построенные совпадают с каноном по порядку, права
+    сверяются с `app/http/scopes.py` (SCOPE_OF и SCOPES), `watch` остаётся
+    маршрутным правом (media.py), нативные цели (open_folder/open_file/open_url)
+    не вызываются по HTTP; списки статусов по действиям - guard-ы канона и
+    словарь статусов (CHECK videos и STATUS_LABELS); блоки карточки
+    (detailThumbHtml, detailMarksHtml, raw_json) названы волной; поля карточки
+    читаются только из `repo.video_detail`, метки аудио - из `app/audio.py`;
+  * `GET /whoami` и `GET /watch/<id>` - один путь на трёх сторонах (Dart,
+    ui_src/app.js, app/http/server.py); тексты отказа - значения `app/i18n.py`;
+  * подложка диалога (`--veil` каждой темы) и ширины кольца фокуса
+    (`--focus-ring`) перенесены числом и сверяются с реестром тем и с CSS;
+    экраны обязаны читать `veilColor` и `focusRing`, а не писать литералы;
+  * длинные тексты в Dart пишутся соседними литералами: страж соединяет их,
+    иначе проверка «называет волну» видела бы огрызок;
   * choices поля theme в схеме настроек - тот же порядок, что список тем в
     Flutter, иначе настройка не применится к Flutter-окну;
   * расхождение называется: битый hex, переставленный порядок id, изменённая
     метрика, изменённый размер страницы, выдуманный ключ `rows`, переименованная
-    или лишняя колонка, битый гейт, переставленные табы, заглушка без волны и
+    или лишняя колонка, битый гейт, переставленные табы, заглушка без волны,
+    поле или действие карточки без имени и без волны, выдуманные поля и метки,
+    расхождение права цели, потерянный /whoami или /watch, сдвинутый veil и
     литерал в production-коде дают отказ с текстом, а не молчание.
 """
 
@@ -48,7 +66,8 @@ import unittest
 SRC = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SRC / "tools"))
 
-from app import settings_schema, themes  # noqa: E402 - путь добавлен выше
+from app import i18n, settings_schema, themes  # noqa: E402 - путь добавлен выше
+from app.http import scopes  # noqa: E402 - путь добавлен выше
 import build_flutter_theme as gen  # noqa: E402 - путь добавлен выше
 import check_flutter_mirror as mirror  # noqa: E402 - путь добавлен выше
 
@@ -349,12 +368,154 @@ class FlutterMirrorTest(unittest.TestCase):
             "  'downloaded': 'ok',\n};\n", encoding="utf-8")
         (tmp / "app.dart").write_text("void main() {}\n", encoding="utf-8")
         (tmp / "tabs.dart").write_text("void main() {}\n", encoding="utf-8")
+        # Файлы шага W2-3 под тем же guard-ом: пустые стабы, иначе страж
+        # назвал бы их отсутствие как расхождение, а не литералы в theme.dart.
+        for name in ("video_card.dart", "access.dart", "player.dart"):
+            (tmp / name).write_text("void main() {}\n", encoding="utf-8")
         problems = mirror.literal_problems(tmp)
         self.assertEqual(len(problems), 2, f"литералы не названы: {problems}")
         self.assertTrue(any("hex-литерал" in line for line in problems), problems)
         self.assertTrue(any("размер написан числом" in line for line in problems),
                         problems)
 
+
+    def test_card_labels_match_the_canonical_order(self):
+        """Подписи kv карточки Flutter - тот же порядок, что `add(...)` в openDetail."""
+        card = (mirror.LIB / "video_card.dart").read_text(encoding="utf-8")
+        self.assertEqual(mirror.dart_card_labels(card),
+                         [label for label in mirror.js_card_labels()
+                          if label not in mirror.dart_card_not_built(card)],
+                         "подписи карточки Flutter расходятся с openDetail из app.js")
+        self.assertEqual(mirror.card_problems(), [], mirror.card_problems())
+
+    def test_card_not_built_fields_name_the_wave(self):
+        """Поля канона, которые Flutter не рисует, названы и указывают волну."""
+        card = (mirror.LIB / "video_card.dart").read_text(encoding="utf-8")
+        not_built = mirror.dart_card_not_built(card)
+        js_labels = mirror.js_card_labels()
+        self.assertEqual(sorted(not_built), sorted(set(js_labels) - set(
+            mirror.dart_card_labels(card))),
+                         "не построенные поля карточки не покрывают расхождение с JS")
+        for label, text in not_built.items():
+            self.assertRegex(text, r"волна W\d",
+                             f"поле {label} не называет волну: молчание о составе карточки")
+
+    def test_card_actions_match_js_and_scope_registry(self):
+        """Построенные действия: подписи из канона, права из scopes.py.
+
+        Право «Скачать» и цель `enqueue` сверяются с SCOPE_OF сервера: клиент
+        подписывает то же, что требует сервер, иначе кнопка прошла бы с 403,
+        который клиент не предсказал. «Открыть» требует маршрутное право watch
+        (байты /media и /hls), которого в SCOPE_OF нет намеренно.
+        """
+        card = (mirror.LIB / "video_card.dart").read_text(encoding="utf-8")
+        built = mirror.dart_card_actions(card)
+        js_labels = [label for _name, label in mirror.js_action_labels()]
+        self.assertEqual([label for label, _scope, _target in built],
+                         [label for label in js_labels if label in
+                          {entry[0] for entry in built}],
+                         "порядок построенных действий Flutter != канон openDetail")
+        for label, scope, target in built:
+            if not scope:
+                continue  # адрес площадки: право не требуется, это локальный браузер
+            self.assertIn(scope, scopes.SCOPES, f"право {scope} не в SCOPES")
+            if target:
+                self.assertEqual(scopes.scope_for(target), scope,
+                                 f"{label}: сервер требует не то право, что подписывает Flutter")
+        self.assertEqual(scopes.scope_for("get_video"), "read",
+                         "get_video не под read: карточка читается правами чтения")
+        self.assertEqual(scopes.scope_for("storages_list"), "read",
+                         "storages_list не под read: выбор хранилища требует чтения")
+        self.assertEqual(scopes.scope_for("enqueue"), "queue",
+                         "enqueue не под queue: закачка чужим правом")
+        self.assertIsNone(scopes.scope_for("watch"),
+                          "право watch должно быть маршрутным (media.py), а не целью API")
+        self.assertIn('scope="watch"', (SRC / "app" / "http" / "media.py").read_text(encoding="utf-8"),
+                      "media.py не требует право watch - источник права потерян")
+        for name in ("open_folder", "open_file", "open_url"):
+            self.assertIn(name, scopes.NATIVE,
+                          f"{name} перестал быть нативной целью - Flutter бы вызывал его по HTTP")
+
+    def test_card_actions_not_built_name_the_wave_or_native_target(self):
+        card = (mirror.LIB / "video_card.dart").read_text(encoding="utf-8")
+        not_built = mirror.dart_actions_not_built(card)
+        js_labels = [label for _name, label in mirror.js_action_labels()]
+        self.assertEqual(sorted(set(js_labels) - set(
+            entry[0] for entry in mirror.dart_card_actions(card))),
+                         sorted(not_built),
+                         "действия канона не покрыены построенными и названными")
+        for label, text in not_built.items():
+            self.assertRegex(text, r"волна W\d|нативная цель",
+                             f"действие {label} не называет волну или нативную цель")
+
+    def test_card_blocks_not_built_name_the_wave(self):
+        """Блоки карточки канона (обложка, пометки, raw_json) названы волной."""
+        card = (mirror.LIB / "video_card.dart").read_text(encoding="utf-8")
+        blocks = mirror._dart_map(card, "kCardBlocksNotBuilt")
+        js_text = (SRC / "ui_src" / "app.js").read_text(encoding="utf-8")
+        for name in ("detailThumbHtml", "detailMarksHtml", "raw_json"):
+            self.assertIn(name, js_text, f"в app.js нет блока карточки {name}")
+            self.assertIn(name, blocks, f"карточка Flutter не называет блок {name}")
+        for name, text in blocks.items():
+            self.assertRegex(text, r"волна W\d", f"блок {name} не называет волну")
+
+    def test_card_status_lists_match_the_canonical_guards(self):
+        """Списки статусов по действиям - те же, что guard-ы `openDetail`."""
+        card = (mirror.LIB / "video_card.dart").read_text(encoding="utf-8")
+        dart = mirror.dart_status_lists(card)
+        guards = mirror.js_status_guards()
+        for name in ("download", "queue", "playable", "mesh"):
+            self.assertEqual(dart[name], guards[name],
+                             f"статусы {name} Flutter != канон app.js")
+        vocabulary = mirror.status_vocabulary()
+        for name, list_ in dart.items():
+            self.assertTrue(set(list_) <= vocabulary,
+                            f"статусы {name} вне словаря сервера (CHECK и STATUS_LABELS)")
+        self.assertIn("detached", vocabulary,
+                      "detached потерян из словаря: статус отвязанного хранилища")
+
+    def test_card_reads_only_fields_the_backend_returns(self):
+        """Карточка читает поля, которые отдаёт video_detail, и метки audio.py."""
+        card = (mirror.LIB / "video_card.dart").read_text(encoding="utf-8")
+        data_keys, file_keys, audio_keys = mirror.dart_card_reads(card)
+        allowed = mirror.repo_detail_fields()
+        self.assertTrue(data_keys <= allowed,
+                        f"карточка читает поля {sorted(data_keys - allowed)} вне video_detail")
+        self.assertTrue(file_keys <= allowed,
+                        f"карточка читает files с ключами {sorted(file_keys - allowed)}")
+        self.assertTrue(audio_keys <= mirror.audio_meta_keys(),
+                        f"карточка читает метки {sorted(audio_keys - mirror.audio_meta_keys())} "
+                        f"вне app/audio.py")
+
+    def test_whoami_and_watch_paths_match_server_and_browser(self):
+        """GET /whoami и GET /watch/<id> - один путь на трёх сторонах."""
+        client = (mirror.LIB / "api_client.dart").read_text(encoding="utf-8")
+        js = (SRC / "ui_src" / "app.js").read_text(encoding="utf-8")
+        server = (SRC / "app" / "http" / "server.py").read_text(encoding="utf-8")
+        self.assertIn("https://$host:$port/whoami", client,
+                      "Flutter не ходит на /whoami: права подписываются наугад")
+        self.assertIn('httpBaseUrl() + "/whoami"', js,
+                      "браузер не читает /whoami - источник сверки прав потерян")
+        self.assertIn('path == "/whoami"', server,
+                      "сервер не отвечает на /whoami - клиент ходит в несуществующий маршрут")
+        self.assertIn("/watch/$videoId", client,
+                      "Flutter не строит адрес /watch/<id> - карточка без пути к плееру")
+        self.assertIn('httpBaseUrl() + "/watch/" + id', js,
+                      "браузер не ходит на /watch/<id> - источник пути потерян")
+        self.assertIn('path.startswith("/watch/")', server,
+                      "сервер не принимает /watch/ - адрес карточки выдуман")
+        self.assertEqual(mirror.route_problems(), [], mirror.route_problems())
+
+    def test_access_texts_match_the_backend_dictionary(self):
+        """Тексты отказа по праву и привязке - значения i18n ru, не слова клиента."""
+        access = (mirror.LIB / "access.dart").read_text(encoding="utf-8")
+        self.assertEqual(mirror.dart_text_constant(access, "kScopeDeniedText", "access.dart"),
+                         i18n.t("http.scope", "ru"),
+                         "отказ по праву назван текстом, которого нет в словаре сервера")
+        self.assertEqual(mirror.dart_text_constant(access, "kUnpairedText", "access.dart"),
+                         i18n.t("http.pairing", "ru"),
+                         "401 подписан текстом, которого нет в словаре сервера")
+        self.assertEqual(mirror.canon_texts_problems(), [], mirror.canon_texts_problems())
 
     def test_console_and_readme_name_the_flutter_steps(self):
         """Консоль debug.bat и README называют Flutter-пункты и ассет-сверки.
@@ -386,6 +547,179 @@ class FlutterMirrorTest(unittest.TestCase):
         for point in ("debug.bat G", "debug.bat H", "debug.bat I",
                       "debug.bat J", "debug.bat K"):
             self.assertIn(point, readme, f"README не называет пункт консоли {point}")
+
+
+    def test_card_label_drift_is_named(self):
+        card = (mirror.LIB / "video_card.dart").read_text(encoding="utf-8")
+        broken = card.replace("  'Статус',\n", "  'Состояние',\n", 1)
+        problems = mirror.card_problems(broken)
+        self.assertTrue(any("Состояние" in line for line in problems),
+                        f"переименованная подпись карточки не названа: {problems}")
+
+    def test_card_field_without_wave_and_without_name_is_named(self):
+        """Поле канона, исчезну молча, называется: заглушка обязана назвать волну."""
+        card = (mirror.LIB / "video_card.dart").read_text(encoding="utf-8")
+        broken = card.replace("'Провенанс mesh':", "'Провенанс mesh удалён':", 1)
+        problems = mirror.card_problems(broken)
+        self.assertTrue(any("не рисует и не называет" in line for line in problems),
+                        f"исчезнувшее поле канона не названо: {problems}")
+        # Текст без волны - молчание о том, когда поле появится.
+        broken2 = card.replace("не построена: волна W3", "не построена: когда-нибудь", 1)
+        problems2 = mirror.card_problems(broken2)
+        self.assertTrue(any("не называет волну" in line for line in problems2),
+                        f"поле без волны не названо: {problems2}")
+
+    def test_card_action_scope_and_target_drift_are_named(self):
+        """Право и цель действия: расхождение с SCOPE_OF называется текстом.
+
+        Если Flutter подписывает `mark` для `enqueue`, сервер требует `queue` -
+        кнопка прошла бы с 403, который клиент не предсказал; если цель
+        отсутствует в SCOPE_OF, клиент шлёт цель, которой нет по HTTP.
+        """
+        card = (mirror.LIB / "video_card.dart").read_text(encoding="utf-8")
+        wrong_scope = card.replace("(label: 'Скачать', scope: 'queue', target: 'enqueue')",
+                                   "(label: 'Скачать', scope: 'mark', target: 'enqueue')", 1)
+        problems = mirror.card_problems(wrong_scope)
+        self.assertTrue(any("Скачать" in line and "queue" in line for line in problems),
+                        f"расхождение права скачивания не названо: {problems}")
+        bad_target = card.replace("target: 'enqueue'", "target: 'enqueue_now'", 1)
+        problems2 = mirror.card_problems(bad_target)
+        self.assertTrue(any("enqueue_now" in line and "не экспортируется" in line
+                            for line in problems2),
+                        f"несуществующая цель не названа: {problems2}")
+        invented_scope = card.replace("(label: 'Открыть', scope: 'watch', target: '')",
+                                      "(label: 'Открыть', scope: 'watchme', target: '')", 1)
+        problems3 = mirror.card_problems(invented_scope)
+        self.assertTrue(any("watchme" in line and "SCOPES" in line for line in problems3),
+                        f"выдуманный скоуп не назван: {problems3}")
+
+    def test_card_action_removed_is_named(self):
+        """Действие канона, исчезнувшее из карточки без имени, - названный отказ."""
+        card = (mirror.LIB / "video_card.dart").read_text(encoding="utf-8")
+        broken = card.replace("'Запросить у участников':", "'Запрос не построен':", 1)
+        problems = mirror.card_problems(broken)
+        self.assertTrue(any("не построены и не названы" in line for line in problems),
+                        f"действие канона исчезло молча: {problems}")
+
+    def test_card_block_without_wave_is_named(self):
+        card = (mirror.LIB / "video_card.dart").read_text(encoding="utf-8")
+        broken = card.replace("'raw_json': 'полные метаданные площадки (raw_json) "
+                              "не показаны: волна W3",
+                              "'raw_json': 'полные метаданные площадки не показаны")
+        problems = mirror.card_problems(broken)
+        self.assertTrue(any("блок raw_json не называет волну" in line for line in problems),
+                        f"блок карточки без волны не назван: {problems}")
+
+    def test_card_status_drift_and_invented_status_are_named(self):
+        card = (mirror.LIB / "video_card.dart").read_text(encoding="utf-8")
+        broken = card.replace("const List<String> kDownloadStatuses =\n"
+                              "    <String>['known', 'failed', 'missing', 'detached'];",
+                              "const List<String> kDownloadStatuses =\n"
+                              "    <String>['known', 'failed', 'missing'];", 1)
+        problems = mirror.card_problems(broken)
+        self.assertTrue(any("статусы download" in line for line in problems),
+                        f"расхождение статусов скачивания не названо: {problems}")
+        invented = card.replace(
+            "const List<String> kPlayableStatuses = <String>['downloaded', 'unavailable'];",
+            "const List<String> kPlayableStatuses = <String>['downloaded', 'detachedx'];", 1)
+        # Подмена ведётся на списке плеера: `'unavailable',\n];` в kMeshStatuses
+        # меняет не словарь, а порядок guard-а mesh - найдено фактом прогона.
+        # Имя статусов в Dart маленькое: страж разбирает списки regex-ом
+        # `'([a-z_]+)'`, 'detachedX' с большой буквой не попал бы в разбор.
+        problems2 = mirror.card_problems(invented)
+        self.assertTrue(any("словаре статусов" in line for line in problems2),
+                        f"выдуманный статус не назван: {problems2}")
+
+    def test_card_invented_field_read_is_named(self):
+        """Поле, которого нет в video_detail, называется выдуманным клиентом."""
+        card = (mirror.LIB / "video_card.dart").read_text(encoding="utf-8")
+        broken = card.replace("value: data['key'] is String",
+                              "value: data['subtitle'] is String", 1)
+        problems = mirror.card_problems(broken)
+        self.assertTrue(any("subtitle" in line and "video_detail" in line for line in problems),
+                        f"выдумано поле карточки, и это не названо: {problems}")
+        audio_bad = card.replace("audio['codec']", "audio['video_codec']", 1)
+        problems2 = mirror.card_problems(audio_bad)
+        self.assertTrue(any("video_codec" in line and "audio.py" in line for line in problems2),
+                        f"выдумана метка файла, и это не названо: {problems2}")
+
+    def test_canon_text_drift_is_named(self):
+        card = (mirror.LIB / "video_card.dart").read_text(encoding="utf-8")
+        broken = card.replace("const String kNoStoragesText = "
+                              "'нет хранилищ - добавьте в настройках';",
+                              "const String kNoStoragesText = 'хранилищ нет';")
+        problems = mirror.canon_texts_problems(broken)
+        self.assertTrue(any("kNoStoragesText" in line for line in problems),
+                        f"расхождение текста канона не названо: {problems}")
+
+    def test_whoami_or_watch_removed_is_named(self):
+        client = (mirror.LIB / "api_client.dart").read_text(encoding="utf-8")
+        broken = client.replace("https://$host:$port/whoami", "https://$host:$port/access")
+        problems = mirror.route_problems(broken)
+        self.assertTrue(any("/whoami" in line for line in problems),
+                        f"маршрут прав не назван потерян: {problems}")
+        broken2 = client.replace("/watch/$videoId", "/player/$videoId")
+        problems2 = mirror.route_problems(broken2)
+        self.assertTrue(any("/watch" in line for line in problems2),
+                        f"путь плеера не назван расхождением: {problems2}")
+
+    def test_access_text_drift_is_named(self):
+        """Текст отказа в ассете совпадает со словарём, а подменный - нет.
+
+        route_problems читает access.dart с диска и сравнивает константу с
+        i18n: проверка на подменном тексте называет, что расхождение видно
+        именно как расхождение (страж отказывает на изменённом тексте).
+        """
+        access = (mirror.LIB / "access.dart").read_text(encoding="utf-8")
+        real = mirror.dart_text_constant(access, "kScopeDeniedText", "access.dart")
+        self.assertEqual(real, i18n.t("http.scope", "ru"))
+        broken = access.replace(real, "доступ запрещён")
+        self.assertNotEqual(mirror.dart_text_constant(broken, "kScopeDeniedText",
+                                                      "access.dart"),
+                            i18n.t("http.scope", "ru"),
+                            "подменный текст не должен совпадать со словарём сервера")
+
+    def test_veil_drift_is_named(self):
+        parsed = mirror.parse(mirror.TOKENS.read_text(encoding="utf-8"))
+        theme_id = themes.ids()[0]
+        parsed["veils"][theme_id] = 0x00000000
+        problems = mirror.veil_problems(parsed)
+        # Отказ называет тему и барьер карточки, а не слово «veil»: сверка
+        # идёт по смыслу сообщения (тема + «красит не той палитрой»).
+        self.assertTrue(any(theme_id in line and "барьер карточки" in line
+                            for line in problems),
+                        f"расхождение подложки диалога не названо: {problems}")
+        parsed["veils"].pop(themes.ids()[1])
+        problems2 = mirror.veil_problems(parsed)
+        self.assertTrue(any("не выведен в Dart" in line for line in problems2),
+                        f"тема без veil не названа: {problems2}")
+
+    def test_token_usage_is_real_not_literal(self):
+        """Барьер диалога и кольцо строки читают veilColor и focusRing."""
+        self.assertEqual(mirror.token_usage_problems(), [], mirror.token_usage_problems())
+        library = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
+        self.assertIn("veilColor(", library, "затемнение под карточкой не из --veil темы")
+        self.assertIn("focusRing(", library, "кольцо фокуса не из --focus-ring")
+
+    def test_multiline_dart_map_text_is_joined(self):
+        """Длинный текст в Dart пишется соседними литералами: страж читает целиком.
+
+        Без соединения литералов проверка «называет волну» видела бы первый
+        фрагмент фразы и отказывала на целой карточке - найдено фактом прогона.
+        """
+        card = (mirror.LIB / "video_card.dart").read_text(encoding="utf-8")
+        not_built = mirror.dart_card_not_built(card)
+        self.assertIn("SAS", not_built["Mesh"],
+                      "второй литерал текста поля не присоединён - сверка читает огрызок")
+        blocks = mirror._dart_map(card, "kCardBlocksNotBuilt")
+        self.assertIn("W3", blocks["detailMarksHtml"],
+                      "второй литерал текста блока не присоединён")
+
+    def test_new_production_files_are_policed(self):
+        """production-код шага 3 под проверкой литералов: ни hex, ни размера числом."""
+        for name in ("video_card.dart", "access.dart", "player.dart"):
+            self.assertIn(name, mirror.PRODUCTION_FILES,
+                          f"{name} не под сверкой литералов - экран может писать цвета числом")
 
 
 if __name__ == "__main__":

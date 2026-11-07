@@ -10,22 +10,39 @@
 ///
 /// Семантика строк - эквиваленты `aria` из docs/DESIGN-UI.md §3.1: строка
 /// названа целиком (имя, статус, канал, длительность, рейтинг), выбор
-/// передаётся как `selected`, строка доступна с клавиатуры (ListTile с
-/// `onTap` фокусируется и активируется Enter/Space), полоса состояния -
-/// живый регион (`liveRegion`) как `aria-live` у журнала. Сортировка
-/// колонок построена на шаге W2 (ниже): порядок строк приходит от сервера
-/// через аргумент `order` - тот же, что `ensureRange` в ui_src/app.js, а
+/// передаётся как `selected`, строка доступна с клавиатуры (собственный
+/// `Focus` строки: обход по ↑↓ ведёт default traversal, Enter открывает
+/// карточку, Ctrl+Enter открывает плеер, Space переключает выбор - тот же
+/// канон, что `bindGridItems` в ui_src/app.js:3400-3435 и строка клавиатуры
+/// в docs/DESIGN-UI.md §733). Home/End (первая/последняя строка окна
+/// прокрутки) на этом шаге не построены: названный разрыв, ложится вместе с
+/// гридом ячеек на волне W2. Клик одинарный открывает карточку, двойной -
+/// плеер: Flutter различает их жестом двойного нажатия (задержка по умолчанию
+/// 300 мс), браузер держит 240 мс вручную (app.js:3410) - расхождение
+/// названо, а не подменяется числом.
+///
+/// Активация карточки с AT (`Semantics(onTap:)`) повторяет одиночный клик:
+/// карточка, не выбор; выбор - отдельное действие Space, как в окне.
+///
+/// Сортировка колонок построена на шаге W2 (ниже): порядок строк приходит от
+/// сервера через аргумент `order` - тот же, что `ensureRange` в ui_src/app.js, а
 /// при пустой колонке сервер держит `uploaded_at DESC`, как браузерный
-/// клиент с `order: null`. Табы - `tabs.dart` (шаг 2).
+/// клиент с `order: null`. Табы - `tabs.dart` (шаг 2). Карточка строки -
+/// `video_card.dart` (шаг 3), диалог §3.8 с ловушкой Tab на границе
+/// focus-scope маршрута, Escape и возвратом фокуса на инициатора.
 
 library;
 
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import 'access.dart';
 import 'api_client.dart';
+import 'player.dart';
 import 'theme.dart';
+import 'video_card.dart';
 
 /// Форма ответа списка строк - один источник правды: app/repo.py: list_videos.
 const String kRowsKey = 'rows';
@@ -106,6 +123,7 @@ class LibraryHome extends StatefulWidget {
     super.key,
     required this.facade,
     this.settings = const <String, Object?>{},
+    this.opener,
   });
 
   final Facade facade;
@@ -114,6 +132,10 @@ class LibraryHome extends StatefulWidget {
   /// скрыта только при значении `false`, как `colVisible` в ui_src/app.js)
   /// и сохранённый порядок (`sort_col`, `sort_dir`).
   final Map<String, Object?> settings;
+
+  /// Открытие адресов (страница плеера `/watch/<id>`, адрес площадки). По
+  /// умолчанию - системный браузер; тест подменяет его и сверяет URL.
+  final UrlOpener? opener;
 
   @override
   State<LibraryHome> createState() => _LibraryHomeState();
@@ -126,8 +148,26 @@ class _LibraryHomeState extends State<LibraryHome> {
   String? _error;
   String? _persistError;
   String _journal = 'журнал пуст';
+  String? _notice;
   bool _loading = true;
   Timer? _poll;
+
+  /// Права ключа (GET /whoami): цель «Открыть» подписывается до перехода,
+  /// отсутствие `watch` называется текстом, а не молча уходит в 403.
+  Access? _access;
+
+  // Один диалог карточки: повторное открытие называется, а не складывает
+  // стек (стек диалогов с N вложенными карточками - волна W3).
+  bool _cardOpen = false;
+  int? _openRowId;
+
+  /// Узлы фокуса строк: возврат фокуса на инициатора после закрытия
+  /// карточки (§3.8, `dialogLeave` в ui_src/app.js). Узлы принадлежат
+  /// состоянию и переживают перерисовку строки; узел исчезнувшей из окна
+  /// прокрутки строки не получает фокус - это названо текстом.
+  final Map<int, FocusNode> _rowNodes = <int, FocusNode>{};
+  int? _hoverId;
+  int? _focusedId;
 
   /// Порядок сортировки: тот же тогл, что `toggleSort` в ui_src/app.js:3256 -
   /// та же колонка разворачивает направление, новая колонка начинает с
@@ -143,13 +183,62 @@ class _LibraryHomeState extends State<LibraryHome> {
     _sortCol = col is String ? col : '';
     _sortDir = widget.settings['sort_dir'] == 'asc' ? 'asc' : 'desc';
     _loadFirst();
+    _loadAccess();
     _poll = Timer.periodic(Duration(milliseconds: kPollIntervalMs), (_) => _pollJournal());
   }
 
   @override
   void dispose() {
     _poll?.cancel();
+    for (final node in _rowNodes.values) {
+      node.dispose();
+    }
+    _rowNodes.clear();
     super.dispose();
+  }
+
+  /// Права ключа: отказ читается текстом и остаётся в `refusal` - молчания
+  /// нет, как в `fetchAccess` браузера (401 называет привязку).
+  Future<void> _loadAccess() async {
+    try {
+      final access = await widget.facade.access();
+      setState(() => _access = access);
+    } catch (error) {
+      setState(() => _access = Access(refusal: 'права не прочитаны: $error'));
+    }
+  }
+
+  /// Узел фокуса строки по её id (создаётся один раз на строку).
+  FocusNode _rowNode(int id) => _rowNodes.putIfAbsent(id, () => FocusNode());
+
+  /// Узлы строк, которых больше нет в списке: снимаются (кроме открытой
+  /// карточки - её инициатор обязан дожить до закрытия).
+  void _dropStaleNodes() {
+    final live = _rows.map((row) => row['id'] is num
+        ? (row['id'] as num).toInt()
+        : null).toSet();
+    for (final id in _rowNodes.keys.toList()) {
+      if (live.contains(id) || id == _openRowId) continue;
+      _rowNodes.remove(id)?.dispose();
+    }
+  }
+
+  /// Вход в список с клавиатуры: первая строка получает фокус, как roving
+  /// tabindex в `renderGridRows` (ui_src/app.js держит tabindex="0" на одной
+  /// строке). Различие формы названо: в CSS обход строк ведёт ↑↓ и roving
+  /// tabindex (Tab уходит из грида), здесь каждая строка в обходе Tab, а ↑↓
+  /// работают default traversal-ом; грид ячеек с roving ложится на волне W2.
+  void _rovingFocus() {
+    if (_cardOpen || _focusedId != null || _rows.isEmpty) return;
+    final first = _rows.first;
+    if (first['id'] is! num) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      // Узел первой строки стоит в focus-дереве только когда строка смонтирована
+      // (ListView виртуализирует): `parent != null` - публичный признак,
+      // `attached` в этом SDK нет (найдено flutter analyze).
+      final node = _rowNodes[first['id'] as int];
+      if (node != null && node.parent != null) node.requestFocus();
+    });
   }
 
   /// Настройки -> состояние списка, как `syncSortAndCols` в
@@ -159,6 +248,18 @@ class _LibraryHomeState extends State<LibraryHome> {
   @override
   void didUpdateWidget(LibraryHome oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // Новый фасад (тест подменяет транспорт; в production-окне фасад не
+    // меняется): снимок настроек и права перечитываются - экран не должен
+    // держать права и порядок от другого бэкенда.
+    if (widget.facade != oldWidget.facade) {
+      setState(() {
+        _access = null;
+        _notice = null;
+      });
+      _loadFirst();
+      _loadAccess();
+      return;
+    }
     final col = widget.settings['sort_col'];
     final newCol = col is String ? col : '';
     final newDir = widget.settings['sort_dir'] == 'asc' ? 'asc' : 'desc';
@@ -180,8 +281,7 @@ class _LibraryHomeState extends State<LibraryHome> {
 
   Future<void> _loadFirst() async {
     setState(() => _loading = true);
-    try {
-      final res = await widget.facade.call('list_videos', <String, Object?>{
+    try {      final res = await widget.facade.call('list_videos', <String, Object?>{
         'offset': 0, 'limit': kPageLimit, 'order': _orderArg(),
       });
       final refusal = _refusalOf(res);
@@ -198,6 +298,8 @@ class _LibraryHomeState extends State<LibraryHome> {
         _error = null;
         _loading = false;
       });
+      _dropStaleNodes();
+      _rovingFocus();
     } catch (error) {
       setState(() {
         _error = 'список не загружен: $error';
@@ -222,6 +324,7 @@ class _LibraryHomeState extends State<LibraryHome> {
         _rows = <Map<String, Object?>>[..._rows, ..._rowsOf(res)];
         _error = null;
       });
+      _dropStaleNodes();
     } catch (error) {
       setState(() => _error = 'следующая страница не загружена: $error');
     }
@@ -308,51 +411,240 @@ class _LibraryHomeState extends State<LibraryHome> {
     return parts.join(', ');
   }
 
+  /// Состояние Ctrl: в этом SDK у `KeyEvent` нет `isControlPressed` и
+  /// `modifiers` (найдено flutter analyze), поэтому модификатор ведётся
+  /// локально по down/up событийам контрольных клавиш - тот же приём, что
+  /// тесты: sendKeyDownEvent(controlLeft) … sendKeyUpEvent(controlLeft).
+  bool _controlDown = false;
+
+  /// Клавиатура строки - канон `bindGridItems` и docs/DESIGN-UI.md §733:
+  /// Enter - карточка, Ctrl+Enter - плеер, Space - выбор. Стрелки и Tab
+  /// возвращаются `ignored` и ведёт их default traversal по строкам
+  /// (Home/End не построены - названный разрыв в шапке модуля).
+  KeyEventResult _handleRowKey(Map<String, Object?> row, int id, KeyEvent event) {
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.controlLeft || key == LogicalKeyboardKey.controlRight) {
+      _controlDown = event is KeyDownEvent;
+      return KeyEventResult.ignored;
+    }
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    if (key == LogicalKeyboardKey.space) {
+      _toggleSelected(id);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.numpadEnter) {
+      if (_controlDown) {
+        _play(id);
+      } else {
+        _openCard(row, id, _rowNode(id));
+      }
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  /// Space/чекбокс: выбор строки, карточку не открывает (тот же
+  /// `stopPropagation` на `.row-check` в ui_src/app.js:3423).
+  void _toggleSelected(int id) {
+    setState(() => _selectedId = _selectedId == id ? null : id);
+  }
+
+  /// Одиночный клик/Enter: карточка строки (диалог §3.8). Двойной жест -
+  /// плеер, одинарный не открывается, пока жест не различён (задержка
+  /// двойного нажатия по умолчанию 300 мс против 240 мс в ui_src/app.js:3410 -
+  /// расхождение названо).
+  Future<void> _openCard(Map<String, Object?> row, int id, FocusNode opener) async {
+    if (_cardOpen) {
+      setState(() => _notice = 'карточка уже открыта: повторное открытие '
+          'игнорируется (стек диалогов - волна W3)');
+      return;
+    }
+    setState(() {
+      _cardOpen = true;
+      _openRowId = id;
+    });
+    await showDialog<void>(
+      context: context,
+      // Затемнение под карточкой - --veil темы из реестра; барьер гасит
+      // список (эквивалент overlay + aria-modal в ui_src/index.html).
+      barrierColor: veilColor(themeIdOf(context)),
+      barrierLabel: 'закрыть карточку',
+      // Ловушка Tab: обход замыкается внутри маршрута диалога и не уходит в
+      // затемнённый список (APG Dialog (Modal), §3.8). Публичного `FocusTrap`
+      // в этом SDK нет - граница focus-scope маршрута.
+      traversalEdgeBehavior: TraversalEdgeBehavior.closedLoop,
+      // Вход карточки решает сама: фокус на выход (§3.8), не на первый
+      // контрол маршрута.
+      requestFocus: false,
+      // Карточка входит за --dur-slow-01, фон за --dur-slow-02 (CSS);
+      // AnimationStyle один: взят медленный вход карточки с кривой
+      // expressive, обратный ход - easeExit. Асимметрия названа.
+      animationStyle: AnimationStyle(
+        duration: durationExpand(),
+        curve: kMetrics.easeExpressive,
+        reverseCurve: kMetrics.easeExit,
+      ),
+      routeSettings: const RouteSettings(name: 'video-card'),
+      builder: (context) => VideoCardDialog(
+        facade: widget.facade,
+        videoId: id,
+        access: _access ?? Access(refusal: 'права не прочитаны - цель не '
+            'подписана'),
+        opener: widget.opener ?? const BrowserOpener(),
+      ),
+    );
+    setState(() {
+      _cardOpen = false;
+      _openRowId = null;
+    });
+    // Возврат фокуса на инициатора (ui_src/app.js: dialogLeave): в браузере
+    // возврат происходит, когда оверлей скрыт (MutationObserver по hidden),
+    // поэтому и здесь он после кадра, когда маршрут диалога снят - немедленный
+    // requestFocus под ещё живым барьером терялся при disposal маршрута
+    // (найдено фактом прогона теста: isFocused оставался none).
+    // `opener.parent != null` - публичный признак «узел ещё в focus-дереве»
+    // (`attached` в этом SDK нет - найдено flutter analyze).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (opener.parent != null) {
+        opener.requestFocus();
+      } else {
+        setState(() => _notice = 'фокус не возвратился на строку: строка '
+            'исчезла из окна прокрутки');
+      }
+      _dropStaleNodes();
+    });
+  }
+
+  /// Двойной клик/Ctrl+Enter: страница сервера `/watch/<id>` в системном
+  /// браузере. Право `watch` подписывается до перехода (тот же
+  /// `routeReason("media")` в ui_src/app.js:3443), отказ называется.
+  /// Системный плеер по файлу на диске (`open_file`) - нативная цель окна
+  /// (app/http/scopes.py: NATIVE), Flutter-окно поверх HTTP её не вызывает.
+  Future<void> _play(int id) async {
+    final access = _access;
+    if (access == null) {
+      setState(() => _notice = 'права не прочитаны: плеер не открывается');
+      return;
+    }
+    if (!access.has('watch')) {
+      setState(() => _notice = access.denial('watch'));
+      return;
+    }
+    final url = widget.facade.watchUrl(id);
+    final failure = await (widget.opener ?? const BrowserOpener()).open(url);
+    setState(() => _notice = failure ?? 'плеер открыт: $url');
+  }
+
   Widget _buildRow(BuildContext context, int index) {
     final theme = Theme.of(context);
+    final themeId = themeIdOf(context);
     final row = _rows[index];
     final id = row['id'] is num ? (row['id'] as num).toInt() : index;
     final selected = _selectedId == id;
     final role = roleOfStatus(row['status'] is String ? row['status'] as String : null);
-    final color = roleColor(themeIdOf(context), role);
-    return Semantics(
-      // Эквивалент aria из DESIGN-UI §3.1: строка названа целиком, выбор
-      // передаётся отдельным свойством, строка доступна с клавиатуры.
-      label: _rowSemantics(row, index),
-      selected: selected,
-      button: true,
-      child: ListTile(
-        // Фокус и активация с клавиатуры - ListTile с onTap: Tab ходит по
-        // строкам, Enter/Space выбирает строку (возврат фокуса - шаг с
-        // диалогами на W2).
-        onTap: () => setState(() => _selectedId = selected ? null : id),
-        selected: selected,
-        leading: Semantics(
-          // Маркер статуса: 7 px в CSS лежит вне токен-шкалы, здесь
-          // ближайший шаг шкалы (s3) - названо расхождением, форма маркера
-          // переносится вместе с веяниями на волне W3.
-          excludeSemantics: true,
-          child: Container(
-            width: kMetrics.s3,
-            height: kMetrics.s3,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: color,
-              border: Border.all(color: color),
+    final color = roleColor(themeId, role);
+    final node = _rowNode(id);
+    final hovered = _hoverId == id;
+    final focused = _focusedId == id;
+    final ring = focusRing(themeId);
+    return Focus(
+      focusNode: node,
+      // Строка доступна с клавиатуры: узел строки, а не internal focus
+      // ListTile (внутренний узел не дал бы различить Enter и Space).
+      canRequestFocus: true,
+      descendantsAreFocusable: false,
+      onKeyEvent: (node, event) => _handleRowKey(row, id, event),
+      onFocusChange: (hasFocus) => setState(() => _focusedId = hasFocus
+          ? id
+          : (_focusedId == id ? null : _focusedId)),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hoverId = id),
+        onExit: (_) => setState(() => _hoverId = _hoverId == id ? null : _hoverId),
+        child: GestureDetector(
+          onTap: () => _openCard(row, id, node),
+          onDoubleTap: () => _play(id),
+          child: Semantics(
+            // Эквивалент aria из DESIGN-UI §3.1: строка названа целиком,
+            // выбор передаётся отдельным свойством, активация - одиночный
+            // клик (карточка), не выбор. Флаг `focused` кладётся явно:
+            // Semantics-узел строки не получает состояние фокуса сам (Focus
+            // не аннотирует семантику, это делают контролы Material), и без
+            // него AT не объявил бы, на какой строке фокус.
+            label: _rowSemantics(row, index),
+            selected: selected,
+            button: true,
+            focused: focused,
+            onTap: () => _openCard(row, id, node),
+            child: Stack(
+              children: <Widget>[
+                ListTile(
+                  // onTap null: pointer-жест ведёт GestureDetector выше, а
+                  // Semantics(onTap) даёт активацию AT. Внутренний focus
+                  // ListTile не используется (Enter и Space нужно различать).
+                  onTap: null,
+                  selected: selected,
+                  // hover/selected - роли --hover и --selected из реестра
+                  // (тот же порядок различимости, что `.row:hover`/`.row.selected`).
+                  tileColor: hovered
+                      ? roleColor(themeId, 'hover')
+                      : theme.colorScheme.surfaceContainerLowest,
+                  selectedTileColor: roleColor(themeId, 'selected'),
+                  leading: Semantics(
+                    // Маркер статуса: 7 px в CSS лежит вне токен-шкалы, здесь
+                    // ближайший шаг шкалы (s3) - названо расхождением, форма
+                    // маркера переносится вместе с веяниями на волне W3.
+                    excludeSemantics: true,
+                    child: Container(
+                      width: kMetrics.s3,
+                      height: kMetrics.s3,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: color,
+                        border: Border.all(color: color),
+                      ),
+                    ),
+                  ),
+                  title: Text(row['title'] is String ? row['title'] as String : 'строка $index',
+                      style: theme.textTheme.bodyMedium,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis),
+                  subtitle: Text(
+                    '${row['channel'] is String ? row['channel'] as String : 'без канала'} · '
+                    '${durationOf(row['duration_s'])}',
+                    style: theme.textTheme.bodySmall,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis),
+                  trailing: Text(statusLabelOf(row), style: theme.textTheme.labelSmall?.copyWith(color: color)),
+                ),
+                if (focused)
+                  // Кольцо фокуса рисуется поверх строки (Stack overlay), а не
+                  // внутри её контейнера: границы внутри сдвигали содержимое
+                  // строки за её slot, и клик попадал в соседнюю строку -
+                  // найдено фактом прогона теста (hit test на «Клип 0» давал
+                  // _RenderListTile соседней строки). В CSS это два box-shadow
+                  // наружу (--focus-ring: 2px --bg, 4px --focus), здесь две
+                  // границы поверх строки: форма названа расхождением, ширины и
+                  // цвета читаются из токенов. IgnorePointer - кольцо не
+                  // перехватывает клик по строке.
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: Container(
+                        decoration: BoxDecoration(
+                          border: Border.all(color: ring.ring, width: ring.ringWidth),
+                        ),
+                        child: Container(
+                          decoration: BoxDecoration(
+                            border: Border.all(color: ring.gap, width: ring.gapWidth),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
             ),
           ),
         ),
-        title: Text(row['title'] is String ? row['title'] as String : 'строка $index',
-            style: theme.textTheme.bodyMedium,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis),
-        subtitle: Text(
-          '${row['channel'] is String ? row['channel'] as String : 'без канала'} · '
-          '${durationOf(row['duration_s'])}',
-          style: theme.textTheme.bodySmall,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis),
-        trailing: Text(statusLabelOf(row), style: theme.textTheme.labelSmall?.copyWith(color: color)),
       ),
     );
   }
@@ -468,6 +760,24 @@ class _LibraryHomeState extends State<LibraryHome> {
           // меняется без фокуса и должен быть объявлен AT. Регион отдельным
           // узлом (`container`), а подпись внутри исключена из семантики,
           // иначе AT передаёт одно и то же дважды.
+          Padding(
+            padding: EdgeInsets.symmetric(horizontal: kMetrics.s4, vertical: kMetrics.s2),
+            child: Semantics(
+              liveRegion: true,
+              container: true,
+              label: _notice == null
+                  ? 'ответ действия не назван'
+                  : 'ответ действия: $_notice',
+              child: Semantics(
+                excludeSemantics: true,
+                child: Text(_notice ?? 'действий пока не было',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                        color: _notice == null
+                            ? theme.colorScheme.onSurfaceVariant
+                            : theme.colorScheme.error)),
+              ),
+            ),
+          ),
           Padding(
             padding: EdgeInsets.symmetric(horizontal: kMetrics.s4, vertical: kMetrics.s3),
             child: Semantics(

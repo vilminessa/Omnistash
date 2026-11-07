@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 
+import 'access.dart';
+
 /// Транспорт W0: тот же контракт, что у браузерного клиента
 /// (docs/SERVER-CLIENT.md §4): `POST /api/<имя>`, тело `[аргумент]`
 /// (`{}` когда аргумента нет), заголовок `Bearer <токен>`.
@@ -17,6 +19,17 @@ import 'package:crypto/crypto.dart';
 abstract class Facade {
   /// Вызвать цель фасада. `arg == null` - цель без аргумента (тело `{}`).
   Future<Map<String, Object?>> call(String name, Object? arg);
+
+  /// Права предъявленного ключа (GET /whoami, ui_src/app.js: fetchAccess:816).
+  /// Клиент подписывает недоступные цели до запроса: карточка знает, что
+  /// «Открыть» требует `watch`, и называет отсутствие права текстом, а не
+  /// получает 403 на /media молча.
+  Future<Access> access();
+
+  /// Адрес страницы воспроизведения `/watch/<id>` (тот же путь, что
+  /// `playVideo` в ui_src/app.js в HTTP-режиме). Подмена фасада в тесте
+  /// обязан называть тот же путь - сверка ведёт mirror-страж.
+  String watchUrl(int videoId);
 }
 
 class ApiClient implements Facade {
@@ -60,6 +73,13 @@ class ApiClient implements Facade {
             '${_clip(text)}');
       }
       final decoded = jsonDecode(text);
+      if (decoded == null) {
+        // get_video на отсутствующее видео отдаёт null (app/gui.py ->
+        // repo.video_detail -> None): это «не найдено», и оно называется
+        // текстом, а не показывается пустой карточкой. Браузер молча
+        // выходит (app.js: if (!data) return), Flutter называет причину.
+        throw ApiFailure(name, 'ответ null - данных нет (цель не вернула объект)');
+      }
       if (decoded is! Map<String, Object?>) {
         throw ApiFailure(name, 'ответ не объект JSON: ${_clip(text)}');
       }
@@ -72,6 +92,53 @@ class ApiClient implements Facade {
       client.close();
     }
   }
+
+  /// GET /whoami: скоупы предъявленного ключа (app/http/server.py:
+  /// _serve_whoami). 401 называет причину привязки текстом из словаря бэкенда
+  /// (i18n http.pairing), а не пустой список прав: пустой список без причины
+  /// означал бы «доступ есть, но никакой».
+  @override
+  Future<Access> access() async {
+    final client = HttpClient()..badCertificateCallback = _trust;
+    try {
+      final uri = Uri.parse('https://$host:$port/whoami');
+      final request = await client.openUrl('GET', uri);
+      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      final response = await request.close();
+      final text = await utf8.decoder.bind(response).join();
+      if (response.statusCode == 401) {
+        return Access(refusal: kUnpairedText);
+      }
+      if (response.statusCode != 200) {
+        return Access(refusal: 'сервер ответил ${response.statusCode}: '
+            '${_clip(text)}');
+      }
+      final decoded = jsonDecode(text);
+      if (decoded is! Map<String, Object?>) {
+        return Access(refusal: 'whoami ответил не JSON: ${_clip(text)}');
+      }
+      final error = decoded['error'];
+      if (error is String && error.isNotEmpty) {
+        return Access(refusal: error);
+      }
+      final scopes = (decoded['scopes'] as List?)?.cast<String>()
+          ?? const <String>[];
+      return Access(scopes: scopes);
+    } on Object catch (error) {
+      // Канал не открыт: права не прочитаны, и это называется текстом.
+      return Access(refusal: 'права не прочитаны: $error');
+    } finally {
+      client.close();
+    }
+  }
+
+  /// Адрес страницы воспроизведения - тот же путь, что у браузерного клиента
+  /// в HTTP-режиме (ui_src/app.js: playVideo -> location.href =
+  /// httpBaseUrl() + "/watch/" + id; сервер принимает его в server.py:
+  /// path.startswith("/watch/")). Право на байты внутри страницы решает
+  /// сервер по ключу; здесь клиент называет отсутствие `watch` до перехода.
+  @override
+  String watchUrl(int videoId) => 'https://$host:$port/watch/$videoId';
 
   /// Доверие по пину: сертификат принимается только если его DER совпал
   /// с закрепленным sha256. Иначе отказ называется причиной, а не молчит.

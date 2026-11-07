@@ -1,9 +1,13 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:omnistash_ui/access.dart';
 import 'package:omnistash_ui/app.dart';
 import 'package:omnistash_ui/library_view.dart';
 import 'package:omnistash_ui/theme.dart';
+import 'package:omnistash_ui/video_card.dart';
 
 import 'fake_facade.dart';
 
@@ -151,17 +155,23 @@ void main() {
     expect(find.bySemanticsLabel('Клип 0, в индексе, Канал 0, 2:05, видео, '
         'обложка есть'), findsOneWidget,
         reason: 'строка не названа целиком - AT передаёт только имя');
-    await tester.tap(find.text('Клип 0'));
+    // Space - выбор (канон клавиатуры строк), карточку не открывает.
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
     await _pump(tester);
 
     expect(tester.widget<ListTile>(find.byType(ListTile).first).selected, true,
         reason: 'выбор строки не передан в ListTile.selected');
+    expect(find.byType(VideoCardDialog), findsNothing,
+        reason: 'Space открыл карточку: выбор должен переключаться, а не '
+            'показывать диалог (ui_src/app.js: чекбокс не открывает карточку)');
     final rowFlags = tester.getSemantics(find.bySemanticsLabel(
         'Клип 0, в индексе, Канал 0, 2:05, видео, обложка есть')).flagsCollection;
     // Tristate не экспортируется публично, поэтому выбор читается
     // преобразованием в bool - тот же приём, что в самом Flutter.
     expect(rowFlags.isSelected.toBoolOrNull(), true,
         reason: 'Semantics.selected не выставлен - AT не скажет «выбрано»');
+    expect(rowFlags.isButton, true,
+        reason: 'строка не активна как кнопка - с AT одиночное действие потеряно');
     final liveLabel = 'состояние: мок: запись журнала';
     expect(find.bySemanticsLabel(liveLabel), findsOneWidget,
         reason: 'регион состояния не назван текстом журнала - AT не объявит изменение');
@@ -171,7 +181,125 @@ void main() {
     handle.dispose();
   });
 
-  testWidgets('без сервера экран называет причину, а не пустой список',
+  testWidgets('одинарный клик открывает карточку, двойной - плеер',
+      (tester) async {
+    final facade = FakeFacade(total: 2, video: videoFixture(0),
+        pages: <List<Map<String, Object?>>>[
+          <Map<String, Object?>>[row(0), row(1)],
+        ]);
+    final opener = FakeOpener();
+    await tester.pumpWidget(OmnistashApp(facade: facade, opener: opener));
+    await _pump(tester);
+
+    // Одиночный жест: карточка (GestureDetector различает жесты, двойной
+    // побеждает одинарный - канон app.js различает их таймером 240 мс).
+    await tester.tap(find.text('Клип 0'));
+    await tester.pump();
+    await tester.pump(kDoubleTapTimeout);
+    await _pump(tester);
+    expect(find.byType(VideoCardDialog), findsOneWidget,
+        reason: 'одинарный клик не открыл карточку: список не имеет пути к деталям');
+    expect(facade.videoRequests, <Object?>[0],
+        reason: 'карточка не прочитана через get_video с id строки');
+
+    await tester.tap(find.byType(IconButton));
+    await _pump(tester);
+    expect(find.byType(VideoCardDialog), findsNothing,
+        reason: 'выход карточки не закрыл диалог');
+    expect(opener.opened, isEmpty,
+        reason: 'закрытие карточки не должно открывать адрес молча');
+
+    // Двойной жест - плеер, карточка не открывается (dblclick в app.js:3415).
+    await tester.tap(find.text('Клип 1'));
+    await tester.pump(const Duration(milliseconds: 80));
+    await tester.tap(find.text('Клип 1'));
+    await tester.pump();
+    await tester.pump(kDoubleTapTimeout);
+    await _pump(tester);
+    expect(opener.opened, <String>['https://fake.test/watch/1'],
+        reason: 'двойной клик не открыл страницу плеера /watch/<id>');
+    expect(find.byType(VideoCardDialog), findsNothing,
+        reason: 'двойной клик открыл карточку вместо плеера');
+  });
+
+  testWidgets('Enter - карточка, Ctrl+Enter - плеер', (tester) async {
+    final facade = FakeFacade(total: 2, video: videoFixture(0),
+        pages: <List<Map<String, Object?>>>[
+          <Map<String, Object?>>[row(0), row(1)],
+        ]);
+    final opener = FakeOpener();
+    await tester.pumpWidget(OmnistashApp(facade: facade, opener: opener));
+    await _pump(tester);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await _pump(tester);
+    expect(find.byType(VideoCardDialog), findsOneWidget,
+        reason: 'Enter не открыл карточку (канон: Enter - карточка)');
+    expect(tester.widget<ListTile>(find.byType(ListTile).first).selected, false,
+        reason: 'Enter не должен менять выбор строки');
+
+    await tester.tap(find.byType(IconButton));
+    await _pump(tester);
+    expect(find.byType(VideoCardDialog), findsNothing,
+        reason: 'карточка не закрылась выходом');
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await _pump(tester);
+    expect(opener.opened, <String>['https://fake.test/watch/0'],
+        reason: 'Ctrl+Enter не открыл плеер (канон: Ctrl+Enter - плеер)');
+    expect(find.byType(VideoCardDialog), findsNothing,
+        reason: 'Ctrl+Enter открыл карточку вместо плеера');
+  });
+
+  testWidgets('карточка без права watch называет отказ и не открывает плеер',
+      (tester) async {
+    final facade = FakeFacade(total: 1, scopes: <String>['read'],
+        video: videoFixture(0), pages: <List<Map<String, Object?>>>[
+          <Map<String, Object?>>[row(0, status: 'downloaded', label: 'скачано')],
+        ]);
+    final opener = FakeOpener();
+    await tester.pumpWidget(OmnistashApp(facade: facade, opener: opener));
+    await _pump(tester);
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await _pump(tester);
+
+    expect(opener.opened, isEmpty,
+        reason: 'плеер открыт без права watch: сервер ответил бы 403 на /media '
+            'молча, клиент обязан подписать отказ до перехода');
+    expect(find.textContaining(kScopeDeniedText), findsOneWidget,
+        reason: 'отказ по праву не назван текстом i18n (http.scope)');
+  });
+
+  testWidgets('права не прочитаны - отказ назван, плеер не открывается',
+      (tester) async {
+    final facade = FakeFacade(total: 1, accessRefusal: kUnpairedText,
+        video: videoFixture(0), pages: <List<Map<String, Object?>>>[
+          <Map<String, Object?>>[row(0)],
+        ]);
+    final opener = FakeOpener();
+    await tester.pumpWidget(OmnistashApp(facade: facade, opener: opener));
+    await _pump(tester);
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await _pump(tester);
+
+    expect(opener.opened, isEmpty,
+        reason: 'цель подписана при непрочитанных правах: молчаливый переход '
+            'выглядит как доступ, которого нет');
+    expect(find.textContaining(kUnpairedText), findsOneWidget,
+        reason: 'непрочитанные права названы причиной привязки (i18n http.pairing)');
+    expect(find.textContaining('whoami'), findsNothing,
+        reason: 'подмена фасада не должна печатать имя цели в интерфейсе');
+  });
+
+  testWidgets('без сервера список называет причину, а не пустую библиотеку',
       (tester) async {
     await tester.pumpWidget(const OmnistashApp(facade: null));
     await _pump(tester);

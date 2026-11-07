@@ -19,9 +19,14 @@
 ///   primaryContainer        <- --accent-dim   disabled primary-подложка
 ///   secondary               <- --info         цвет informational-статуса
 ///   error / onError         <- --err / --text
-///   scrim                   <- --scrim        затемнение под диалогом
+///   scrim                   <- --scrim        затемнение под диалогом (значки)
+///   veil (не роль схемы)    <- --veil         подложка под диалогом: альфа и
+///     цвет перенесены числом (шаг W2 3), форма барьера - объект Flutter
 ///   shadow                  <- --scrim        тон elevation: Flutter строит
 ///     тень своим объектом, строка box-shadow из CSS не переносится (волна W3)
+///   focusRing               <- --focus/--bg   кольцо фокуса строки: две
+///     границы вместо двух box-shadow (форма названа расхождением, волна W3
+///     для теней контролов)
 ///
 /// Ролей «on-ok», «on-warn», «on-info» в токен-системе нет и это названо
 /// причиной, а не молчанием: в окне состояние несёт текст и подпись, а не
@@ -43,6 +48,24 @@ export 'theme_tokens.dart';
 /// Роль темы как Color по имени CSS-переменной ('bg', 'line-strong').
 /// Отказ называет тему и имя - как app/themes.py: vars_problems.
 Color roleColor(String themeId, String name) => Color(role(themeId, name));
+
+/// Подложка под диалогом - --veil темы (альфа и цвет из реестра, шаг W2 3).
+/// Flutter рисует барьер своим объектом: форма «строка rgba-в-строку» не
+/// переносится, переносится цвет и альфа, и mirror-страж сверяет каждую тему.
+Color veilColor(String themeId) => Color(kThemeVeils[normalizeThemeId(themeId)]!);
+
+/// Кольцо фокуса: зазор к подложке (--bg) и само кольцо (--focus), ширины из
+/// --focus-ring. В CSS это box-shadow, здесь - две границы: форма названа
+/// расхождением (docs/DESIGN-UI.md §2.4), цвета читаются из палитры темы.
+({Color gap, Color ring, double gapWidth, double ringWidth}) focusRing(String themeId) {
+  final id = normalizeThemeId(themeId);
+  return (
+    gap: roleColor(id, 'bg'),
+    ring: roleColor(id, 'focus'),
+    gapWidth: kMetrics.focusRingGap,
+    ringWidth: kMetrics.focusRingFocus,
+  );
+}
 
 /// Светлая ли тема (по флагу реестра themes.themes()).
 bool themeIsDark(String themeId) => kThemeDark[normalizeThemeId(themeId)] ?? false;

@@ -13,11 +13,18 @@ app/themes.py (FONT_SIZE_*, FONT_SCALE_*, ROW_MIN, ROW_FACTOR), пары кон�
 реестром и с CSS на каждый прогон набора проверок (GitHub-раннер Flutter не
 гоняет, но этот страж работает без тулчейна).
 
+Что переносится числом из COMPOSITE_VARS (волна W2, шаг 3 - карточка видео):
+  * --veil - подложка под диалогом: rgba перекладывается в ARGB-число (цвет и
+    альфа), Flutter рисует её своим объектом; «строка-в-строку» не переносится,
+    но цвет и альфа - переносятся, и mirror-страж сверяет каждую тему;
+  * --focus-ring - кольцо фокуса: из строки берутся две ширины px (зазор к
+    подложке и само кольцо), форма - border вместо box-shadow (названо
+    расхождением), цвета - роли --bg и --focus из палитры.
+
 Что НЕ переносится этим шагом и названо причиной:
-  * строки box-shadow и кольцо фокуса (--shadow, --shadow-1/2, --veil,
-    --focus-ring) - Flutter рисует elevation и фокус-кольцо своими объектами,
-    перенос «строка-в-строку» невозможен; роли для них выводятся цветами, а
-    форма тени ложится на волне W3;
+  * строки box-shadow (--shadow, --shadow-1/2) - Flutter рисует elevation
+    своими объектами, перенос «строка-в-строку» невозможен; форма тени ложится
+    на волне W3;
   * шрифт: Raven-сабсеты (Roboto - Apache-2.0, Instrument Sans / Bricolage
     Grotesque / JetBrains Mono - SIL OFL 1.1) пинятся по sha256 и кладутся в
     бандл только после аудита лицензии (docs/LEGAL-REVIEW.md §5 «Отложить»);
@@ -57,6 +64,8 @@ METRIC_VARS = (
     "--dur-fast-01", "--dur-fast-02", "--dur-moderate-01", "--dur-moderate-02",
     "--dur-slow-01", "--dur-slow-02",
     "--ease-productive", "--ease-expressive", "--ease-exit",
+    # Кольцо фокуса: из строки shadow берются две ширины px (см. Ring).
+    "--focus-ring",
 )
 
 HEX = re.compile(r"^#([0-9A-Fa-f]{6})$")
@@ -65,6 +74,13 @@ Ms = re.compile(r"^([\d.]+)ms$")
 Em = re.compile(r"^([\d.]+)em$")
 Factor = re.compile(r"^([\d.]+)$")
 Bezier = re.compile(r"^cubic-bezier\(\s*([\d.]+),\s*([\d.]+),\s*([\d.]+),\s*([\d.]+)\s*\)$")
+# Кольцо фокуса в CSS - два box-shadow без смещения: зазор к подложке и кольцо.
+Ring = re.compile(r"0\s+0\s+0\s+([\d.]+)px\s+var\(--([a-z0-9-]+)\)")
+# Подложка под диалогом: rgba(r, g, b, a) - цвет и альфа, не строка-тень.
+Rgba = re.compile(r"^rgba\(\s*(\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\s*\)$")
+# Порядок колец и их роли названы: первый - зазор (--bg), второй - кольцо (--focus).
+RING_VARS = ("bg", "focus")
+RING_NAMES = ("focusRingGap", "focusRingFocus")
 
 
 def dart_name(css_name: str) -> str:
@@ -93,6 +109,23 @@ def metric_values() -> dict[str, str]:
         if value is None:
             raise SystemExit(f"отказ: метрика {name} не объявлена в :root")
         value = value.strip()
+        if name == "--focus-ring":
+            # Кольцо фокуса - строка shadow: из неё берутся две ширины px,
+            # формы колец (0 0 0) и их роли. Расхождение называется: без
+            # ширины кольцо строки не переносится числом.
+            rings = Ring.findall(value)
+            if len(rings) != len(RING_NAMES):
+                raise SystemExit(f"отказ: {name} = {value!r} - колец {len(rings)}, "
+                                 f"ожидается {len(RING_NAMES)} (зазор и кольцо): "
+                                 "кольцо фокуса не переносится")
+            got_roles = [var for _width, var in rings]
+            if got_roles != list(RING_VARS):
+                raise SystemExit(f"отказ: {name} красит кольцами {got_roles}, "
+                                 f"а роли должны быть {list(RING_VARS)}: цвета "
+                                 "кольца читаются из палитры темы, а не из строки")
+            for (width, _role), metric_name in zip(rings, RING_NAMES):
+                out[metric_name] = _number(width)
+            continue
         match = Px.match(value)
         if match:
             out[dart_name(name)] = _number(match.group(1))
@@ -186,9 +219,12 @@ HEADER = r"""// Сгенерировано tools/build_flutter_theme.py из app
 // themes.CONTRAST_PAIRS. Формула WCAG перенесена из app/themes.py
 // (luminance/contrast_ratio): один и тот же расчёт на обеих сторонах клиента.
 //
-// Строки box-shadow и кольцо фокуса (--shadow, --shadow-1/2, --veil,
-// --focus-ring) здесь нет намеренно: Flutter рисует elevation и фокус своими
-// объектами, «строка-в-строку» не переносится, форма тени ложится на волне W3.
+// Строки box-shadow (--shadow, --shadow-1/2) здесь нет намеренно: Flutter
+// рисует elevation своими объектами, «строка-в-строку» не переносится, форма
+// тени ложится на волне W3. --veil и --focus-ring перенесены числом (волна W2,
+// шаг 3): альфа и цвет подложки диалога - kThemeVeils, две ширины кольца
+// фокуса - focusRingGap и focusRingFocus; форма кольца - border вместо
+// box-shadow, это названное расхождение, цвета - роли --bg и --focus.
 // Шрифт Raven-сабсетами не переносится до аудита лицензии (docs/LEGAL-REVIEW.md
 // §5 «Отложить»): Dart держит системный стек, рантайм ничего не скачивает.
 //
@@ -272,6 +308,8 @@ class Metrics {
     required this.easeProductive,
     required this.easeExpressive,
     required this.easeExit,
+    required this.focusRingGap,
+    required this.focusRingFocus,
   });
 """
 
@@ -313,6 +351,10 @@ METRIC_FIELDS_TAIL = r"""  final double s1;
   final Cubic easeProductive;
   final Cubic easeExpressive;
   final Cubic easeExit;
+  /// Кольцо фокуса: зазор к подложке (--bg) и само кольцо (--focus), ширины px
+  /// из --focus-ring. Форма - border вместо box-shadow (названное расхождение).
+  final double focusRingGap;
+  final double focusRingFocus;
 }
 
 /// Метрики окна: те же числа, что :root в ui_src/app.css.
@@ -374,8 +416,43 @@ double rowHeight(double fontSize) {
 """
 
 
+def veil_blocks() -> list[str]:
+    """Подложка под диалогом: --veil каждой темы как ARGB-число (цвет + альфа).
+
+    Flutter рисует barrier своим объектом, «строка rgba-в-строку» не переносится,
+    но цвет и альфа переносятся числом; расхождение по теме называется.
+    """
+    lines = ["/// Подложка под диалогом - --veil каждой темы из реестра (rgba ->\n"
+             "/// ARGB: альфа и цвет). tools/check_flutter_mirror.py сверяет каждую\n"
+             "/// тему с themes.css_vars: барьер диалога не выдумывает затемнение.\n"
+             "const Map<String, int> kThemeVeils = <String, int>{"]
+    for item in themes.themes():
+        value = themes.css_vars(item["id"]).get("--veil")
+        if value is None:
+            raise SystemExit(f"отказ: тема {item['id']} не объявляет --veil - "
+                             "подложка диалога потеряна")
+        match = Rgba.match(value.strip())
+        if not match:
+            raise SystemExit(f"отказ: тема {item['id']} --veil = {value!r} - не "
+                             "rgba(r, g, b, a): затемнение не переносится числом")
+        red, green, blue = (int(part) for part in match.groups()[:3])
+        alpha_unit = float(match.group(4))
+        if not 0 <= alpha_unit <= 1:
+            raise SystemExit(f"отказ: тема {item['id']} --veil альфа "
+                             f"{alpha_unit} вне 0..1: затемнение нечитаемое")
+        channels = (red, green, blue)
+        if any(not 0 <= part <= 255 for part in channels):
+            raise SystemExit(f"отказ: тема {item['id']} --veil каналы {channels} "
+                             "вне 0..255: цвет непереносим")
+        lines.append(f"  '{item['id']}': "
+                     f"0x{round(alpha_unit * 255):02x}"
+                     f"{red:02x}{green:02x}{blue:02x},")
+    lines.append("};")
+    return ["\n".join(lines)]
+
+
 def render() -> str:
-    """Вывод ассета токенов: классы, метрики, списки тем, роли и перенос WCAG."""
+    """Вывод ассета токенов: классы, метрики, списки тем, роли, veil и перенос WCAG."""
     metrics = metric_values()
     blocks = [
         HEADER.rstrip(),
@@ -383,6 +460,7 @@ def render() -> str:
         metrics_literal(metrics).rstrip(),
         "\n".join(meta_lines()),
         "\n".join(theme_blocks()),
+        "\n".join(veil_blocks()),
         WCAG.rstrip(),
     ]
     # Одна пустая строка между блоками и перевод в конце файла: ассет сверяется

@@ -22,6 +22,7 @@ import 'package:flutter/material.dart';
 
 import 'api_client.dart';
 import 'library_view.dart';
+import 'player.dart';
 import 'theme.dart';
 
 /// Порядок подписей табов - тот же, что значения `TAB_RU` в ui_src/app.js
@@ -56,6 +57,7 @@ class OmnistashTabs extends StatefulWidget {
     super.key,
     required this.facade,
     this.settings = const <String, Object?>{},
+    this.opener,
   });
 
   final Facade facade;
@@ -63,6 +65,10 @@ class OmnistashTabs extends StatefulWidget {
   /// Снимок настроек из `get_initial`: состав колонок (гейты `col_*`) и
   /// порядок сортировки (`sort_col`, `sort_dir`) читаются из него.
   final Map<String, Object?> settings;
+
+  /// Открытие адресов (страница плеера, площадка) - системный браузер по
+  /// умолчанию; тест подменяет его и сверяет URL.
+  final UrlOpener? opener;
 
   @override
   State<OmnistashTabs> createState() => _OmnistashTabsState();
@@ -90,7 +96,11 @@ class _OmnistashTabsState extends State<OmnistashTabs>
     final panels = <Widget>[
       for (final label in kTabLabels)
         label == kTabLabels.first
-            ? LibraryHome(facade: widget.facade, settings: widget.settings)
+            ? LibraryHome(
+                facade: widget.facade,
+                settings: widget.settings,
+                opener: widget.opener,
+              )
             : StubPanel(label: label, text: kTabStubs[label]!),
     ];
     return Scaffold(

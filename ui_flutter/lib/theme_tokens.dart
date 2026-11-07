@@ -9,9 +9,12 @@
 // themes.CONTRAST_PAIRS. Формула WCAG перенесена из app/themes.py
 // (luminance/contrast_ratio): один и тот же расчёт на обеих сторонах клиента.
 //
-// Строки box-shadow и кольцо фокуса (--shadow, --shadow-1/2, --veil,
-// --focus-ring) здесь нет намеренно: Flutter рисует elevation и фокус своими
-// объектами, «строка-в-строку» не переносится, форма тени ложится на волне W3.
+// Строки box-shadow (--shadow, --shadow-1/2) здесь нет намеренно: Flutter
+// рисует elevation своими объектами, «строка-в-строку» не переносится, форма
+// тени ложится на волне W3. --veil и --focus-ring перенесены числом (волна W2,
+// шаг 3): альфа и цвет подложки диалога - kThemeVeils, две ширины кольца
+// фокуса - focusRingGap и focusRingFocus; форма кольца - border вместо
+// box-shadow, это названное расхождение, цвета - роли --bg и --focus.
 // Шрифт Raven-сабсетами не переносится до аудита лицензии (docs/LEGAL-REVIEW.md
 // §5 «Отложить»): Dart держит системный стек, рантайм ничего не скачивает.
 //
@@ -95,6 +98,8 @@ class Metrics {
     required this.easeProductive,
     required this.easeExpressive,
     required this.easeExit,
+    required this.focusRingGap,
+    required this.focusRingFocus,
   });
 
   final double s1;
@@ -135,6 +140,10 @@ class Metrics {
   final Cubic easeProductive;
   final Cubic easeExpressive;
   final Cubic easeExit;
+  /// Кольцо фокуса: зазор к подложке (--bg) и само кольцо (--focus), ширины px
+  /// из --focus-ring. Форма - border вместо box-shadow (названное расхождение).
+  final double focusRingGap;
+  final double focusRingFocus;
 }
 
 /// Метрики окна: те же числа, что :root в ui_src/app.css.
@@ -178,6 +187,8 @@ const Metrics kMetrics = Metrics(
   easeProductive: Cubic(0.2, 0.0, 0.38, 0.9),
   easeExpressive: Cubic(0.4, 0.14, 0.3, 1.0),
   easeExit: Cubic(0.4, 0.14, 1.0, 1.0),
+  focusRingGap: 2.0,
+  focusRingFocus: 4.0,
 );
 
 const List<String> kThemeIds = <String>['dark', 'light', 'coolors', 'contrast', 'custom'];
@@ -382,6 +393,17 @@ const Map<String, Map<String, int>> kThemeColors =
       'log-text': 0xffc8bda9,
       'scrim': 0xff0a0705
   },
+};
+
+/// Подложка под диалогом - --veil каждой темы из реестра (rgba ->
+/// ARGB: альфа и цвет). tools/check_flutter_mirror.py сверяет каждую
+/// тему с themes.css_vars: барьер диалога не выдумывает затемнение.
+const Map<String, int> kThemeVeils = <String, int>{
+  'dark': 0x9e040910,
+  'light': 0x731c2430,
+  'coolors': 0x73003049,
+  'contrast': 0xbf020406,
+  'custom': 0x9e0c0906,
 };
 
 /// Относительная яркость по WCAG 2.x - перенос app/themes.py: luminance.

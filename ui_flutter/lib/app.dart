@@ -19,14 +19,19 @@ library;
 import 'package:flutter/material.dart';
 
 import 'api_client.dart';
+import 'player.dart';
 import 'tabs.dart';
 import 'theme.dart';
 
 class OmnistashApp extends StatefulWidget {
-  const OmnistashApp({super.key, required this.facade});
+  const OmnistashApp({super.key, required this.facade, this.opener});
 
   /// Реальный транспорт к `--serve` или подмена в тесте (Facade).
   final Facade? facade;
+
+  /// Открытие адресов карточки (страница плеера, площадка). По умолчанию -
+  /// системный браузер; тест подменяет его, чтобы прогон не запускал cmd.
+  final UrlOpener? opener;
 
   @override
   State<OmnistashApp> createState() => _OmnistashAppState();
@@ -89,7 +94,13 @@ class _OmnistashAppState extends State<OmnistashApp> {
       theme: theme,
       home: facade == null
           ? _NoServerHome(themeId: _themeId, error: _error)
-          : OmnistashTabs(facade: facade, settings: _settings),
+          : OmnistashTabs(
+              facade: facade,
+              settings: _settings,
+              // Карточка строки (W2, шаг 3) открывает адрес: системный
+              // браузер поверх того же `--serve`, новых зависимостей нет.
+              opener: widget.opener ?? const BrowserOpener(),
+            ),
     );
   }
 }
