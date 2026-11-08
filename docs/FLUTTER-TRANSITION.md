@@ -466,7 +466,13 @@ whitelist, выдуманный текст серверного отказа, п
 HEAD; `node --check ui_src/app.js` - OK; `tools/build_client.py --check`,
 `tools/build_legal_pack.py --check`, `tools/build_flutter_theme.py --check`,
 `tools/build_preview.py` (`preview.html` 648516 байт) и
-`tools/check_workflows.py` (3 воркфлоу) - зелёные. Живой продакшен-слушатель
+`tools/check_workflows.py` (3 воркфлоу) - зелёные. Отправлено на GitHub
+(`2d789eb..0c56dc8`), прогон CI `42529447133` - conclusion `success`
+(`Ran 1831 tests in 103.8s - OK`); на раннере `skipped=11` против 17 локально -
+различие названо: 6 проверок `tests/test_impersonate.py` там выполняются,
+потому что `curl_cffi` на раннере установлена, а на машине человека её нет
+(`skipUnless(HAVE_CFFI)`, проверено фактом: `importlib.util.find_spec('curl_cffi')`
+возвращает None). Живой продакшен-слушатель
 по решению человека от 09.11.2026: меркой шага назван офлайн-сьют слушателя
 в `tools/run_tests.py` (`test_serve_exposure` 110, `test_serve` 81,
 `test_serve_media` 41, `test_serve_hls` 23 проверок - зелёные в прогоне
