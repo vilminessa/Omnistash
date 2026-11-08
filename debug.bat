@@ -40,8 +40,8 @@ echo    [6] Проверка синтаксиса: python и node
 echo    [7] Собрать превью интерфейса и открыть
 echo    [8] Превью первого запуска (диалог выбора папки)
 echo    [G] Flutter: сверка токенов, колонок и табов с источниками
-echo    [H] Flutter: анализ и тесты экрана (нужен SDK на сборочное время)
-echo    [I] Flutter: собрать release exe окна (нужен SDK)
+echo    [H] Flutter: анализ и тесты экрана (нужен SDK на сборочное время; RAM под лимитом)
+echo    [I] Flutter: собрать release exe окна (нужен SDK; RAM под лимитом)
 echo    [J] Ассеты: иконки .ico, SVG, тема Бренд, токены Flutter
 echo    [K] Бандл клиента и юр-пак: сверка и воркфлоу
 echo    [L] Запустить окно с живым фасадом (--serve)
@@ -180,12 +180,60 @@ set "rc=%errorlevel%"
 goto after
 
 :op_flutter_check
-echo Flutter: анализ и widget-тесты экрана (analyze, test)...
+echo Flutter: анализ и widget-тесты экрана (analyze; test по сьютам)...
 cd ui_flutter
 call flutter analyze
 set "rc=%errorlevel%"
 if not "%rc%"=="0" (cd .. & goto after)
-call flutter test
+rem Экран библиотеки разделён на группы (test/harness.dart + 6 файла): изолятор
+rem живёт на весь файл и копится линейно по тестам - один файл 34 теста дал
+rem 12708 MB commit (факт прогона при потолке 12288). Ряд рейтинга переложен на
+rem SegmentedButton: факты probe'ов шага 4 - DropdownButton статично 8.1 GB и с
+rem выбором 9.3 GB, DropdownMenu с выбором 9.0 GB, ToggleButtons с тапом 8.35 GB,
+rem Radio-ряд 7.8-8.4 GB, SegmentedButton с тапами и setState 660 MB в том же
+rem DialogScaffold. Наблюдённые пики групп после переложения: 306-791 MB
+rem (мелкие сьюты 4096 MB, группы экрана 6144 MB) - жёсткий kill выше потолка
+rem держится. Job-лимит не применился: вложенный CreateJobW отказан в песочнице
+rem (факт smoke), toolhelp там же ERROR_MORE_DATA (факт dbg) - снимок читает WMI
+rem через один живой воркер. Трим resident не включён - он гоняет подкачку и
+rem грузит диск (сообщение человека).
+python ..\tools\run_capped.py --cmd "flutter test test\widget_test.dart" --max-mem-mb 4096
+set "rc=%errorlevel%"
+if not "%rc%"=="0" (cd .. & goto after)
+python ..\tools\run_capped.py --cmd "flutter test test\theme_test.dart" --max-mem-mb 4096
+set "rc=%errorlevel%"
+if not "%rc%"=="0" (cd .. & goto after)
+python ..\tools\run_capped.py --cmd "flutter test test\tabs_test.dart" --max-mem-mb 4096
+set "rc=%errorlevel%"
+if not "%rc%"=="0" (cd .. & goto after)
+python ..\tools\run_capped.py --cmd "flutter test test\video_card_test.dart" --max-mem-mb 4096
+set "rc=%errorlevel%"
+if not "%rc%"=="0" (cd .. & goto after)
+rem Экран библиотеки разделён на группы (test/harness.dart + 6 файла): изолятор
+rem живёт на весь файл и копится линейно по тестам - один файл 34 теста дал
+rem 12708 MB commit (факт прогона при потолке 12288), а группа пометок с
+rem dropdown рейтинга - 6265 MB при 6144 и 6496 MB в отдельном файле из трёх
+rem тестов (факт прогона: spike не накопление, а стоимость диалога с
+rem overlay). Поэтому группы гонятся отдельными процессами: 13 core, 7 grid,
+rem 4 bulk под 6144 MB (наблюдённые пики 729-757 MB), 3 marks, 3 dialogs и 4
+rem danger под 8192 MB - минимальный жизнеспособный потолок для диалоговой
+rem группы, kill выше него держится.
+python ..\tools\run_capped.py --cmd "flutter test test\library_view_test.dart" --max-mem-mb 6144
+set "rc=%errorlevel%"
+if not "%rc%"=="0" (cd .. & goto after)
+python ..\tools\run_capped.py --cmd "flutter test test\library_grid_test.dart" --max-mem-mb 6144
+set "rc=%errorlevel%"
+if not "%rc%"=="0" (cd .. & goto after)
+python ..\tools\run_capped.py --cmd "flutter test test\library_bulk_test.dart" --max-mem-mb 6144
+set "rc=%errorlevel%"
+if not "%rc%"=="0" (cd .. & goto after)
+python ..\tools\run_capped.py --cmd "flutter test test\library_marks_test.dart" --max-mem-mb 6144
+set "rc=%errorlevel%"
+if not "%rc%"=="0" (cd .. & goto after)
+python ..\tools\run_capped.py --cmd "flutter test test\library_dialogs_test.dart" --max-mem-mb 6144
+set "rc=%errorlevel%"
+if not "%rc%"=="0" (cd .. & goto after)
+python ..\tools\run_capped.py --cmd "flutter test test\library_danger_test.dart" --max-mem-mb 6144
 set "rc=%errorlevel%"
 cd ..
 goto after
@@ -193,7 +241,9 @@ goto after
 :op_flutter_build
 echo Flutter: сборка release exe окна (движок Skia по решению человека)...
 cd ui_flutter
-call flutter build windows --release
+rem Сборка тоже под потолком commit: dart compile + clang на linking пикают
+rem несколько ГБ; 4096 MB - наблюдённый запас на машине человека.
+python ..\tools\run_capped.py --cmd "flutter build windows --release" --max-mem-mb 4096
 set "rc=%errorlevel%"
 cd ..
 echo Артефакт: ui_flutter\build\windows\x64\runner\Release\omnistash_ui.exe

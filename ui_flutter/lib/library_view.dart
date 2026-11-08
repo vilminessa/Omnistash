@@ -9,20 +9,34 @@
 /// `--row-h` в CSS и `app/themes.py: row_height`.
 ///
 /// Семантика строк - эквиваленты `aria` из docs/DESIGN-UI.md §3.1: строка
-/// названа целиком (имя, статус, канал, длительность, рейтинг), выбор
-/// передаётся как `selected`, строка доступна с клавиатуры (собственный
-/// `Focus` строки: обход по ↑↓ ведёт default traversal, Enter открывает
-/// карточку, Ctrl+Enter открывает плеер, Space переключает выбор - тот же
-/// канон, что `bindGridItems` в ui_src/app.js:3400-3435 и строка клавиатуры
-/// в docs/DESIGN-UI.md §733). Home/End (первая/последняя строка окна
-/// прокрутки) на этом шаге не построены: названный разрыв, ложится вместе с
-/// гридом ячеек на волне W2. Клик одинарный открывает карточку, двойной -
-/// плеер: Flutter различает их жестом двойного нажатия (задержка по умолчанию
-/// 300 мс), браузер держит 240 мс вручную (app.js:3410) - расхождение
-/// названо, а не подменяется числом.
+/// названа целиком (имя, статус, канал, длительность, рейтинг,
+/// «просмотрено»), выбор передаётся как `selected`, строка доступна с
+/// клавиатуры (собственный `Focus` строки: обход по ↑↓ ведёт default
+/// traversal, Enter открывает карточку, Ctrl+Enter открывает плеер, Space
+/// переключает выбор - тот же канон, что `bindGridItems` в
+/// ui_src/app.js:3400-3435 и строка клавиатуры в docs/DESIGN-UI.md §733).
+/// Home/End (первая/последняя строка окна прокрутки) на этом шаге не
+/// построены: названный разрыв, ложится на волну W3 вместе с roving-обходом
+/// грид-ролей. Клик одинарный открывает карточку, двойной - плеер: Flutter
+/// различает их жестом двойного нажатия (задержка по умолчанию 300 мс),
+/// браузер держит 240 мс вручную (app.js:3410) - расхождение названо, а не
+/// подменяется числом.
 ///
 /// Активация карточки с AT (`Semantics(onTap:)`) повторяет одиночный клик:
-/// карточка, не выбор; выбор - отдельное действие Space, как в окне.
+/// карточка, не выбор; выбор - отдельное действие Space и чекбокс строки
+/// (`row-check` канона гасит click строки - app.js:3408,3423).
+///
+/// Шаг 4: грид ячеек (`grid_cells.dart` - тот же состав колонок, что шапка:
+/// `visibleCols`, гейты `col_*`, веса wide/narrow из канонных `LIST_COLS`),
+/// мультивыбор (`Set<int>` - тот же `state.selected`, порядок вставки
+/// канона `Array.from(Set)` в проводке bulk-целей), панель целей
+/// (`SelectionBar` из `bulk_bar.dart`: «Выбрано: N» живой регион, селект
+/// хранилища из `storages_list` под `read`, цели в канонном порядке),
+/// диалоги «Пометить…» и «Операции…» (§3.8 через `dialog_trap.dart`: цели
+/// `save_fields`/`bulk_*` под правами `mark`/`sources` подписываются до
+/// вызова) и разрушительный диалог, называющий N (§3.7: галка подтверждения
+/// до «Принять», вход - «Отклонить», отказ бэка без `confirm:true`
+/// называется текстом сервера).
 ///
 /// Сортировка колонок построена на шаге W2 (ниже): порядок строк приходит от
 /// сервера через аргумент `order` - тот же, что `ensureRange` в ui_src/app.js, а
@@ -40,6 +54,8 @@ import 'package:flutter/services.dart';
 
 import 'access.dart';
 import 'api_client.dart';
+import 'bulk_bar.dart';
+import 'grid_cells.dart';
 import 'player.dart';
 import 'theme.dart';
 import 'video_card.dart';
@@ -81,32 +97,6 @@ const List<({String label, String col, String gate})> kSortableColumns =
   (label: 'Синк', col: 'sync', gate: 'col_sync'),
 ];
 
-/// Роль цвета статуса строки - тот же источник, что `.status[data-s=...]`
-/// в ui_src/app.css (downloaded -> ok, queued -> info, downloading -> warn,
-/// failed -> err, missing -> warn; known и unavailable -> muted). Сверку
-/// карты с CSS ведёт tools/check_flutter_mirror.py.
-const Map<String, String> kStatusRoles = <String, String>{
-  'known': 'muted',
-  'queued': 'info',
-  'downloading': 'warn',
-  'downloaded': 'ok',
-  'failed': 'err',
-  'missing': 'warn',
-  'unavailable': 'muted',
-};
-
-/// Статус без подписи реестра (app/repo.py STATUS_LABELS) читается текстом
-/// статуса как есть - молчания нет: строка называет, что не распознано.
-String statusLabelOf(Map<String, Object?> row) {
-  final label = row['status_label'];
-  if (label is String && label.isNotEmpty) return label;
-  final status = row['status'];
-  if (status is String && status.isNotEmpty) return 'статус: $status';
-  return 'статус не назван';
-}
-
-String roleOfStatus(String? status) => kStatusRoles[status ?? ''] ?? 'muted';
-
 /// Длительность в минуты:секунды - та же форма, что колонка списка окна.
 String durationOf(Object? seconds) {
   final total = seconds is num ? seconds.toInt() : 0;
@@ -144,7 +134,11 @@ class LibraryHome extends StatefulWidget {
 class _LibraryHomeState extends State<LibraryHome> {
   List<Map<String, Object?>> _rows = const <Map<String, Object?>>[];
   int _total = 0;
-  int? _selectedId;
+  /// Мультивыбор строк - тот же `state.selected` канона (`Set`, порядок
+  /// вставки совпадает с `Array.from(state.selected)` в проводке целей -
+  /// app.js:1467). Space на строке, чекбокс строки и галка «выбрать всё»
+  /// ведут его вместе; выбор переживает перезагрузку страниц.
+  final Set<int> _selected = <int>{};
   String? _error;
   String? _persistError;
   String _journal = 'журнал пуст';
@@ -155,6 +149,16 @@ class _LibraryHomeState extends State<LibraryHome> {
   /// Права ключа (GET /whoami): цель «Открыть» подписывается до перехода,
   /// отсутствие `watch` называется текстом, а не молча уходит в 403.
   Access? _access;
+
+  /// Хранилища для панели выделения: тот же `storages_list` под `read`,
+  /// что карточка (app/gui.py); выбранное по умолчанию - тот же
+  /// `defaultStorageId` канона (дефолт из ответа, иначе первое активное).
+  List<Map<String, Object?>> _storages = const <Map<String, Object?>>[];
+  String _storageId = '';
+
+  /// Узлы фокуса целей панели выделения: возврат фокуса на инициатор
+  /// диалога после pop (§3.8, dialogLeave в ui_src/app.js:4810).
+  final Map<String, FocusNode> _barNodes = <String, FocusNode>{};
 
   // Один диалог карточки: повторное открытие называется, а не складывает
   // стек (стек диалогов с N вложенными карточками - волна W3).
@@ -184,16 +188,21 @@ class _LibraryHomeState extends State<LibraryHome> {
     _sortDir = widget.settings['sort_dir'] == 'asc' ? 'asc' : 'desc';
     _loadFirst();
     _loadAccess();
+    _loadStorages();
     _poll = Timer.periodic(Duration(milliseconds: kPollIntervalMs), (_) => _pollJournal());
   }
 
   @override
   void dispose() {
     _poll?.cancel();
-    for (final node in _rowNodes.values) {
+    for (final FocusNode node in _rowNodes.values) {
       node.dispose();
     }
     _rowNodes.clear();
+    for (final FocusNode node in _barNodes.values) {
+      node.dispose();
+    }
+    _barNodes.clear();
     super.dispose();
   }
 
@@ -201,12 +210,38 @@ class _LibraryHomeState extends State<LibraryHome> {
   /// нет, как в `fetchAccess` браузера (401 называет привязку).
   Future<void> _loadAccess() async {
     try {
-      final access = await widget.facade.access();
+      final Access access = await widget.facade.access();
       setState(() => _access = access);
     } catch (error) {
       setState(() => _access = Access(refusal: 'права не прочитаны: $error'));
     }
   }
+
+  /// Хранилища панели «Скачать»: цель `storages_list` под `read` (та же,
+  /// что карточка шага 3); отказ называется текстом и select остаётся с
+  /// честной подписью канона («нет хранилищ - добавьте в настройках»).
+  Future<void> _loadStorages() async {
+    try {
+      final Map<String, Object?> res = await widget.facade.call('storages_list', null);
+      final String? refusal = _refusalOf(res);
+      if (refusal != null) {
+        setState(() => _notice = 'хранилища не прочитаны: $refusal');
+        return;
+      }
+      final List<Map<String, Object?>> active = activeStorages(res);
+      setState(() {
+        _storages = active;
+        _storageId = defaultStorageId(res, active);
+      });
+    } on ApiFailure catch (failure) {
+      setState(() => _notice = 'хранилища не прочитаны: ${failure.reason}');
+    } catch (error) {
+      setState(() => _notice = 'хранилища не прочитаны: $error');
+    }
+  }
+
+  /// Узел фокуса цели панели (создаётся один раз на подпись).
+  FocusNode _barNode(String name) => _barNodes.putIfAbsent(name, () => FocusNode());
 
   /// Узел фокуса строки по её id (создаётся один раз на строку).
   FocusNode _rowNode(int id) => _rowNodes.putIfAbsent(id, () => FocusNode());
@@ -227,7 +262,8 @@ class _LibraryHomeState extends State<LibraryHome> {
   /// tabindex в `renderGridRows` (ui_src/app.js держит tabindex="0" на одной
   /// строке). Различие формы названо: в CSS обход строк ведёт ↑↓ и roving
   /// tabindex (Tab уходит из грида), здесь каждая строка в обходе Tab, а ↑↓
-  /// работают default traversal-ом; грид ячеек с roving ложится на волне W2.
+  /// работают default traversal-ом; грид ячеек построен на шаге 4, а roving
+  /// обход и грид-роли (`role="gridcell"`) ложатся на волну W3.
   void _rovingFocus() {
     if (_cardOpen || _focusedId != null || _rows.isEmpty) return;
     final first = _rows.first;
@@ -255,9 +291,13 @@ class _LibraryHomeState extends State<LibraryHome> {
       setState(() {
         _access = null;
         _notice = null;
+        _selected.clear();
+        _storages = const <Map<String, Object?>>[];
+        _storageId = '';
       });
       _loadFirst();
       _loadAccess();
+      _loadStorages();
       return;
     }
     final col = widget.settings['sort_col'];
@@ -405,6 +445,10 @@ class _LibraryHomeState extends State<LibraryHome> {
       if (row['media_label'] is String) row['media_label'] as String,
       if (row['user_rating'] is num && (row['user_rating'] as num) > 0)
         'рейтинг ${(row['user_rating'] as num).toInt()}',
+      // «просмотрено» - тот же badge канона (`watchBadge` app.js:3525),
+      // знак строки: ячейка «✓» рисует его визуально, AT читает строку
+      // одним узлом с этой подписью (§3.1, grid_cells.dart).
+      if (watchedOf(row)) 'просмотрено',
       if (row['has_thumb'] == true) 'обложка есть',
       if (row['has_thumb'] == false) 'нет обложки',
     ];
@@ -444,9 +488,196 @@ class _LibraryHomeState extends State<LibraryHome> {
   }
 
   /// Space/чекбокс: выбор строки, карточку не открывает (тот же
-  /// `stopPropagation` на `.row-check` в ui_src/app.js:3423).
+  /// `stopPropagation` на `.row-check` в ui_src/app.js:3423). Выбор - Set
+  /// канона `state.selected`: строка добавляется и снимается по id.
   void _toggleSelected(int id) {
-    setState(() => _selectedId = _selectedId == id ? null : id);
+    setState(() {
+      if (_selected.contains(id)) {
+        _selected.remove(id);
+      } else {
+        _selected.add(id);
+      }
+    });
+  }
+
+  /// Снять выбор (канон `clearSelection` app.js:7141-7147: галка «выбрать
+  /// всё» снимается вместе со списком).
+  void _clearSelection() {
+    setState(() => _selected.clear());
+  }
+
+  /// Галка «выбрать всё» канона (`#sel-all` change app.js:7282-7289 ведёт
+  /// все отрисованные строки окна прокрутки). Здесь - все загруженные
+  /// строки: виртуальное окно браузера отмечает отрисованные, форма
+  /// названа расхождением (roving грид-ролей ложится на W3).
+  void _selectAll(bool on) {
+    setState(() {
+      // Все строки с числовым id; id 0 - честный id (фикстуры тестов и
+      // первые строки), не «пустой»: прежний фильтр `where(id > 0)` терял
+      // его (факт прогона: «выбрать всё» давало 2 из 3). Строки без
+      // числового id пропускаются - их выбор не имеет смысла в проводке.
+      final List<int> ids = <int>[];
+      for (final Map<String, Object?> row in _rows) {
+        if (row['id'] is num) ids.add((row['id'] as num).toInt());
+      }
+      if (on) {
+        _selected.addAll(ids);
+      } else {
+        _selected.removeAll(ids);
+      }
+    });
+  }
+
+  bool get _allChecked => _rows.isNotEmpty && _rows.every(
+      (Map<String, Object?> row) => row['id'] is num && _selected.contains((row['id'] as num).toInt()));
+
+  /// Перечитывание загруженных страниц после операций (канон `renderGrid`
+  /// после сводки: статусы и пометки строк приходят от сервера заново).
+  /// Порядок запроса тот же (`_orderArg`), `total` обновляется из первой
+  /// страницы (после удаления строк счётчик честный, а не прежний).
+  Future<void> _reloadLoadedPages() async {
+    final int loaded = _rows.length;
+    final List<Map<String, Object?>> fresh = <Map<String, Object?>>[];
+    int offset = 0;
+    while (offset < loaded) {
+      try {
+        final Map<String, Object?> res = await widget.facade.call('list_videos',
+            <String, Object?>{'offset': offset, 'limit': kPageLimit, 'order': _orderArg()});
+        final String? refusal = _refusalOf(res);
+        if (refusal != null) {
+          setState(() => _error = refusal);
+          return;
+        }
+        final List<Map<String, Object?>> page = _rowsOf(res);
+        if (page.isEmpty) break;
+        fresh.addAll(page);
+        if (offset == 0 && res[kTotalKey] is num) {
+          _total = (res[kTotalKey] as num).toInt();
+        }
+        offset += page.length;
+      } catch (error) {
+        setState(() => _error = 'список не перечитан: $error');
+        return;
+      }
+    }
+    setState(() => _rows = fresh);
+    _dropStaleNodes();
+  }
+
+  /// «Скачать» панели: ОДНО действие на всю группу (канон
+  /// `downloadSelection` app.js:1562-1577: бэкенд ставит queued списком id и
+  /// запускает однопоточную очередь - параллельных запросов площадке не
+  /// появляется). Хранилища нет - отказ текстом канона + названный переход
+  /// к настройкам (браузер идёт на вкладку Настройки, здесь она заглушка
+  /// W3). Сводка канона «В очередь: N из M · пропущено: причины» - причины
+  /// приходят из бэка (`reasons` app/gui.py), UI их не угадывает. Выделение
+  /// после выкачки снимается (`renderGrid(true)` app.js:1576) и статусы
+  /// перечитываются; переход на вкладку очереди не построен (панель
+  /// очереди - следующий шаг W2), сводка показана на месте - названо
+  /// расхождением.
+  Future<void> _downloadSelected() async {
+    if (_selected.isEmpty) {
+      setState(() => _notice = kNoSelectionText);
+      return;
+    }
+    if (_storageId.isEmpty) {
+      setState(() => _notice = '$kNoStorageText · $kNoSettingsJump');
+      return;
+    }
+    final Map<String, Object?>? res = await bulkCall(
+        widget.facade,
+        _access ?? Access(refusal: 'права не прочитаны - цель не подписана'),
+        'bulk_download',
+        <String, Object?>{'ids': _selected.toList(), 'storage_id': _storageId},
+        'queue',
+        (String text) => setState(() => _notice = text));
+    if (res == null) return;
+    final Object? queued = res['queued'];
+    setState(() {
+      _notice = '$kQueuedPrefix${queued is num ? queued.toInt() : 0}$kFromPrefix'
+          '${res['total'] ?? 0}${skipNoteOf(res)}';
+      _selected.clear();
+    });
+    await _reloadLoadedPages();
+  }
+
+  /// Диалоги группы (§3.8 через `DialogScaffold`): барьер - --veil темы из
+  /// реестра, вход решает диалог сам (выход по dialogEnter), возврат
+  /// фокуса на инициатор панели - post-frame после pop (тот же факт шага
+  /// 3: немедленный requestFocus терялся при disposal маршрута). Сводка
+  /// приходит текстом результата и показывается живым регионом экрана.
+  Future<void> _openMark(FocusNode opener) async {
+    final String? result = await showDialog<String>(
+      context: context,
+      barrierColor: veilColor(themeIdOf(context)),
+      barrierLabel: 'закрыть диалог пометок',
+      traversalEdgeBehavior: TraversalEdgeBehavior.closedLoop,
+      requestFocus: false,
+      animationStyle: AnimationStyle(
+        duration: durationExpand(),
+        curve: kMetrics.easeExpressive,
+        reverseCurve: kMetrics.easeExit,
+      ),
+      routeSettings: const RouteSettings(name: 'mark-dialog'),
+      builder: (BuildContext context) => MarkDialog(
+        facade: widget.facade,
+        ids: _selected.toList(),
+        access: _access ?? Access(refusal: 'права не прочитаны - цель не подписана'),
+      ),
+    );
+    _afterDialog(opener, result);
+  }
+
+  /// «Операции…» - диалог со смешанными правами (цели внутри подписываются
+  /// отдельно - тот же канон); результат удаления строк снимает выделение
+  /// и перечитывает список (renderGrid(true) после сводки app.js:1729).
+  Future<void> _openBulk(FocusNode opener) async {
+    final String? result = await showDialog<String>(
+      context: context,
+      barrierColor: veilColor(themeIdOf(context)),
+      barrierLabel: 'закрыть диалог операций',
+      traversalEdgeBehavior: TraversalEdgeBehavior.closedLoop,
+      requestFocus: false,
+      animationStyle: AnimationStyle(
+        duration: durationExpand(),
+        curve: kMetrics.easeExpressive,
+        reverseCurve: kMetrics.easeExit,
+      ),
+      routeSettings: const RouteSettings(name: 'bulk-dialog'),
+      builder: (BuildContext context) => BulkDialog(
+        facade: widget.facade,
+        ids: _selected.toList(),
+        access: _access ?? Access(refusal: 'права не прочитаны - цель не подписана'),
+        onReload: _reloadLoadedPages,
+      ),
+    );
+    if (result != null && result.startsWith(kRemoveSuccessPrefix)) {
+      setState(() => _selected.clear());
+      await _reloadLoadedPages();
+    }
+    _afterDialog(opener, result);
+  }
+
+  void _afterDialog(FocusNode opener, String? result) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final bool back = opener.parent != null;
+      if (result != null) {
+        // Сводка операции остаётся: отказ возвратить фокус (цель панели снята
+        // с дерева после операции - выбор пуст или список перечитан) назван
+        // appended-подписью, а не заменяет сводку (факт widget-теста шага 4:
+        // сводка «Убраны строки из индекса» терялась).
+        setState(() => _notice = result +
+            (back ? '' : ' · фокус не возвратился на цель панели: '
+                'выбор или список изменились'));
+        if (back) opener.requestFocus();
+      } else if (back) {
+        opener.requestFocus();
+      } else {
+        setState(() => _notice = 'фокус не возвратился на цель панели: '
+            'выбор или список изменились');
+      }
+      _dropStaleNodes();
+    });
   }
 
   /// Одиночный клик/Enter: карточка строки (диалог §3.8). Двойной жест -
@@ -535,26 +766,36 @@ class _LibraryHomeState extends State<LibraryHome> {
     setState(() => _notice = failure ?? 'плеер открыт: $url');
   }
 
-  Widget _buildRow(BuildContext context, int index) {
+  Widget _buildRow(BuildContext context, int index, double availableWidth) {
     final theme = Theme.of(context);
     final themeId = themeIdOf(context);
     final row = _rows[index];
     final id = row['id'] is num ? (row['id'] as num).toInt() : index;
-    final selected = _selectedId == id;
-    final role = roleOfStatus(row['status'] is String ? row['status'] as String : null);
-    final color = roleColor(themeId, role);
+    final picked = _selected.contains(id);
     final node = _rowNode(id);
     final hovered = _hoverId == id;
     final focused = _focusedId == id;
     final ring = focusRing(themeId);
+    // hover/selected - роли --hover и --selected из реестра (тот же порядок
+    // различимости, что `.row:hover`/`.row.selected` в ui_src/app.css: выбор
+    // виден и под курсором, поэтому выбор приоритетнее наведения).
+    final background = picked
+        ? roleColor(themeId, 'selected')
+        : hovered
+            ? roleColor(themeId, 'hover')
+            : theme.colorScheme.surfaceContainerLowest;
     return Focus(
       focusNode: node,
       // Строка доступна с клавиатуры: узел строки, а не internal focus
-      // ListTile (внутренний узел не дал бы различить Enter и Space).
+      // контролов (внутренний узел не дал бы различить Enter и Space).
       canRequestFocus: true,
+      // Чекбокс строки не отдельная точка Tab: канон обходит input
+      // (`.row-check` без tabindex-точки в roving-обходе грида), выбор ведётся
+      // Space на строке и кликом чекбокса - названо решением шага 4 и
+      // расхождением формы (roving ложится на W3).
       descendantsAreFocusable: false,
-      onKeyEvent: (node, event) => _handleRowKey(row, id, event),
-      onFocusChange: (hasFocus) => setState(() => _focusedId = hasFocus
+      onKeyEvent: (FocusNode node, KeyEvent event) => _handleRowKey(row, id, event),
+      onFocusChange: (bool hasFocus) => setState(() => _focusedId = hasFocus
           ? id
           : (_focusedId == id ? null : _focusedId)),
       child: MouseRegion(
@@ -572,50 +813,22 @@ class _LibraryHomeState extends State<LibraryHome> {
             // не аннотирует семантику, это делают контролы Material), и без
             // него AT не объявил бы, на какой строке фокус.
             label: _rowSemantics(row, index),
-            selected: selected,
+            selected: picked,
             button: true,
             focused: focused,
             onTap: () => _openCard(row, id, node),
             child: Stack(
               children: <Widget>[
-                ListTile(
-                  // onTap null: pointer-жест ведёт GestureDetector выше, а
-                  // Semantics(onTap) даёт активацию AT. Внутренний focus
-                  // ListTile не используется (Enter и Space нужно различать).
-                  onTap: null,
-                  selected: selected,
-                  // hover/selected - роли --hover и --selected из реестра
-                  // (тот же порядок различимости, что `.row:hover`/`.row.selected`).
-                  tileColor: hovered
-                      ? roleColor(themeId, 'hover')
-                      : theme.colorScheme.surfaceContainerLowest,
-                  selectedTileColor: roleColor(themeId, 'selected'),
-                  leading: Semantics(
-                    // Маркер статуса: 7 px в CSS лежит вне токен-шкалы, здесь
-                    // ближайший шаг шкалы (s3) - названо расхождением, форма
-                    // маркера переносится вместе с веяниями на волне W3.
-                    excludeSemantics: true,
-                    child: Container(
-                      width: kMetrics.s3,
-                      height: kMetrics.s3,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: color,
-                        border: Border.all(color: color),
-                      ),
-                    ),
+                Container(
+                  color: background,
+                  padding: EdgeInsets.symmetric(horizontal: kMetrics.s4),
+                  child: Center(
+                    // Ячейки канона `rowHtml` (grid_cells.dart): тот же
+                    // состав видимых колонок, что шапка (гейты `col_*`), тот
+                    // же порядок и веса wide/narrow по breakpoint канона.
+                    child: rowCells(context, themeId, row, widget.settings,
+                        index, picked, () => _toggleSelected(id), availableWidth),
                   ),
-                  title: Text(row['title'] is String ? row['title'] as String : 'строка $index',
-                      style: theme.textTheme.bodyMedium,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis),
-                  subtitle: Text(
-                    '${row['channel'] is String ? row['channel'] as String : 'без канала'} · '
-                    '${durationOf(row['duration_s'])}',
-                    style: theme.textTheme.bodySmall,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis),
-                  trailing: Text(statusLabelOf(row), style: theme.textTheme.labelSmall?.copyWith(color: color)),
                 ),
                 if (focused)
                   // Кольцо фокуса рисуется поверх строки (Stack overlay), а не
@@ -649,47 +862,25 @@ class _LibraryHomeState extends State<LibraryHome> {
     );
   }
 
-  /// Строка сортируемых колонок - эквивалент `renderGridHead` из
-  /// ui_src/app.js:3230: `role="columnheader"` + `aria-sort` на ячейке
-  /// заголовка. Отдельного флага `aria-sort` в семантике Flutter нет
-  /// (`SemanticsSortKey` задаёт только порядок обхода), поэтому направление
-  /// передаётся текстом подписи со стрелкой ▲/▼ - названо расхождением.
-  /// Скрытые гейтом `col_*` колонки не рисуются - тот же `colVisible`.
-  Widget _buildSortHead(BuildContext context) {
-    final theme = Theme.of(context);
-    final visible = kSortableColumns.where(
-        (c) => c.gate.isEmpty || widget.settings[c.gate] != false);
+  /// Шапка колонок канона (`renderGridHead` из ui_src/app.js + `applyListColumns`):
+  /// тот же состав видимых колонок и те же веса, что строки - `headerCells`
+  /// из grid_cells.dart (скрытая гейтом `col_*` колонка не рисуется ни там,
+  /// ни здесь). Сортируемые колонки - кнопки с направлением ▲/▼: отдельного
+  /// флага `aria-sort` в семантике Flutter нет (`SemanticsSortKey` задаёт
+  /// только порядок обхода), направление передаётся текстом подписи -
+  /// названо расхождением. Форма канона - CSS grid с горизонтальным скроллом
+  /// `--list-w`, здесь flex по доступной ширине с весами канонных px-ширин:
+  /// расхождение названо, скролл и грид-роли ложатся на волну W3.
+  Widget _buildHeader(BuildContext context, double availableWidth) {
     return Padding(
       padding: EdgeInsets.symmetric(horizontal: kMetrics.s4),
-      child: Wrap(
-        spacing: kMetrics.s2,
-        runSpacing: kMetrics.s2,
-        children: <Widget>[
-          for (final c in visible)
-            TextButton(
-              // Клавиатура: TextButton фокусируется и активируется
-              // Enter/Space - тот же доступ, что `tabindex="0"` у ячейки.
-              onPressed: () => _toggleSort(c.col),
-              child: Semantics(
-                // Эквивалент role="columnheader" + aria-sort из
-                // renderGridHead (ui_src/app.js:3230): флаг header внутри
-                // child сливается с узлом кнопки в один узел (проверено
-                // widget-тестом: [isButton, isHeader] на узле с подписью;
-                // обёртка снаружи давала бы отдельный узел без кнопки).
-                // Отдельного флага aria-sort в семантике Flutter нет
-                // (SemanticsSortKey задаёт только порядок обхода), поэтому
-                // направление передаётся текстом подписи со стрелкой ▲/▼ -
-                // названо расхождением.
-                header: true,
-                child: Text(
-                  '${c.label}${_sortCol == c.col ? (_sortDir == 'asc' ? ' ▲' : ' ▼') : ''}',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                      fontWeight: _sortCol == c.col ? FontWeight.w600 : null),
-                ),
-              ),
-            ),
-        ],
-      ),
+      child: headerCells(context, widget.settings, _sortCol, _sortDir,
+          availableWidth, _allChecked,
+          // Галка канона: click из unchecked ставит checked -> все строки,
+          // из checked снимает -> снять всех (тот же change-делелегат
+          // app.js:7282-7289); mixed в каноне не arises - input обычный,
+          // частичный выбор называет счётчик «Выбрано: N» (grid_cells.dart).
+          (bool? on) => _selectAll(on == true), _toggleSort),
     );
   }
 
@@ -720,7 +911,34 @@ class _LibraryHomeState extends State<LibraryHome> {
               ],
             ),
           ),
-          _buildSortHead(context),
+          // Панель мультивыбора канона (`sel-bar` index.html:173): в DOM она
+          // стоит перед шапкой колонок (173 < 218) - здесь тем же порядком,
+          // появляется только при nonzero выборе. Узлы целей регистрируются
+          // в канонном DOM-порядке (селект хранилища первым, затем цели):
+          // возврат фокуса после диалога ведёт обход на инициатора (§3.8,
+          // dialogLeave app.js:4810).
+          if (_selected.isNotEmpty)
+            SelectionBar(
+              count: _selected.length,
+              storages: _storages,
+              storageId: _storageId,
+              nodes: <String, FocusNode>{
+                'storage': _barNode('storage'),
+                'mark': _barNode('mark'),
+                'bulk': _barNode('bulk'),
+                'download': _barNode('download'),
+                'clear': _barNode('clear'),
+              },
+              onStorage: (String? id) => setState(() => _storageId = id ?? _storageId),
+              onMark: () => _openMark(_barNode('mark')),
+              onBulk: () => _openBulk(_barNode('bulk')),
+              onDownload: _downloadSelected,
+              onClear: _clearSelection,
+            ),
+          LayoutBuilder(
+            builder: (BuildContext context, BoxConstraints constraints) =>
+                _buildHeader(context, constraints.maxWidth),
+          ),
           if (_error != null)
             Padding(
               padding: EdgeInsets.symmetric(horizontal: kMetrics.s4, vertical: kMetrics.s2),
@@ -738,22 +956,29 @@ class _LibraryHomeState extends State<LibraryHome> {
           Expanded(
             child: _loading
                 ? Center(child: Text('загрузка списка…', style: theme.textTheme.bodySmall))
-                : ListView.builder(
-                    itemCount: _rows.length + (more ? 1 : 0),
-                    itemExtent: rowHeight(fontPxOf(context)),
-                    itemBuilder: (context, index) {
-                      if (index >= _rows.length) {
-                        return Semantics(
-                          label: 'загрузить ещё строки: осталось $_total из '
-                              '${_total - _rows.length}',
-                          child: FilledButton(
-                            onPressed: _loadMore,
-                            child: Text('Ещё (${_total - _rows.length})'),
-                          ),
-                        );
-                      }
-                      return _buildRow(context, index);
-                    },
+                : LayoutBuilder(
+                    builder: (BuildContext context, BoxConstraints constraints) =>
+                        ListView.builder(
+                      itemCount: _rows.length + (more ? 1 : 0),
+                      itemExtent: rowHeight(fontPxOf(context)),
+                      itemBuilder: (BuildContext context, int index) {
+                        if (index >= _rows.length) {
+                          return Semantics(
+                            label: 'загрузить ещё строки: осталось $_total из '
+                                '${_total - _rows.length}',
+                            child: FilledButton(
+                              onPressed: _loadMore,
+                              child: Text('Ещё (${_total - _rows.length})'),
+                            ),
+                          );
+                        }
+                        // Ширина доступной строке - ширина списка: breakpoint
+                        // узкого экрана канона (`max-width: 900px`) сверяется
+                        // по ней, а не по ширине окна (расхождение формы
+                        // названо в grid_cells.dart).
+                        return _buildRow(context, index, constraints.maxWidth);
+                      },
+                    ),
                   ),
           ),
           // Живый регион: эквивалент aria-live у панели журнала - статус

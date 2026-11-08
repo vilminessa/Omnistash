@@ -5,6 +5,15 @@
 /// `order` каждого вызова list_videos, ключ/значение каждого save_setting и
 /// аргумент каждого enqueue - тест сверяет запросы клиента с канонной формой,
 /// а не «по ощущению».
+///
+/// Шаг 4 добавляет массовые цели в той же форме ответа бэкенда
+/// (app/gui.py: bulk_download/bulk_tags/bulk_rating/bulk_collection/
+/// bulk_remove_rows/save_fields/collections_list): сводки `total`/`queued`/
+/// `skipped`/`reasons`/`updated`/`gone`/`added`/`removed`/`collection_name`,
+/// отказ без `confirm` («Нужно явное подтверждение удаления» - app/gui.py:932)
+/// и отказ с `adult_confirm` (текст _bulk_adult app/gui.py:772-775). Каждый
+/// bulk-вызов пишется в `bulkRequests` именем и телом: тест сверяет тела
+/// проводок, а не «по ощущению».
 
 library;
 
@@ -19,6 +28,20 @@ import 'package:omnistash_ui/player.dart';
 /// ставить в очередь; тесты отказа выставляют `accessRefusal` или пустой
 /// список явно.
 const List<String> kFakeScopes = <String>['read', 'watch', 'queue'];
+
+/// Права для тестов панели выделения: плюс `mark` и `sources` (цели
+/// «Пометить…», папка и удаление строк под ними - тот же SCOPE_OF бэка).
+const List<String> kFakeBulkScopes =
+    <String>['read', 'watch', 'queue', 'mark', 'sources'];
+
+/// Отказ гейта 18+ - тот же текст и поле, что app/gui.py: _bulk_adult
+/// (772-775): бэкенд отказывает, окно (браузер) спрашивает и повторяет.
+const String kAdultGateText =
+    'Группа содержит строки взрослой площадки: подтвердите, что вам есть 18 '
+    'лет и вы несёте ответственность за скачиваемое';
+
+/// Отказ бэка на удаление без явной галки - тот же текст app/gui.py:932.
+const String kConfirmRefusalText = 'Нужно явное подтверждение удаления';
 
 class FakeFacade implements Facade {
   FakeFacade({
@@ -43,6 +66,19 @@ class FakeFacade implements Facade {
     this.storagesRefusal,
     this.queued = 1,
     this.enqueueRefusal,
+    this.bulkQueued,
+    this.bulkSkipped = 0,
+    this.bulkReasons = const <String, Object>{},
+    this.bulkUpdated,
+    this.bulkGone = 0,
+    this.bulkAdded,
+    this.bulkRemoved,
+    this.bulkRemovedRows,
+    this.bulkCollectionName = 'Папка мок',
+    this.bulkRefusal,
+    this.adultConfirm = false,
+    this.collections = const <Map<String, Object?>>[],
+    this.collectionsRefusal,
   });
 
   final String theme;
@@ -80,11 +116,41 @@ class FakeFacade implements Facade {
   final int queued;
   final String? enqueueRefusal;
 
+  /// Сводки массовых целей (ключи ответов app/gui.py: _bulk_apply):
+  /// выкачка queued/skipped/reasons, пометки updated/gone, папка
+  /// added/removed/gone с collection_name, удаление removed/gone.
+  /// `bulkQueued`/`bulkUpdated`/`bulkAdded`/`bulkRemoved`/`bulkRemovedRows`
+  /// null - серверная форма по умолчанию: ids минус skip / все ids.
+  final int? bulkQueued;
+  final int bulkSkipped;
+  final Map<String, Object> bulkReasons;
+  final int? bulkUpdated;
+  final int bulkGone;
+  final int? bulkAdded;
+  final int? bulkRemoved;
+  final int? bulkRemovedRows;
+  final String bulkCollectionName;
+
+  /// Отказ внутри 200 для любой bulk-цели (`error`) и общий гейт 18+:
+  /// `adultConfirm` ставит отказ с `adult_confirm` (тот же _bulk_adult).
+  final String? bulkRefusal;
+  final bool adultConfirm;
+
+  /// Папки (`collections_list` -> repo.collection_list: id, name,
+  /// created_at, total) и отказ чтения.
+  final List<Map<String, Object?>> collections;
+  final String? collectionsRefusal;
+
   final List<String> calls = <String>[];
   final List<Map<String, Object?>?> sortRequests = <Map<String, Object?>?>[];
   final List<Map<String, Object?>> savedSettings = <Map<String, Object?>>[];
   final List<Map<String, Object?>> enqueueRequests = <Map<String, Object?>>[];
   final List<Object?> videoRequests = <Object?>[];
+
+  /// Проводки bulk-целей: имя цели + тело запроса (ids/fields/storage_id/
+  /// add/remove/rating/action/collection_id/confirm) - порядок записи равен
+  /// порядку вызовов (цепочка «Применить»: bulk_tags, потом bulk_rating).
+  final List<Map<String, Object?>> bulkRequests = <Map<String, Object?>>[];
 
   @override
   Future<Access> access() async {
@@ -97,6 +163,20 @@ class FakeFacade implements Facade {
   /// который клиент отправил открывателю.
   @override
   String watchUrl(int videoId) => 'https://fake.test/watch/$videoId';
+
+  /// Сколько ids в проводке группы (сервер считает total именно так -
+  /// app/gui.py: len(ids)).
+  int _groupSize(Map<String, Object?> request) =>
+      (request['ids'] as List? ?? const <Object?>[]).length;
+
+  Map<String, Object?>? _bulkGate(String name, Map<String, Object?> request) {
+    bulkRequests.add(<String, Object?>{'name': name, 'request': request});
+    if (adultConfirm) {
+      return <String, Object?>{'adult_confirm': true, 'error': kAdultGateText};
+    }
+    if (bulkRefusal != null) return <String, Object?>{'error': bulkRefusal!};
+    return null;
+  }
 
   @override
   Future<Map<String, Object?>> call(String name, Object? arg) async {
@@ -169,15 +249,131 @@ class FakeFacade implements Facade {
           'queued': queued,
           'storage_id': request['storage_id'],
         };
+      case 'collections_list':
+        if (collectionsRefusal != null) {
+          return <String, Object?>{'error': collectionsRefusal!};
+        }
+        return <String, Object?>{'ok': true, 'collections': collections};
+      case 'save_fields':
+        // Ответ тот же, что app/gui.py:3169-3213: {"ok","updated"}.
+        final request = arg as Map<String, Object?>;
+        bulkRequests.add(<String, Object?>{'name': name, 'request': request});
+        if (bulkRefusal != null) return <String, Object?>{'error': bulkRefusal!};
+        final count = _groupSize(request);
+        return <String, Object?>{
+          'ok': true,
+          'updated': bulkUpdated ?? count,
+          'gone': bulkGone,
+        };
+      case 'bulk_download':
+        // Форма ответа app/gui.py:825-826: ok/total + сводка queued/skipped/
+        // reasons + storage_id.
+        final request = arg as Map<String, Object?>;
+        final gate = _bulkGate(name, request);
+        if (gate != null) return gate;
+        final count = _groupSize(request);
+        return <String, Object?>{
+          'ok': true,
+          'total': count,
+          'queued': bulkQueued ?? count - bulkSkipped,
+          'skipped': bulkSkipped,
+          'reasons': bulkReasons,
+          'storage_id': request['storage_id'],
+        };
+      case 'bulk_tags':
+        // app/gui.py:855: ok/total + updated/gone.
+        final request = arg as Map<String, Object?>;
+        final gate = _bulkGate(name, request);
+        if (gate != null) return gate;
+        final count = _groupSize(request);
+        return <String, Object?>{
+          'ok': true,
+          'total': count,
+          'updated': bulkUpdated ?? count,
+          'gone': bulkGone,
+        };
+      case 'bulk_rating':
+        // app/gui.py:884: ok/total/rating + updated/gone.
+        final request = arg as Map<String, Object?>;
+        final gate = _bulkGate(name, request);
+        if (gate != null) return gate;
+        final count = _groupSize(request);
+        return <String, Object?>{
+          'ok': true,
+          'total': count,
+          'rating': request['rating'],
+          'updated': bulkUpdated ?? count,
+          'gone': bulkGone,
+        };
+      case 'bulk_collection':
+        // app/gui.py:898-906: отказ по действию, по отсутствующей и по
+        // несуществующей папке - тексты сервера, клиент их не выдумывает.
+        final request = arg as Map<String, Object?>;
+        final gate = _bulkGate(name, request);
+        if (gate != null) return gate;
+        final action = request['action'];
+        if (action != 'add' && action != 'remove') {
+          return <String, Object?>{'error': 'Нужно действие: add или remove'};
+        }
+        final cid = request['collection_id'] is num
+            ? (request['collection_id'] as num).toInt() : 0;
+        if (cid == 0) return <String, Object?>{'error': 'Не указана коллекция'};
+        if (!collections.any((c) => (c['id'] as num).toInt() == cid)) {
+          return <String, Object?>{'error': 'Коллекция не найдена'};
+        }
+        final count = _groupSize(request);
+        return <String, Object?>{
+          'ok': true,
+          'total': count,
+          'action': action,
+          'collection_id': cid,
+          'collection_name': bulkCollectionName,
+          'added': bulkAdded ?? count,
+          'removed': bulkRemoved ?? count,
+          'gone': bulkGone,
+        };
+      case 'bulk_remove_rows':
+        // Отказ бэка без явной галки - тот же путь app/gui.py:931-932:
+        // UI без подтверждения не отправляет цель, но проводка записана и
+        // отказ назван текстом сервера (клиент не угадывает причину).
+        final request = arg as Map<String, Object?>;
+        bulkRequests.add(<String, Object?>{'name': name, 'request': request});
+        if (request['confirm'] != true) {
+          return <String, Object?>{'error': kConfirmRefusalText};
+        }
+        if (adultConfirm) {
+          return <String, Object?>{'adult_confirm': true, 'error': kAdultGateText};
+        }
+        if (bulkRefusal != null) return <String, Object?>{'error': bulkRefusal!};
+        final count = _groupSize(request);
+        return <String, Object?>{
+          'ok': true,
+          'total': count,
+          'files_kept': true,
+          'removed': bulkRemovedRows ?? count,
+          'gone': bulkGone,
+        };
       default:
         return <String, Object?>{'error': 'цель не подменена в тесте: $name'};
     }
   }
 }
 
+/// Строка списка - форма `list_videos` (app/repo.py SELECT ...): ячейки
+/// грида читают size (сумма целых дорожек video), счётчики площадки на
+/// момент синка, даты iso, теги площадки и отметку «просмотрено».
 Map<String, Object?> row(int id, {
   String status = 'known',
   String label = 'в индексе',
+  Object? size = 1048576,
+  Object? viewCount = 1234,
+  Object? likeCount = 5,
+  Object? commentCount = 2,
+  String? uploadedAt = '2026-10-25T10:00:00+00:00',
+  String? syncedAt = '2026-10-26T08:12:00',
+  List<String> platformTags = const <String>['lofi', 'live'],
+  Object userRating = 0,
+  String? watchedAt,
 }) =>
     <String, Object?>{
       'id': id,
@@ -186,9 +382,28 @@ Map<String, Object?> row(int id, {
       'status_label': label,
       'channel': 'Канал ${id % 3}',
       'duration_s': 125 + id,
+      'media_kind': 'video',
       'media_label': 'видео',
-      'user_rating': 0,
+      'user_rating': userRating,
       'has_thumb': id % 2 == 0,
+      'uploaded_at': uploadedAt,
+      'size': size,
+      'view_count': viewCount,
+      'like_count': likeCount,
+      'comment_count': commentCount,
+      'synced_at': syncedAt,
+      'platform_tags': platformTags,
+      'watched_at': watchedAt,
+    };
+
+/// Папка из `collections_list` (app/repo.py: collection_list SELECT id, name,
+/// created_at, COUNT(... ) AS total).
+Map<String, Object?> collection(String id, String name, {int total = 7}) =>
+    <String, Object?>{
+      'id': int.parse(id),
+      'name': name,
+      'created_at': '2026-10-20T07:00:00',
+      'total': total,
     };
 
 /// Подмена открывателя адресов: пишет URL, который клиент собрал, и может

@@ -19,7 +19,19 @@ Impeller меряются на машине человека), поэтому р
 называть волну или «нативная цель», поля карточки читаются только из
 `repo.video_detail`, метки аудио - из `app/audio.py`, тексты отказа - из
 `app/i18n.py`, а `GET /whoami` и `GET /watch/<id>` - против ui_src/app.js и
-app/http/server.py. Плюс проверка, что production-код Flutter не держит
+app/http/server.py. На шаге грида и группы (W2, шаг 4) сверяются ячейки
+`rowHtml` против полного `LIST_COLS` (ключ, подпись, гейт, ширины wide/narrow
+и breakpoint `max-width: 900px`), единицы `humanSize`, плюрализация
+`plural`, aria-подписи чекбоксов, цели `sel-bar` из ui_src/index.html
+(порядок и `data-need`; не построенные цели обязаны называть волну), канонные
+тексты диалогов и сводок (`openMark`/`openBulk`/`bulkApply`/`runCollect`/
+`bulkRemoveRows`), ключи проводок `bulk_*` и `save_fields` против
+`request.get(...)` в app/gui.py и whitelist `repo.save_fields`, чтение
+`adult_confirm` из отказа `_bulk_adult` (текст сервера не дублируется в
+клиенте), механизм диалога §3.8 (`dialogExit`/`dialogEnter`: выход
+`-decline`/`-close`, Enter на выход, Escape, disabled пропускаются) и
+потребление новых токенов: барьеры диалогов (не менее четырёх) читают
+`veilColor`. Плюс проверка, что production-код Flutter не держит
 литералов: ни hex-цвета вне токенов, ни размера или длительности числом -
 имена ролей читаются из реестра, барьер диалога читает --veil темы, кольцо
 строки - --focus-ring.
@@ -46,7 +58,9 @@ TOKENS = ROOT / "ui_flutter" / "lib" / "theme_tokens.dart"
 LIB = ROOT / "ui_flutter" / "lib"
 CSS = ROOT / "ui_src" / "app.css"
 JS = ROOT / "ui_src" / "app.js"
+HTML = ROOT / "ui_src" / "index.html"
 REPO = ROOT / "app" / "repo.py"
+GUI = ROOT / "app" / "gui.py"
 AUDIO = ROOT / "app" / "audio.py"
 SERVER = ROOT / "app" / "http" / "server.py"
 MEDIA = ROOT / "app" / "http" / "media.py"
@@ -56,8 +70,12 @@ DB = ROOT / "app" / "db.py"
 # main.dart и spike-файлы здесь нет намеренно: стенд W0 держит фиксированную
 # геометрию списка (высота ряда 44 px), и его числа описаны в
 # docs/FLUTTER-TRANSITION.md §9 - это мерка, а не дизайн-токен.
+# Шаг 4 добавил ячейки грида, панель целей и диалог-механизм: они тоже
+# production-код (ширины колонок - канонные px из LIST_COLS, не числа из
+# головы; тексты - канонные строки app.js/index.html, не выдуманные).
 PRODUCTION_FILES = ("theme.dart", "library_view.dart", "app.dart", "tabs.dart",
-                    "video_card.dart", "access.dart", "player.dart")
+                    "video_card.dart", "access.dart", "player.dart",
+                    "grid_cells.dart", "bulk_bar.dart", "dialog_trap.dart")
 
 # Статусы без отдельного правила в CSS (.status[data-s=...]) читаются базовой
 # подписью --muted: known и unavailable не имеют своей роли - это названо
@@ -239,16 +257,21 @@ def dart_status_roles(text: str) -> dict[str, str]:
         r"const Map<String, String> kStatusRoles = <String, String>\{(.*)\}",
         _clean_css(text), flags=re.S)
     if not match:
-        raise AssertionError("в library_view.dart нет kStatusRoles - карта "
+        raise AssertionError("в grid_cells.dart нет kStatusRoles - карта "
                              "цветов статусов потеряна")
     return dict(re.findall(r"'([a-z]+)':\s*'([a-z0-9-]+)'", match.group(1)))
 
 
 def status_roles_problems(view_text: str | None = None) -> list[str]:
-    """Карта статусов Flutter совпадает с CSS (тот же источник правды)."""
+    """Карта статусов Flutter совпадает с CSS (тот же источник правды).
+
+    На шаге 4 карта переехала в grid_cells.dart: маркер статуса рисуется
+    ячейкой грида, а подпись строки для AT читает её из library_view.dart
+    импортом - источник тот же, файл теперь другой (названо здесь).
+    """
     expected = css_status_roles()
     text = (view_text if view_text is not None
-            else (LIB / "library_view.dart").read_text(encoding="utf-8"))
+            else (LIB / "grid_cells.dart").read_text(encoding="utf-8"))
     got = dart_status_roles(text)
     problems = []
     for status, role_name in sorted(expected.items()):
@@ -522,38 +545,43 @@ def dart_card_labels(card_text: str) -> list[str]:
     return re.findall(r"'([^']*)'", match.group(1))
 
 
-def _dart_map(text: str, name: str) -> dict[str, str]:
+def _dart_map(text: str, name: str, source: str = "video_card.dart") -> dict[str, str]:
     """Карта `Map<String, String>` из Dart-ассета: подпись -> текст.
 
     Значение в Dart пишется несколькими соседними литералами (перенос строк
     для читаемости), поэтому собираются все литералы до следующего ключа:
     иначе сверка «называет волну» смотрела бы только первый фрагмент и
-    отказывала на целой фразе (найдено фактом прогона стража).
+    отказывала на целой фразе (найдено фактом прогона стража). Ключ и значение
+    могут быть именем `const String` (kToolbarScopes ссылается на подписи
+    панели) - имя разворачивается в его текст (факт прогона: карта читалась
+    пустой).
     """
     match = re.search(
         rf"const Map<String, String> {name} = <String, String>\{{(.*?)\}};",
         text, flags=re.S)
     if not match:
-        raise AssertionError(f"в video_card.dart нет {name} - карта потеряна, "
+        raise AssertionError(f"в {source} нет {name} - карта потеряна, "
                              "сверка не имеет источника")
-    block = match.group(1)
-    literals = [(m.group(1), m.end()) for m in re.finditer(r"'([^']*)'", block)]
+    block = _strip_comments(match.group(1))
+    consts = _dart_string_consts(text)
+    tokens = [(m.group(0), m.end()) for m in
+              re.finditer(r"'[^']*'|[A-Za-z_][A-Za-z0-9_]*", block)]
     out: dict[str, str] = {}
     index = 0
-    while index < len(literals):
-        key, end = literals[index]
+    while index < len(tokens):
+        key_tok, end = tokens[index]
         if ":" not in block[end:end + 3]:
             index += 1
             continue
         parts: list[str] = []
         scan = index + 1
-        while scan < len(literals):
-            nxt_key, nxt_end = literals[scan]
+        while scan < len(tokens):
+            nxt_tok, nxt_end = tokens[scan]
             if ":" in block[nxt_end:nxt_end + 3]:
                 break
-            parts.append(nxt_key)
+            parts.append(_dart_entry(text, nxt_tok, consts, source))
             scan += 1
-        out[key] = "".join(parts)
+        out[_dart_entry(text, key_tok, consts, source)] = "".join(parts)
         index = scan
     return out
 
@@ -943,6 +971,642 @@ def canon_texts_problems(card_text: str | None = None) -> list[str]:
     return problems
 
 
+# -- ячейки грида, панель выделения и bulk-цели (W2, шаг 4) -------------------------
+
+BULK_TARGETS = ("bulk_download", "bulk_tags", "bulk_rating",
+                "bulk_collection", "bulk_remove_rows", "save_fields")
+
+
+def _unescape(text: str) -> str:
+    """Разворачивает `\n`/`\r`/`\t` в исходном тексте литерала: сверка
+    сравнивает значение, что человек читает на экране, а не запись в файле
+    (канон диалога удаления пишет `\n\n` в разметке, Dart - тот же перенос)."""
+    for needle, value in (("\\n", "\n"), ("\\r", "\r"), ("\\t", "\t")):
+        text = text.replace(needle, value)
+    return text
+
+
+def _strip_comments(text: str) -> str:
+    """Код без комментариев: сверки «клиент не выдумывает текст» читают код,
+    а не пояснения, где канонный отказ сервера назван цитатой (факт прогона
+    стража: комментарий bulk_bar.dart:156 давал ложное «дублирует отказ»)."""
+    return re.sub(r"//[^\n]*", "", text)
+
+
+def _dart_string_consts(text: str) -> dict[str, str]:
+    """Имена `const String` файла -> значение целиком. Нужны, когда список или
+    карта собраны из имён констант, а не из литералов (kToolbarBuilt и
+    kToolbarScopes в bulk_bar.dart - факт прогона стража: прежний разбор
+    литералов давал пустой список и цели канона казались «не названными»)."""
+    out: dict[str, str] = {}
+    for m in re.finditer(r"const String (\w+) =([\s\S]*?);", text):
+        out[m.group(1)] = _unescape("".join(re.findall(r"'([^']*)'", m.group(2))))
+    return out
+
+
+def _dart_entry(text: str, token: str, consts: dict[str, str], source: str) -> str:
+    """Элемент списка/карты: строковый литерал или имя `const String`."""
+    literal = re.fullmatch(r"'([^']*)'", token)
+    if literal:
+        return _unescape(literal.group(1))
+    if token in consts:
+        return consts[token]
+    raise AssertionError(f"{source}: элемент {token!r} не литерал и не const String - "
+                         "значение не прочитать, сверка без источника")
+
+
+def _dart_named_list(text: str, name: str, source: str) -> list[str]:
+    match = re.search(rf"const List<String> {name} =\s*<String>\[(.*?)\];",
+                      text, flags=re.S)
+    if not match:
+        raise AssertionError(f"в {source} нет {name} - список потерян, "
+                             "сверка не имеет источника")
+    consts = _dart_string_consts(text)
+    return [_dart_entry(text, tok, consts, source)
+            for tok in re.findall(r"'[^']*'|[A-Za-z_][A-Za-z0-9_]*",
+                                  _strip_comments(match.group(1)))]
+
+
+def _dart_joined_constant(text: str, name: str, source: str) -> str:
+    """Значение `const String`, написанное соседними литералами (перенос для
+    читаемости) - собранное целиком, иначе сверка видела бы огрызок."""
+    match = re.search(rf"const String {name} =([\s\S]*?);", text)
+    if not match:
+        raise AssertionError(f"в {source} нет константы {name} - текст потерян")
+    return _unescape("".join(re.findall(r"'([^']*)'", match.group(1))))
+
+
+def _parse_literal(text: str, quote: int) -> tuple[str, int]:
+    """Литерал, начинающийся на позиции `quote` (кавычка): содержимое с
+    развёрнутыми `\n`/`\r`/`\t` и позиция закрывающей кавычки."""
+    closing = text[quote]
+    j = quote + 1
+    buf: list[str] = []
+    while j < len(text):
+        ch = text[j]
+        if ch == "\\":
+            buf.append({"\\n": "\n", "\\r": "\r", "\\t": "\t"}.get(
+                "\\" + text[j + 1], text[j + 1]))
+            j += 2
+            continue
+        if ch == closing:
+            break
+        buf.append(ch)
+        j += 1
+    return "".join(buf), j
+
+
+def _literal_containing(text: str, needle: str) -> tuple[int, str, int]:
+    """Литерал, содержащий `needle`: (кавычка начала, содержимое, кавычка конца).
+    Кавычки внутри разметки (`class="muted"`) не начало строки: читаем назад,
+    пока литерал не окажется тем, что содержит needle (факт прогона стража:
+    первая найденная кавычка давала 'muted' и цепочка обрывалась)."""
+    i = text.find(needle)
+    if i < 0:
+        raise AssertionError(f"в ui_src/app.js не найден текст {needle!r} - "
+                             "сверка потеряла источник подсказки")
+    search = i
+    while search >= 0:
+        quote = max(text.rfind("'", 0, search), text.rfind('"', 0, search))
+        if quote < 0:
+            break
+        content, j = _parse_literal(text, quote)
+        # Настоящий литерал не пересекает перенос строки (JS так не пишет):
+        # candidate, у которого содержимое со `\n`, - кавычка внутри разметки,
+        # он не строка подсказки (факт прогона: такая пара кавычек обрывала
+        # цепочку посреди фразы).
+        if "\n" in text[quote + 1:j]:
+            search = quote - 1
+            continue
+        if needle in text[quote + 1:j]:
+            return quote, content, j
+        search = quote - 1
+    raise AssertionError(f"строковый литерал с {needle!r} не найден - "
+                         "сверка потеряла источник подсказки")
+
+
+def _js_concat_text(text: str, start: str, end: str) -> str:
+    """Канонный текст из цепочки конкатенации литералов: литерал, содержащий
+    `start`, и его соседи через `+` до литерала с `end`. разметка HTML
+    вырезается, переносы разворачиваются - сравнивается значение, что человек
+    читает на экране.
+
+    Прежняя форма (склейка всех литералов окна между подстроками) давала
+    огрызки с `+` и обрывки посреди фразы - kMarkHint читался пустым (факт
+    прогона стража).
+    """
+    _quote, content, j = _literal_containing(text, start)
+    parts: list[str] = [content]
+    while end not in "".join(parts):
+        k = j + 1
+        while k < len(text) and (text[k].isspace() or text[k] == "+"):
+            k += 1
+        if k >= len(text) or text[k] not in "'\"":
+            break  # цепочка обрывается на вызове (bulkLabel()) - конец дальше
+        content, j = _parse_literal(text, k)
+        if "\n" in text[k + 1:j]:
+            break  # за k не строка подсказки, а разметка/код - цепочка обрывается
+        parts.append(content)
+    joined = re.sub(r"<[^>]*>", "", "".join(parts)).strip()
+    if end not in joined:
+        raise AssertionError(f"цепочка литералов от {start!r} не доходит до "
+                             f"{end!r} - сверка текста потеряла источник")
+    return joined
+
+
+def js_all_list_cols(js_text: str | None = None) -> list[tuple[str, str, str, str, float, float]]:
+    """Все колонки `LIST_COLS`: (key, label, gate, sortable, wide, narrow).
+
+    Ширины - канонные px числа; для `title` канон пишет `minmax(180px, 1fr)` -
+    берётся минимум px (остаток ширины), это тот вес, что переносится в flex.
+    """
+    text = js_text if js_text is not None else JS.read_text(encoding="utf-8")
+    block = re.search(r"var LIST_COLS = \[(.*?)\];", text, flags=re.S)
+    if not block:
+        raise AssertionError("в ui_src/app.js нет блока LIST_COLS - "
+                             "сверка колонок потеряла источник")
+    cols = []
+    for body in re.findall(r"\{([^{}]*?)\}", block.group(1), flags=re.S):
+        key = re.search(r'key:\s*"([^"]+)"', body)
+        label = re.search(r'label:\s*"([^"]*)"', body)
+        widths = re.search(r"w:\s*\[([^\]]*)\]", body)
+        if not key or not label or not widths:
+            continue
+        parts = re.findall(r'"([^"]*)"|([\d.]+)', widths.group(1))
+        nums = []
+        for quoted, bare in parts:
+            source = quoted or bare
+            px = re.search(r"(\d+)px", source)
+            nums.append(float(px.group(1)) if px else float(source))
+        if len(nums) != 2:
+            raise AssertionError(f"колонка {key.group(1)}: w не пара wide/narrow - "
+                                 "сверка весов потеряла источник")
+        sortable = re.search(r'sortable:\s*"([a-z_]+)"', body)
+        setting = re.search(r'setting:\s*"([a-z_]+)"', body)
+        cols.append((key.group(1), label.group(1),
+                     setting.group(1) if setting else "",
+                     sortable.group(1) if sortable else "", nums[0], nums[1]))
+    if not cols:
+        raise AssertionError("LIST_COLS разобрался пустым - источник сверки пуст")
+    return cols
+
+
+def dart_row_cells(grid_text: str) -> list[tuple[str, str, str, float, float]]:
+    match = re.search(
+        r"const List<\(\{String key, String label, String gate, double wide, double narrow\}\)>\s*"
+        r"kRowCells\s*=\s*<\(\{String key, String label, String gate, double wide, double narrow\}\)>\[(.*?)\];",
+        grid_text, flags=re.S)
+    if not match:
+        raise AssertionError("в grid_cells.dart нет kRowCells - состав колонок "
+                             "Flutter потерян")
+    return [(key, label, gate, float(wide), float(narrow)) for key, label, gate, wide, narrow in
+            re.findall(r"\(\s*key:\s*'([^']*)',\s*label:\s*'([^']*)',\s*gate:\s*'([^']*)',"
+                       r"\s*wide:\s*([\d.]+),\s*narrow:\s*([\d.]+)\s*\)", match.group(1))]
+
+
+def dart_cell_sort_keys(grid_text: str) -> dict[str, str]:
+    match = re.search(
+        r"const Map<String, String> kCellSortKeys = <String, String>\{(.*?)\};",
+        grid_text, flags=re.S)
+    if not match:
+        raise AssertionError("в grid_cells.dart нет kCellSortKeys - ключи "
+                             "сортировки колонок потеряны")
+    return dict(re.findall(r"'([a-z_]+)':\s*'([a-z_]+)'", match.group(1)))
+
+
+def grid_problems(grid_text: str | None = None, js_text: str | None = None,
+                  html_text: str | None = None) -> list[str]:
+    """Ячейки строки сверены с канонным составом колонок и их числами.
+
+    Порядок, подписи, гейты и веса wide/narrow - из `LIST_COLS` (числа px
+    перенесены как flex-весы - форма названа расхождением, но значения те же);
+    ключи сортировки - канонные `sortable` и белый список ORDER_COLS;
+    breakpoint узкого экрана - канонный `max-width: 900px`; единицы размера,
+    плюрализация, aria-подписи чекбоксов и значки badges - те же строки канона.
+    """
+    grid = (grid_text if grid_text is not None
+            else (LIB / "grid_cells.dart").read_text(encoding="utf-8"))
+    js = js_text if js_text is not None else JS.read_text(encoding="utf-8")
+    html = html_text if html_text is not None else HTML.read_text(encoding="utf-8")
+    cols = js_all_list_cols(js)
+    cells = dart_row_cells(grid)
+    problems = []
+    expected = [(key, label, gate, wide, narrow)
+                for key, label, gate, _sortable, wide, narrow in cols]
+    if cells != expected:
+        problems.append(f"колонки ячеек Flutter {cells[:4]}... != LIST_COLS "
+                        f"{expected[:4]}... (всего {len(expected)}): порядок, "
+                        "подписи, гейты или веса wide/narrow расходятся - два "
+                        "клиента рисуют разные гриды")
+    schema_keys = {item["key"] for item in settings_schema.FIELDS}
+    for key, _label, gate, _w, _n in cells:
+        if gate and gate not in schema_keys:
+            problems.append(f"колонка {key}: гейт {gate} не в схеме настроек - "
+                            "колонка не скрывается по настройке")
+    sort_map = {key: sortable for key, _l, _g, sortable, _w, _n in cols if sortable}
+    cell_sorts = dart_cell_sort_keys(grid)
+    if set(cell_sorts) != set(sort_map):
+        problems.append(f"ключи сортировки ячеек {sorted(cell_sorts)} != sortable "
+                        f"колонок {sorted(sort_map)} (колонка check не сортируется - "
+                        "это названо в ассете): грид предлагает чужой порядок")
+    wrong = sorted(f"{k}: {cell_sorts[k]} != {sort_map[k]}"
+                   for k in set(cell_sorts) & set(sort_map) if cell_sorts[k] != sort_map[k])
+    if wrong:
+        problems.append(f"ключи ORDER_COLS ячеек расходятся с каноном: {wrong}")
+    unknown = sorted(set(cell_sorts.values()) - set(repo_order_cols()))
+    if unknown:
+        problems.append(f"ячейки шлют ключи сортировки {unknown} вне белого "
+                        "списка сервера ORDER_COLS - сервер молча держит default order")
+    narrow_js = re.search(r"\(max-width:\s*(\d+)px\)", js)
+    narrow_dart = re.search(r"const double kGridNarrowPx\s*=\s*(\d+)", grid)
+    if not narrow_js or not narrow_dart:
+        problems.append("breakpoint узкого экрана не найден в одном из источников "
+                        "(ui_src/app.js: max-width, grid_cells: kGridNarrowPx)")
+    elif narrow_js.group(1) != narrow_dart.group(1):
+        problems.append(f"kGridNarrowPx {narrow_dart.group(1)} != канонный "
+                        f"max-width {narrow_js.group(1)}px: узкий экран пересчитывает "
+                        "весы на разной ширине")
+    units_js = re.search(r"var units = \[([^\]]*)\]", js)
+    if not units_js:
+        problems.append("в ui_src/app.js нет единиц humanSize - сверка размера "
+                        "потеряла источник")
+    else:
+        js_units = re.findall(r'"([^"]+)"', units_js.group(1))
+        dart_units = _dart_named_list(grid, "kSizeUnits", "grid_cells.dart")
+        if dart_units != js_units:
+            problems.append(f"единицы размера Flutter {dart_units} != канон humanSize "
+                            f"{js_units}: подписи байтов расходятся на один знак")
+    for name, needle, source in (("kSelectRowAria", 'aria-label="Выбрать строку"', js),
+                                 ("kSelectAllAria", 'aria-label="Выбрать всё"', html),
+                                 ("kSelectAllTitle", 'title="Выбрать всё на странице"', html)):
+        if needle not in source:
+            problems.append(f"в источнике нет подписи {needle!r} - сверка чекбоксов "
+                            "потеряла канон")
+        if dart_text_constant(grid, name, "grid_cells.dart") not in source:
+            problems.append(f"grid_cells.dart: {name} не повторает канонную подпись "
+                            f"{needle!r} - чекбоксы двух клиентов называются разными словами")
+    for glyph in ("★", "✓", "—"):
+        if glyph not in js:
+            problems.append(f"канонный значок/прочерк {glyph!r} не найден в ui_src/app.js")
+        if glyph not in grid:
+            problems.append(f"grid_cells.dart не рисует {glyph!r} - ячейки теряют "
+                            "значки рейтинга/просмотрено и прочерк пустого")
+    if "slice(0, 3)" not in js:
+        problems.append("канонная колонка «Теги» не ограничена тремя тегами "
+                        "(slice(0, 3)) - сверка потеряла источник")
+    if "take(3)" not in grid:
+        problems.append("grid_cells.dart не берёт первые три тега площадки (take(3))")
+    return problems
+
+
+def js_sel_bar_targets(html_text: str | None = None) -> list[tuple[str, str]]:
+    """Цели панели `sel-bar` из ui_src/index.html: (подпись, право data-need)."""
+    html = html_text if html_text is not None else HTML.read_text(encoding="utf-8")
+    block = re.search(r'<div class="sel-bar"[\s\S]*?</div>', html)
+    if not block:
+        raise AssertionError("в ui_src/index.html нет sel-bar - панель выделения "
+                             "потеряла источник")
+    targets = []
+    for m in re.finditer(r'<button[^>]*>([\s\S]*?)</button>', block.group(0)):
+        open_tag = m.group(0)[:m.group(0).find(">") + 1]
+        need = re.search(r'data-need="([a-z]+)"', open_tag)
+        label = m.group(1).strip()
+        if label:
+            targets.append((label, need.group(1) if need else ""))
+    if not targets:
+        raise AssertionError("sel-bar разобрался без целей - источник сверки пуст")
+    return targets
+
+
+def toolbar_problems(bulk_text: str | None = None, html_text: str | None = None) -> list[str]:
+    """Построенные цели панели сверены с канонным рядом `sel-bar`.
+
+    Порядок построенных - тот же DOM (без пропущенных); право цели - тот же
+    `data-need` (для «Операции…» права смешиваются внутри диалога и полоса её
+    не гасит - канонный комментарий index.html); каждая не построенная цель
+    обязана быть названа с волной, иначе полоса выглядит полной молча.
+    """
+    bulk = (bulk_text if bulk_text is not None
+            else (LIB / "bulk_bar.dart").read_text(encoding="utf-8"))
+    targets = js_sel_bar_targets(html_text)
+    canon_labels = [label for label, _need in targets]
+    need_map = dict(targets)
+    built = _dart_named_list(bulk, "kToolbarBuilt", "bulk_bar.dart")
+    scopes_map = _dart_map(bulk, "kToolbarScopes", "bulk_bar.dart")
+    not_built = _dart_map(bulk, "kToolbarTargetsNotBuilt", "bulk_bar.dart")
+    problems = []
+    if built != [label for label in canon_labels if label in built]:
+        problems.append(f"порядок построенных целей {built} != канонный sel-bar "
+                        f"{canon_labels} без пропущенных: первичная и ряд целей "
+                        "переставлены")
+    unknown = sorted(set(built) - set(canon_labels))
+    if unknown:
+        problems.append(f"панель шлёт цели {unknown}, которых нет в каноне sel-bar")
+    unnamed = sorted(set(canon_labels) - set(built) - set(not_built))
+    if unnamed:
+        problems.append(f"цели канона {unnamed} не построены и не названы: полоса "
+                        "выглядит полной, а кнопки отсутствуют молча")
+    extra = sorted(set(not_built) - set(canon_labels))
+    if extra:
+        problems.append(f"kToolbarTargetsNotBuilt держит подписи вне канона: {extra}")
+    for label, text in not_built.items():
+        if not re.search(r"волна W\d", text):
+            problems.append(f"цель {label} не называет волну: человек не знает, "
+                            "когда она появится")
+    for label in built:
+        got = scopes_map.get(label, "")
+        required = need_map.get(label, "")
+        if got != required:
+            problems.append(f"цель {label}: Flutter подписывает право {got!r}, "
+                            f"канон требует {required!r} (data-need) - кнопка "
+                            "пройдёт с отказом, который клиент не предсказал")
+        if got and got not in set(scopes.SCOPES):
+            problems.append(f"цель {label}: скоуп {got} не существует в "
+                            "app/http/scopes.py SCOPES")
+    return problems
+
+
+def bulk_texts_problems(bulk_text: str | None = None, js_text: str | None = None,
+                        html_text: str | None = None) -> list[str]:
+    """Тексты панели, диалогов и сводок - те же строки канона (app.js и
+    index.html): клиент не выдумывает слова для состояний и ответов."""
+    bulk = (bulk_text if bulk_text is not None
+            else (LIB / "bulk_bar.dart").read_text(encoding="utf-8"))
+    js = js_text if js_text is not None else JS.read_text(encoding="utf-8")
+    html = html_text if html_text is not None else HTML.read_text(encoding="utf-8")
+    hay = js + "\n" + html
+    problems = []
+    pairs = (
+        ("kSelCountPrefix", "Выбрано: "), ("kToolbarAria", "Действия над выбранными"),
+        ("kStorageLabel", "Хранилище:"), ("kTagsAddLabel", "Теги добавить"),
+        ("kTagsRemoveLabel", "Теги убрать"), ("kRatingLabel", "Рейтинг"),
+        ("kFolderLabel", "Папка"), ("kTagsLabel", "Теги"), ("kNotesLabel", "Заметка"),
+        ("kWatchedLabel", "просмотрено"),
+        ("kTagsAddPlaceholder", "через запятую, несколько"),
+        ("kTagsRemovePlaceholder", "теги, которые надо снять"),
+        ("kTagsPlaceholder", "через запятую"), ("kResetLabel", "сбросить"),
+        ("kUnmarkLabel", "снять отметку"), ("kCancelLabel", "Отмена"),
+        ("kCloseLabel", "Закрыть"), ("kApplyLabel", "Применить"),
+        ("kRemoveConfirmTitle", "Убрать строки из индекса"),
+        ("kRemoveConfirmCheck", "Я понимаю и подтверждаю"),
+        ("kAcceptLabel", "Принять"), ("kDeclineLabel", "Отклонить"),
+        ("kDeleteCancelled", "Удаление отменено"),
+        ("kNothingFilled", "Ничего не заполнено"),
+        ("kNoStorageText", "Не выбрано хранилище - добавьте папку в настройках"),
+        ("kNoSelectionText", "Сначала выберите строки или откройте папку"),
+        ("kNoFoldersOption", "папок пока нет"),
+        ("kQueuedPrefix", "В очередь: "), ("kSkipPrefix", " · пропущено: "),
+        ("kGonePrefix", " · строк в индексе нет: "), ("kSummaryJoin", " · "),
+        ("kTagsLine", "Теги: "), ("kRatingLine", "Рейтинг "),
+        ("kMarkedPrefix", "Помечено строк: "), ("kCollectAddPrefix", "В папку «"),
+        ("kCollectRemovePrefix", "Из папки «"), ("kCollectSuffix", "»: "),
+        ("kFromPrefix", " из "), ("kRemoveSuccessPrefix", "Убраны строки из индекса: "),
+        ("kFilesKeptNote", " (файлы на диске не тронуты)"),
+    )
+    for name, needle in pairs:
+        if needle not in hay:
+            problems.append(f"канон не содержит текст {needle!r} - сверка потеряла "
+                            "источник (app.js/index.html)")
+        if dart_text_constant(bulk, name, "bulk_bar.dart") != needle:
+            problems.append(f"bulk_bar.dart: {name} != канон {needle!r} - два "
+                            "клиента называют одно состояние разными словами")
+    # Подсказки диалогов: канон - цепочка конкатенации литералов разметки.
+    for name, start, end in (("kMarkHint", "Пустые поля не меняются",
+                             "в строке поиска."),
+                             ("kBulkHint", "Теги - ваши локальные метки",
+                              "подтверждения диалога."),
+                             ("kRemoveConfirmTail", ") уйдут из индекса",
+                              "переиндексацией папок.")):
+        joined = _js_concat_text(js, start, end)
+        got = _dart_joined_constant(bulk, name, "bulk_bar.dart")
+        if got != joined:
+            problems.append(f"bulk_bar.dart: {name} != канонный текст подсказки "
+                            f"(сверка по склейке литералов app.js): {got[:60]}... "
+                            f"vs {joined[:60]}...")
+    head_tail = dart_text_constant(bulk, "kRemoveConfirmHead", "bulk_bar.dart")
+    if head_tail not in js:
+        problems.append(f"начало разрушительного текста {head_tail!r} не найдено "
+                        "в каноне - диалог, называющий N, потерял источник")
+    # Плюрализация и заголовки диалогов группы: счёт строк и титул панели
+    # живут в bulk_bar.dart (сводка и диалоги), поэтому сверка здесь, а не
+    # в grid_problems - иначе страж искал бы список не в том файле (факт
+    # прогона: kRowPlural в grid_cells.dart не найден).
+    plural_js = re.search(r'\["строка", "строки", "строк"\]', js)
+    if not plural_js:
+        problems.append("канонная плюрализация строк не найдена в ui_src/app.js - "
+                        "сводки группы потеряли источник")
+    elif _dart_named_list(bulk, "kRowPlural", "bulk_bar.dart") != ["строка", "строки", "строк"]:
+        problems.append("kRowPlural в bulk_bar.dart != канонная плюрализация plural "
+                        "(app.js:1476,1554): сводка считает строки по другому правилу")
+    for prefix_name, prefix, js_needle in (("kMarkPrefix", "Пометить: ", '"Пометить: "'),
+                                           ("kBulkPrefix", "Операции: ", '"Операции: "')):
+        if js_needle not in js:
+            problems.append(f"в ui_src/app.js нет заголовка {js_needle} - диалог "
+                            "группы потерял источник")
+        if dart_text_constant(bulk, prefix_name, "bulk_bar.dart") != prefix:
+            problems.append(f"подпись заголовка {prefix_name} != канон {prefix!r} - "
+                            "диалог двух клиентов назван разными словами")
+    if '" строку"' not in js or '" строк"' not in js:
+        problems.append("канонная singular-форма заголовка пометок не найдена в "
+                        "app.js:1376 - сверка потеряла источник")
+    if "' строку'" not in bulk or "' строк'" not in bulk:
+        problems.append("markTitleFor не повторяет singular-форму канона «1 строку» - "
+                        "титул диалога на одну строку расходится с браузером")
+    return problems
+
+
+def payload_problems(bulk_text: str | None = None, library_text: str | None = None) -> list[str]:
+    """Проводки массовых целей: ключи запроса - те же, что читает сервер, и
+    право подписывается до вызова. whitelist пометок - из repo.save_fields;
+    отказ бэка (без confirm, adult_confirm) не дублируется текстом клиента,
+    а приходит из ответа; после adult-отказа повтор не отправляется."""
+    bulk = (bulk_text if bulk_text is not None
+            else (LIB / "bulk_bar.dart").read_text(encoding="utf-8"))
+    lib = (library_text if library_text is not None
+           else (LIB / "library_view.dart").read_text(encoding="utf-8"))
+    gui = GUI.read_text(encoding="utf-8")
+    repo_src = REPO.read_text(encoding="utf-8")
+    js = JS.read_text(encoding="utf-8")
+    combined = bulk + "\n" + lib
+    problems = []
+    for target in BULK_TARGETS:
+        # Ключи собираются из окна вокруг вызова: payload может быть объявлен
+        # строкой выше (bulk_collection в bulk_bar.dart), а прежний разбор
+        # inline-литерала `<String, Object?>{...}` не работал - `?` в дженерике
+        # regex читал как квантификатор, и ни одна цель не находилась (факт
+        # прогона стража).
+        hits = list(re.finditer(rf"'{target}'", combined))
+        if not hits:
+            problems.append(f"цель {target} не вызывается из production Dart - "
+                            "панель не имеет пути к ней")
+            continue
+        keys: set[str] = set()
+        for hit in hits:
+            window = combined[max(0, hit.start() - 320): hit.start() + 320]
+            keys |= set(re.findall(r"'([a-z_]+)':", window))
+        server = _gui_keys(target, gui) | {"ids"}
+        extra = sorted(keys - server)
+        if extra:
+            problems.append(f"{target}: проводка шлёт ключи {extra}, которых сервер "
+                            "не читает (app/gui.py request.get) - ключ выдуман")
+        if target == "bulk_remove_rows" and "confirm" not in keys:
+            problems.append("bulk_remove_rows отправляется без confirm:true - "
+                            "разрушительная цель уйдёт без галки человека (app/gui.py:931)")
+        if target == "bulk_collection" and "collection_id" not in combined:
+            problems.append("bulk_collection не передаёт collection_id - папочная "
+                            "цель уйдёт без папки всегда (runCollect app.js:1669-1671)")
+    dart_code = _strip_comments(combined)
+    for refused in ("Нужно явное подтверждение удаления",
+                    "Группа содержит строки взрослой площадки"):
+        if refused in gui and refused in dart_code:
+            problems.append(f"production Dart дублирует серверный отказ {refused!r} - "
+                            "текст приходит из ответа, клиент его не выдумывает")
+    if "'adult_confirm'" not in bulk:
+        problems.append("bulk_bar.dart не читает adult_confirm из отказа - "
+                        "гейт 18+ пройдёт как успех (app/gui.py: _bulk_adult)")
+    if '"adult_confirm": True' not in gui:
+        problems.append("app/gui.py не возвращает adult_confirm - сверка гейта "
+                        "потеряла источник")
+    if "res.adult_confirm" not in js:
+        problems.append("ui_src/app.js не читает adult_confirm - канон потерял "
+                        "источник спрашивания 18+")
+    if not re.search(r"'adult_confirm'\]\s*==\s*true[\s\S]{0,240}return null", bulk):
+        problems.append("bulk_bar.dart после adult_confirm повторяет цель - "
+                        "спрашивания «мне есть 18» не построено (волна W3)")
+    gate_note = _dart_joined_constant(bulk, "kAdultGateNotBuilt", "bulk_bar.dart")
+    if "не построен" not in gate_note or not re.search(r"волна W\d", gate_note):
+        problems.append("kAdultGateNotBuilt не называет причину и волну - отказ "
+                        "выглядит случайным")
+    # Текст отказа живёт в bulk_bar.dart (там же, где сводка панели), а
+    # потребляется library_view.dart: страж читает константу из источника и
+    # сверяет, что экран её действительно показывает (факт прогона: поиск по
+    # library_view.dart не находил константу).
+    jump_note = _dart_joined_constant(bulk, "kNoSettingsJump", "bulk_bar.dart")
+    if "kNoSettingsJump" not in lib:
+        problems.append("library_view.dart не показывает kNoSettingsJump - отказ без "
+                        "хранилища не называет переход на настройки")
+    if "switchTab(\"settings\")" not in js:
+        problems.append("канонный переход на настройки после отказа без хранилища "
+                        "не найден в app.js - сверка потеряла источник")
+    if "не построен" not in jump_note or not re.search(r"волны W\d", jump_note):
+        problems.append("kNoSettingsJump не называет заглушку и волну W3")
+    whitelist = set(re.findall(r'if "([a-z_]+)" in fields', repo_src))
+    marks = _dart_named_list(bulk, "kMarkFieldKeys", "bulk_bar.dart")
+    if sorted(marks) != sorted(whitelist):
+        problems.append(f"ключи пометок Flutter {sorted(marks)} != whitelist "
+                        f"repo.save_fields {sorted(whitelist)} - запись трогает поле, "
+                        "которое сервер не принимает из окна")
+    writes = set(re.findall(r"fields\['([a-z_]+)'\]", bulk))
+    invented = sorted(writes - whitelist)
+    if invented:
+        problems.append(f"диалог пометок пишет поля {invented} вне whitelist - "
+                        "статус или метаданные площадки недопустимы из окна")
+    folder_keys = set(re.findall(r"folder\['([a-z_]+)'\]", bulk))
+    col_block = re.search(r"def collection_list([\s\S]*?)\"\"\"([\s\S]*?)\"\"\"([\s\S]*?)return",
+                          repo_src)
+    aliases = (set(re.findall(r"c\.([a-z_]+)", repo_src[repo_src.find("def collection_list"):
+                                            repo_src.find("def collection_list") + 600]))
+               | {"total"})
+    bad = sorted(folder_keys - aliases)
+    if bad:
+        problems.append(f"папки читаются с ключами {bad}, которых нет в SELECT "
+                        "repo.collection_list - подпись папки выдумана")
+    if "'collections_list'" not in bulk:
+        problems.append("bulk_bar.dart не читает collections_list - папки диалога "
+                        "не имеют пути к списку")
+    if '"collections"' not in gui:
+        problems.append("app/gui.py collections_list не возвращает collections - "
+                        "сверка списка папок потеряла источник")
+    for target in BULK_TARGETS + ("collections_list",):
+        required = scopes.scope_for(target)
+        if required is None:
+            problems.append(f"цель {target} не экспортируется по HTTP (SCOPE_OF её "
+                            "нет) - клиент шлёт цель, которой нет")
+            continue
+        pattern = (rf"'{target}'[\s\S]{{0,240}}'{required}'"
+                   rf"|'{required}'[\s\S]{{0,320}}'{target}'")
+        if not re.search(pattern, combined):
+            problems.append(f"цель {target}: право {required} не подписано рядом с "
+                            "вызовом - отказ 403 придёт молча (тот же applyAccess "
+                            "канона требует права до действия)")
+    return problems
+
+
+def _gui_keys(name: str, gui_src: str) -> set[str]:
+    """Ключи запроса, которые цель читает: `request.get("k")` и
+    `(request or {}).get("k")` (тот же ключ в другой форме записи -
+    bulk_remove_rows:931, факт прогона стража: прежний regex его не видел)."""
+    m = re.search(rf"    def {name}\(self[^)]*\) -> dict:([\s\S]*?)\n    def ", gui_src)
+    if not m:
+        raise AssertionError(f"в app/gui.py нет цели {name} - проводка потеряла источник")
+    body = m.group(1)
+    keys = set(re.findall(r'request\.get\("([a-z_]+)"', body))
+    keys |= set(re.findall(r'\(request or \{\}\)\.get\("([a-z_]+)"', body))
+    return keys
+
+
+def dialog_mechanism_problems(trap_text: str | None = None, bulk_text: str | None = None,
+                              js_text: str | None = None, html_text: str | None = None) -> list[str]:
+    """Механизм диалога §3.8 потребляется panel'ью так же, как канон: выход
+    по «-decline»/«-close», Enter и Escape ведут выход, disabled пропускаются,
+    имя выхода и заголовок - канонные подписи."""
+    trap = (trap_text if trap_text is not None
+            else (LIB / "dialog_trap.dart").read_text(encoding="utf-8"))
+    bulk = (bulk_text if bulk_text is not None
+            else (LIB / "bulk_bar.dart").read_text(encoding="utf-8"))
+    js = js_text if js_text is not None else JS.read_text(encoding="utf-8")
+    html = html_text if html_text is not None else HTML.read_text(encoding="utf-8")
+    problems = []
+    for needle, text, source in (("class DialogTrap", trap, "dialog_trap.dart"),
+                                 ("class DialogScaffold", trap, "dialog_trap.dart"),
+                                 ("LogicalKeyboardKey.escape", trap, "dialog_trap.dart"),
+                                 # Точная форма фильтра: комментарий §3.8 упоминает
+                                 # canRequestFocus отдельно, и общая подпись
+                                 # проходила бы даже без фильтра (факт guard-теста).
+                                 ("candidate.canRequestFocus", trap, "dialog_trap.dart"),
+                                 # Обход ведётся по scope'у диалога: SegmentedButton
+                                 # строит цели сам и не принимает focusNode, поэтому
+                                 # именованный список не покрывает ряд рейтинга.
+                                 ("scope.traversalDescendants", trap, "dialog_trap.dart"),
+                                 ("FocusScopeNode scope", trap, "dialog_trap.dart")):
+        if needle not in text:
+            problems.append(f"{source}: {needle} не найден - ловушка Tab/Escape "
+                            "или фильтр disabled потеряны (§3.8)")
+    if '[id$="-decline"], [id$="-later"]' not in js or '[id$="-close"]' not in js:
+        problems.append("ui_src/app.js не имеет канонного dialogExit («-decline»/«-later» "
+                        "затем «-close», app.js:4796-4799) - сверка входа диалога "
+                        "потеряла источник: безопасный дефолт §3.8 не сверен")
+    if 'aria-label="Закрыть"' not in html:
+        problems.append("в ui_src/index.html нет подписи выхода «Закрыть» - крестик "
+                        "диалога потерял имя")
+    if "label: 'Закрыть'" not in trap:
+        problems.append("dialog_trap.dart не называет выход «Закрыть» - AT читает "
+                        "крестик без имени")
+    exit_names = re.findall(r"exitName:\s*'([a-z]+)'", bulk)
+    if exit_names.count("exit") < 2:
+        problems.append("диалоги «Пометить…»/«Операции…» не ведут вход на крестик "
+                        "(-close) - не-разрушительный дефолт §3.8 потерян")
+    if exit_names.count("decline") < 1:
+        problems.append("разрушительный диалог не ведёт вход на «Отклонить» "
+                        "(-decline) - §3.8 дефолт отказ, а не принятие")
+    if "=> ConfirmDialog(" not in bulk:
+        problems.append("bulk_bar.dart не строит ConfirmDialog - разрушительная "
+                        "цель без галки подтверждения (§3.7)")
+    for html_id in ("legal-decline", "legal-accept"):
+        if html_id not in html:
+            problems.append(f"в ui_src/index.html нет {html_id} - механизм "
+                            "подтверждения правил потерял источник сверки")
+    if "button:not([disabled])" not in js or "el.offsetParent !== null" not in js:
+        problems.append("в ui_src/app.js нет канонного обхода диалога "
+                        "(dialogFocusables :not([disabled]) + dialogTargets "
+                        "offsetParent, app.js:4778-4786) - сверка потеряла "
+                        "источник: скрытые и disabled цели в Tab не входят")
+    if "onPressed: _checked ?" not in bulk:
+        problems.append("ConfirmDialog: «Принять» не включается галкой - тот же "
+                        "канон legal-accept disabled до подтверждения")
+    return problems
+
+
 def token_usage_problems() -> list[str]:
     """Новые токены (veil, кольцо фокуса) реально потребляются экранами.
 
@@ -964,6 +1628,16 @@ def token_usage_problems() -> list[str]:
     if "focusRingFocus" not in theme_text or "focusRingGap" not in theme_text:
         problems.append("theme.dart не читает ширины кольца из kMetrics - кольцо "
                         "строки написано числом")
+    # На шаге 4 барьеров стало четыре группы плюс карточка: каждый showDialog
+    # обязан читать veilColor темы - иначе затемнение пишется литералом.
+    veil_total = 0
+    for name in ("library_view.dart", "bulk_bar.dart", "video_card.dart"):
+        veil_total += (LIB / name).read_text(encoding="utf-8").count("veilColor(")
+    if veil_total < 4:
+        problems.append(f"барьеры диалогов читают veilColor {veil_total} раз "
+                        "(ожидаем не менее четырёх: карточка, «Пометить…», "
+                        "«Операции…», подтверждение удаления) - затемнение "
+                        "--veil темы применён не везде")
     return problems
 
 
@@ -1093,6 +1767,11 @@ def problems() -> list[str]:
     out += tabs_problems()
     out += contract_problems()
     out += card_problems()
+    out += grid_problems()
+    out += toolbar_problems()
+    out += bulk_texts_problems()
+    out += payload_problems()
+    out += dialog_mechanism_problems()
     out += route_problems()
     out += canon_texts_problems()
     out += token_usage_problems()
@@ -1121,7 +1800,13 @@ def main(argv: list[str]) -> int:
           f"app/repo.py и схемой настроек; карточка: подписей "
           f"{len(js_card_labels())}, действий {len(js_action_labels())}, "
           "права целей сверены с app/http/scopes.py, /whoami и /watch/ - с "
-          "ui_src/app.js и app/http/server.py")
+          "ui_src/app.js и app/http/server.py; грид: колонок ячеек "
+          f"{len(js_all_list_cols())} с весами wide/narrow и breakpoint "
+          "900px, панель целей: канонных "
+          f"{len(js_sel_bar_targets())} (построенные и названные с волной), "
+          "проводки bulk_* и whitelist пометок сверены с app/gui.py и "
+          "app/repo.py, механизмы диалогов §3.8 сверены с dialogExit "
+          "ui_src/app.js")
     return 0
 
 

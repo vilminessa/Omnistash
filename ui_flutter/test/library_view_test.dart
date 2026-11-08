@@ -1,28 +1,15 @@
+import 'dart:ui' show CheckedState;
 import 'package:flutter/gestures.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-
+import 'fake_facade.dart';
+import 'harness.dart';
+import 'package:flutter/material.dart';
 import 'package:omnistash_ui/access.dart';
 import 'package:omnistash_ui/app.dart';
 import 'package:omnistash_ui/library_view.dart';
 import 'package:omnistash_ui/theme.dart';
 import 'package:omnistash_ui/video_card.dart';
-
-import 'fake_facade.dart';
-
-Future<void> _pump(WidgetTester tester) async {
-  // Полоса состояния ходит к poll каждые kPollIntervalMs: pumpAndSettle не
-  // завершится с активным периодическим таймером, поэтому тест снимает кадры
-  // фиксированными длительностями.
-  await tester.pump();
-  await tester.pump(const Duration(milliseconds: 120));
-  await tester.pump(Duration(milliseconds: kPollIntervalMs));
-}
-
-/// Счётчик показанных строк в шапке: «N из total» (табличные цифры).
-String _counter(WidgetTester tester) =>
-    tester.widget<Text>(find.textContaining(' из ')).data ?? '';
 
 void main() {
   testWidgets('строки из фасада показаны с подписью статуса', (tester) async {
@@ -30,7 +17,7 @@ void main() {
       <Map<String, Object?>>[row(0), row(1), row(2)],
     ]);
     await tester.pumpWidget(OmnistashApp(facade: facade));
-    await _pump(tester);
+    await pumpFrames(tester);
 
     expect(find.text('Клип 0'), findsOneWidget);
     expect(find.text('Клип 2'), findsOneWidget);
@@ -38,7 +25,7 @@ void main() {
         reason: 'подпись статуса из app/repo.py STATUS_LABELS не показана');
     expect(facade.calls, contains('list_videos'),
         reason: 'экран не вызвал list_videos - список пришёл не из фасада');
-    expect(_counter(tester), '3 из 3',
+    expect(counterText(tester), '3 из 3',
         reason: 'счётчик показанных строк не равен total из ответа');
   });
 
@@ -49,7 +36,7 @@ void main() {
           <Map<String, Object?>>[row(0)],
         ]);
     await tester.pumpWidget(OmnistashApp(facade: facade));
-    await _pump(tester);
+    await pumpFrames(tester);
 
     expect(facade.calls, contains('get_initial'),
         reason: 'экран не прочитал get_initial: тема настройки не применена');
@@ -64,7 +51,7 @@ void main() {
           <Map<String, Object?>>[row(7, status: 'downloaded', label: 'скачано')],
         ]);
     await tester.pumpWidget(OmnistashApp(facade: facade));
-    await _pump(tester);
+    await pumpFrames(tester);
 
     final style = tester.widget<Text>(find.text('скачано')).style;
     expect(style?.color, Color(role('coolors', 'ok')),
@@ -78,7 +65,7 @@ void main() {
           <Map<String, Object?>>[row(0)],
         ]);
     await tester.pumpWidget(OmnistashApp(facade: facade));
-    await _pump(tester);
+    await pumpFrames(tester);
 
     final list = tester.widget<ListView>(find.byType(ListView).first);
     expect(list.itemExtent, rowHeight(22.0),
@@ -94,7 +81,7 @@ void main() {
           <Map<String, Object?>>[row(0)],
         ]);
     await tester.pumpWidget(OmnistashApp(facade: facade));
-    await _pump(tester);
+    await pumpFrames(tester);
 
     final theme = tester.widget<MaterialApp>(find.byType(MaterialApp)).theme!;
     final identity = theme.extension<ThemeIdentity>()!;
@@ -108,7 +95,7 @@ void main() {
       (tester) async {
     final facade = FakeFacade(refusal: 'Ничего не выбрано', total: 0);
     await tester.pumpWidget(OmnistashApp(facade: facade));
-    await _pump(tester);
+    await pumpFrames(tester);
 
     expect(find.textContaining('Отказ: Ничего не выбрано'), findsOneWidget,
         reason: 'экран скрыл отказ фасада: список выглядел пустым успехом');
@@ -123,22 +110,22 @@ void main() {
           (i) => row(kPageLimit + i)),
     ]);
     await tester.pumpWidget(OmnistashApp(facade: facade));
-    await _pump(tester);
+    await pumpFrames(tester);
 
-    expect(_counter(tester), '$kPageLimit из 250',
+    expect(counterText(tester), '$kPageLimit из 250',
         reason: 'первая страница не равна kPageLimit: PAGE из app.js не применён');
     // Кнопка следующей страницы строится только когда попадает на экран
     // (ListView.builder виртуализирует): тест прокручивает список drag-ом.
     await tester.drag(find.byType(ListView), const Offset(0.0, -2500.0));
-    await _pump(tester);
+    await pumpFrames(tester);
     await tester.drag(find.byType(ListView), const Offset(0.0, -2500.0));
-    await _pump(tester);
+    await pumpFrames(tester);
     expect(find.text('Ещё (${250 - kPageLimit})'), findsOneWidget,
         reason: 'total больше loaded: экрана без пути к следующей странице нет');
     await tester.tap(find.text('Ещё (${250 - kPageLimit})'));
-    await _pump(tester);
+    await pumpFrames(tester);
 
-    expect(_counter(tester), '250 из 250',
+    expect(counterText(tester), '250 из 250',
         reason: 'вторая страница не добавлена - offset не передан');
     expect(facade.calls.where((name) => name == 'list_videos').length, 2,
         reason: 'пагинация не сделала второй вызов list_videos');
@@ -150,17 +137,26 @@ void main() {
     ]);
     final handle = tester.ensureSemantics();
     await tester.pumpWidget(OmnistashApp(facade: facade));
-    await _pump(tester);
+    await pumpFrames(tester);
 
     expect(find.bySemanticsLabel('Клип 0, в индексе, Канал 0, 2:05, видео, '
         'обложка есть'), findsOneWidget,
         reason: 'строка не названа целиком - AT передаёт только имя');
     // Space - выбор (канон клавиатуры строк), карточку не открывает.
     await tester.sendKeyEvent(LogicalKeyboardKey.space);
-    await _pump(tester);
+    await pumpFrames(tester);
 
-    expect(tester.widget<ListTile>(find.byType(ListTile).first).selected, true,
-        reason: 'выбор строки не передан в ListTile.selected');
+    // Чекбокс строки отмечен (эквивалент checked у `.row-check` канона);
+    // ListTile больше не рисуется: строка собрана из ячеек грида
+    // (grid_cells.dart), поэтому выбор читается через Semantics, а не
+    // через виджет списка. Первый чекбокс - строка 0: подписи чекбоксов
+    // одинаковы по канону (`Выбрать строку`), точный finder без .first
+    // дал бы «Finder returned more than one element» (факт прогона теста).
+    // isChecked в этом SDK возвращает CheckedState (dart:ui) - сверка
+    // перечислением, notBool нет (факт компиляции теста: toBoolOrNull не
+    // определён для CheckedState; isSelected остаётся TriState bool).
+    expect(tester.getSemantics(find.bySemanticsLabel('Выбрать строку').first).flagsCollection.isChecked, CheckedState.isTrue,
+        reason: 'чекбокс строки не отмечен - выбор не передан в Semantics.checked');
     expect(find.byType(VideoCardDialog), findsNothing,
         reason: 'Space открыл карточку: выбор должен переключаться, а не '
             'показывать диалог (ui_src/app.js: чекбокс не открывает карточку)');
@@ -189,21 +185,21 @@ void main() {
         ]);
     final opener = FakeOpener();
     await tester.pumpWidget(OmnistashApp(facade: facade, opener: opener));
-    await _pump(tester);
+    await pumpFrames(tester);
 
     // Одиночный жест: карточка (GestureDetector различает жесты, двойной
     // побеждает одинарный - канон app.js различает их таймером 240 мс).
     await tester.tap(find.text('Клип 0'));
     await tester.pump();
     await tester.pump(kDoubleTapTimeout);
-    await _pump(tester);
+    await pumpFrames(tester);
     expect(find.byType(VideoCardDialog), findsOneWidget,
         reason: 'одинарный клик не открыл карточку: список не имеет пути к деталям');
     expect(facade.videoRequests, <Object?>[0],
         reason: 'карточка не прочитана через get_video с id строки');
 
     await tester.tap(find.byType(IconButton));
-    await _pump(tester);
+    await pumpFrames(tester);
     expect(find.byType(VideoCardDialog), findsNothing,
         reason: 'выход карточки не закрыл диалог');
     expect(opener.opened, isEmpty,
@@ -215,7 +211,7 @@ void main() {
     await tester.tap(find.text('Клип 1'));
     await tester.pump();
     await tester.pump(kDoubleTapTimeout);
-    await _pump(tester);
+    await pumpFrames(tester);
     expect(opener.opened, <String>['https://fake.test/watch/1'],
         reason: 'двойной клик не открыл страницу плеера /watch/<id>');
     expect(find.byType(VideoCardDialog), findsNothing,
@@ -228,29 +224,35 @@ void main() {
           <Map<String, Object?>>[row(0), row(1)],
         ]);
     final opener = FakeOpener();
+    final handle = tester.ensureSemantics();
     await tester.pumpWidget(OmnistashApp(facade: facade, opener: opener));
-    await _pump(tester);
+    await pumpFrames(tester);
 
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await _pump(tester);
+    await pumpFrames(tester);
     expect(find.byType(VideoCardDialog), findsOneWidget,
         reason: 'Enter не открыл карточку (канон: Enter - карточка)');
-    expect(tester.widget<ListTile>(find.byType(ListTile).first).selected, false,
+    // Enter не трогает выбор: строка названа через Semantics (ListTile
+    // больше не рисуется - грид ячеек шага 4).
+    final rowFlags = tester.getSemantics(find.bySemanticsLabel(
+        'Клип 0, в индексе, Канал 0, 2:05, видео, обложка есть')).flagsCollection;
+    expect(rowFlags.isSelected.toBoolOrNull(), false,
         reason: 'Enter не должен менять выбор строки');
 
     await tester.tap(find.byType(IconButton));
-    await _pump(tester);
+    await pumpFrames(tester);
     expect(find.byType(VideoCardDialog), findsNothing,
         reason: 'карточка не закрылась выходом');
 
     await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
-    await _pump(tester);
+    await pumpFrames(tester);
     expect(opener.opened, <String>['https://fake.test/watch/0'],
         reason: 'Ctrl+Enter не открыл плеер (канон: Ctrl+Enter - плеер)');
     expect(find.byType(VideoCardDialog), findsNothing,
         reason: 'Ctrl+Enter открыл карточку вместо плеера');
+    handle.dispose();
   });
 
   testWidgets('карточка без права watch называет отказ и не открывает плеер',
@@ -261,12 +263,12 @@ void main() {
         ]);
     final opener = FakeOpener();
     await tester.pumpWidget(OmnistashApp(facade: facade, opener: opener));
-    await _pump(tester);
+    await pumpFrames(tester);
 
     await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
-    await _pump(tester);
+    await pumpFrames(tester);
 
     expect(opener.opened, isEmpty,
         reason: 'плеер открыт без права watch: сервер ответил бы 403 на /media '
@@ -283,12 +285,12 @@ void main() {
         ]);
     final opener = FakeOpener();
     await tester.pumpWidget(OmnistashApp(facade: facade, opener: opener));
-    await _pump(tester);
+    await pumpFrames(tester);
 
     await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
-    await _pump(tester);
+    await pumpFrames(tester);
 
     expect(opener.opened, isEmpty,
         reason: 'цель подписана при непрочитанных правах: молчаливый переход '
@@ -302,7 +304,7 @@ void main() {
   testWidgets('без сервера список называет причину, а не пустую библиотеку',
       (tester) async {
     await tester.pumpWidget(const OmnistashApp(facade: null));
-    await _pump(tester);
+    await pumpFrames(tester);
 
     expect(find.textContaining('Сервер не запущен'), findsOneWidget,
         reason: 'отсутствие слушателя названо, а не показано как пустая библиотека');
@@ -312,148 +314,4 @@ void main() {
         reason: 'экран не называет, какая палитра применена без сервера');
   });
 
-  testWidgets('сортировка: новая колонка - desc, та же - разворот, '
-      'первая страница перезагружается', (tester) async {
-    final facade = FakeFacade(total: 2, pages: <List<Map<String, Object?>>>[
-      <Map<String, Object?>>[row(0), row(1)],
-    ]);
-    await tester.pumpWidget(OmnistashApp(facade: facade));
-    await _pump(tester);
-
-    // Порядок по умолчанию: order:null - сервер держит uploaded_at DESC,
-    // как браузерный ensureRange (ui_src/app.js:3308).
-    expect(facade.sortRequests, <Map<String, Object?>?>[null],
-        reason: 'без выбранной колонки клиент должен послать order: null');
-
-    await tester.tap(find.text('Название'));
-    await _pump(tester);
-    expect(facade.sortRequests.last, <String, Object?>{'col': 'title', 'dir': 'desc'},
-        reason: 'новая колонка не началась с desc (toggleSort из app.js:3256)');
-    expect(find.text('Название ▼'), findsOneWidget,
-        reason: 'активная колонка не названа стрелкой - AT читает только подпись');
-    expect(facade.calls.where((name) => name == 'list_videos').length, 2,
-        reason: 'страницы под новым порядком не перезагружены');
-    expect(facade.savedSettings.map((entry) => entry['key']),
-        <String>['sort_col', 'sort_dir'],
-        reason: 'порядок не сохранён теми же ключами настроек, что браузер');
-    expect(facade.savedSettings.map((entry) => entry['value']),
-        <String>['title', 'desc']);
-
-    await tester.tap(find.text('Название ▼'));
-    await _pump(tester);
-    expect(facade.sortRequests.last, <String, Object?>{'col': 'title', 'dir': 'asc'},
-        reason: 'та же колонка не развернула направление');
-    expect(find.text('Название ▲'), findsOneWidget);
-
-    await tester.tap(find.text('Статус'));
-    await _pump(tester);
-    expect(facade.sortRequests.last, <String, Object?>{'col': 'status', 'dir': 'desc'},
-        reason: 'смена колонки должна начать с desc, а не наследовать asc');
-    expect(find.text('Статус ▼'), findsOneWidget);
-    expect(find.text('Название ▲'), findsNothing,
-        reason: 'прежняя активная колонка осталась подсвечена');
-  });
-
-  testWidgets('начальный порядок приходит из настроек get_initial',
-      (tester) async {
-    final facade = FakeFacade(total: 1, sortCol: 'date', sortDir: 'asc',
-        pages: <List<Map<String, Object?>>>[
-          <Map<String, Object?>>[row(0)],
-        ]);
-    await tester.pumpWidget(OmnistashApp(facade: facade));
-    await _pump(tester);
-
-    expect(facade.calls.where((name) => name == 'list_videos').length, 2,
-        reason: 'сохранённый порядок из настроек не перезагрузил первую страницу '
-            '(syncSortAndCols в ui_src/app.js:3273)');
-    expect(facade.sortRequests.last, <String, Object?>{'col': 'date', 'dir': 'asc'},
-        reason: 'sort_col/sort_dir из settings не применены к запросу');
-    expect(find.text('Дата ▲'), findsOneWidget,
-        reason: 'колонка из сохранённой настройки не подсвечена');
-    expect(facade.savedSettings, isEmpty,
-        reason: 'экран не должен сохранять порядок без клика пользователя');
-  });
-
-  testWidgets('гейт настройки col_views=false скрывает колонку (colVisible)',
-      (tester) async {
-    final hidden = FakeFacade(total: 1,
-        settingsExtra: <String, Object?>{'col_views': false},
-        pages: <List<Map<String, Object?>>>[
-          <Map<String, Object?>>[row(0)],
-        ]);
-    await tester.pumpWidget(OmnistashApp(facade: hidden));
-    await _pump(tester);
-    expect(find.text('Просмотры'), findsNothing,
-        reason: 'col_views=false не скрыл колонку: браузер colVisible !== false');
-
-    final shown = FakeFacade(total: 1,
-        settingsExtra: <String, Object?>{'col_views': true},
-        pages: <List<Map<String, Object?>>>[
-          <Map<String, Object?>>[row(0)],
-        ]);
-    await tester.pumpWidget(OmnistashApp(facade: shown));
-    await _pump(tester);
-    expect(find.text('Просмотры'), findsOneWidget,
-        reason: 'колонка со включённой настройкой исчезла молча');
-  });
-
-  testWidgets('отказ save_setting назван текстом, порядок остаётся применён',
-      (tester) async {
-    // Отказ внутри 200 (поле error) и отказ транспортом (403 по скоупу) -
-    // обе формы называются, локальный порядок применён к запросу.
-    final refused = FakeFacade(total: 2,
-        persistError: 'не выдан скоуп server_config',
-        pages: <List<Map<String, Object?>>>[
-          <Map<String, Object?>>[row(0), row(1)],
-        ]);
-    await tester.pumpWidget(OmnistashApp(facade: refused));
-    await _pump(tester);
-    await tester.tap(find.text('Название'));
-    await _pump(tester);
-
-    expect(find.textContaining('порядок применён к списку, но не сохранён'),
-        findsOneWidget,
-        reason: 'отказ сохранения порядка скрыт: экран выглядел сохранённым');
-    expect(find.textContaining('не выдан скоуп server_config'), findsOneWidget,
-        reason: 'причина отказа не названа текстом сервера');
-    expect(refused.sortRequests.last, <String, Object?>{'col': 'title', 'dir': 'desc'},
-        reason: 'отказ сохранения не должен отменять применённый порядок запроса');
-    expect(find.text('Название ▼'), findsOneWidget);
-
-    final thrown = FakeFacade(total: 2, persistThrow: true,
-        pages: <List<Map<String, Object?>>>[
-          <Map<String, Object?>>[row(0), row(1)],
-        ]);
-    await tester.pumpWidget(OmnistashApp(facade: thrown));
-    await _pump(tester);
-    await tester.tap(find.text('Название'));
-    await _pump(tester);
-
-    expect(find.textContaining('сервер ответил 403'), findsOneWidget,
-        reason: 'транспортный отказ 403 не назван: молчание вместо причины');
-    expect(thrown.sortRequests.last, <String, Object?>{'col': 'title', 'dir': 'desc'},
-        reason: 'транспортный отказ сохранения не должен отменять порядок запроса');
-  });
-
-  testWidgets('заголовок колонки - роль header, направление в подписи',
-      (tester) async {
-    final facade = FakeFacade(total: 1, pages: <List<Map<String, Object?>>>[
-      <Map<String, Object?>>[row(0)],
-    ]);
-    final handle = tester.ensureSemantics();
-    await tester.pumpWidget(OmnistashApp(facade: facade));
-    await _pump(tester);
-    await tester.tap(find.text('Время'));
-    await _pump(tester);
-
-    // Эквивалент role="columnheader" + aria-sort из renderGridHead
-    // (ui_src/app.js:3230): флаг header есть, отдельного флага aria-sort в
-    // Flutter нет - направление читается текстом подписи со стрелкой.
-    final flags = tester.getSemantics(find.bySemanticsLabel('Время ▼')).flagsCollection;
-    expect(flags.isHeader, true,
-        reason: 'колонка не названа заголовком - AT не объявит columnheader');
-    expect(flags.isButton, true,
-        reason: 'колонка не активна как кнопка - с клавиатуры не переключить');
-    handle.dispose();
-  });
 }

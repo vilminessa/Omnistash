@@ -43,6 +43,20 @@
     читаются только из `repo.video_detail`, метки аудио - из `app/audio.py`;
   * `GET /whoami` и `GET /watch/<id>` - один путь на трёх сторонах (Dart,
     ui_src/app.js, app/http/server.py); тексты отказа - значения `app/i18n.py`;
+  * грид и группа (шаг W2 4): ячейки строки - полный `LIST_COLS` (ключ,
+    подпись, гейт, веса wide/narrow из канонных px), ключи сортировки против
+    `sortable` и белого списка `ORDER_COLS`, breakpoint узкого экрана против
+    `max-width: 900px`, единицы `humanSize`, плюрализация `plural`, aria-
+    подписи чекбоксов; панель целей - порядок и `data-need` ряда `sel-bar` из
+    ui_src/index.html, каждая не построенная цель обязана называть волну;
+    тексты диалогов и сводок - строки канона (`openMark`/`openBulk`/`bulkApply`/
+    `runCollect`/`bulkRemoveRows`), подсказки сверяются по цепочке конкатенации
+    литералов app.js; проводки `bulk_*` - ключи, которые читает app/gui.py,
+    whitelist пометок - `repo.save_fields`, `adult_confirm` читается из отказа
+    сервера (текст не дублируется в клиенте), после отказа повтор не
+    отправляется; механизм диалога §3.8 - выход `-decline`/`-close`, Enter и
+    Escape ведут выход, disabled пропускаются, «Принять» включается только
+    галкой; барьеры диалогов читают `veilColor` темы (не менее четырёх);
   * подложка диалога (`--veil` каждой темы) и ширины кольца фокуса
     (`--focus-ring`) перенесены числом и сверяются с реестром тем и с CSS;
     экраны обязаны читать `veilColor` и `focusRing`, а не писать литералы;
@@ -55,7 +69,13 @@
     или лишняя колонка, битый гейт, переставленные табы, заглушка без волны,
     поле или действие карточки без имени и без волны, выдуманные поля и метки,
     расхождение права цели, потерянный /whoami или /watch, сдвинутый veil и
-    литерал в production-коде дают отказ с текстом, а не молчание.
+    литерал в production-коде дают отказ с текстом, а не молчание; на шаге 4 -
+    переименованная или переставленная ячейка грида, сдвинутый вес или
+    breakpoint, выдуманный ключ сортировки, переставленная или неназванная
+    цель панели, изменённый скоуп цели, изменённый текст сводки или подсказки,
+    потерянный `confirm`, выдуманный ключ проводки, поле вне whitelist,
+    выдуманный текст серверного отказа, потерянный `adult_confirm` и повтор
+    цели после него, потерянная ловушка Escape и выход диалога.
 """
 
 import pathlib
@@ -70,6 +90,13 @@ from app import i18n, settings_schema, themes  # noqa: E402 - путь доба�
 from app.http import scopes  # noqa: E402 - путь добавлен выше
 import build_flutter_theme as gen  # noqa: E402 - путь добавлен выше
 import check_flutter_mirror as mirror  # noqa: E402 - путь добавлен выше
+
+
+def _patch(text: str, old: str, new: str) -> str:
+    """Замена канонного фрагмента кода для guard-теста: anchor проверяется,
+    иначе тест называет потерянный код сверки вместо молчаливого совпадения."""
+    assert old in text, f"нет фрагмента {old!r} - guard-тест потерял код сверки"
+    return text.replace(old, new)
 
 
 class FlutterMirrorTest(unittest.TestCase):
@@ -158,10 +185,15 @@ class FlutterMirrorTest(unittest.TestCase):
                         "берётся не из токенов")
 
     def test_status_roles_match_css(self):
-        """Карта цветов статусов строки - тот же источник, что app.css."""
+        """Карта цветов статусов строки - тот же источник, что app.css.
+
+        На шаге 4 карта переехала в grid_cells.dart: статусный маркер рисуется
+        ячейкой грида, подпись строки читает её импортом из library_view.dart -
+        источник тот же, файл другой (названо в страже).
+        """
         css = mirror.css_status_roles()
-        view = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
-        self.assertEqual(mirror.dart_status_roles(view), css,
+        cells = (mirror.LIB / "grid_cells.dart").read_text(encoding="utf-8")
+        self.assertEqual(mirror.dart_status_roles(cells), css,
                          "карта статусов Flutter расходится с ui_src/app.css")
         self.assertEqual(mirror.status_roles_problems(), [],
                          mirror.status_roles_problems())
@@ -198,8 +230,8 @@ class FlutterMirrorTest(unittest.TestCase):
                       "Flutter читает не rows: форма ответа выдумана клиентом")
 
     def test_broken_status_map_is_named(self):
-        view = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
-        broken = view.replace("'downloaded': 'ok'", "'downloaded': 'info'")
+        cells = (mirror.LIB / "grid_cells.dart").read_text(encoding="utf-8")
+        broken = _patch(cells, "'downloaded': 'ok'", "'downloaded': 'info'")
         problems = mirror.status_roles_problems(broken)
         self.assertTrue(any("downloaded" in line for line in problems),
                         f"расхождение статуса не названо: {problems}")
@@ -368,9 +400,12 @@ class FlutterMirrorTest(unittest.TestCase):
             "  'downloaded': 'ok',\n};\n", encoding="utf-8")
         (tmp / "app.dart").write_text("void main() {}\n", encoding="utf-8")
         (tmp / "tabs.dart").write_text("void main() {}\n", encoding="utf-8")
-        # Файлы шага W2-3 под тем же guard-ом: пустые стабы, иначе страж
-        # назвал бы их отсутствие как расхождение, а не литералы в theme.dart.
-        for name in ("video_card.dart", "access.dart", "player.dart"):
+        # Файлы шагов W2-3 и W2-4 под тем же guard-ом: пустые стабы, иначе
+        # страж назвал бы их отсутствие как расхождение, а не литералы в
+        # theme.dart (факт: grid_cells/bulk_bar/dialog_trap добавлены в
+        # PRODUCTION_FILES на шаге 4).
+        for name in ("video_card.dart", "access.dart", "player.dart",
+                     "grid_cells.dart", "bulk_bar.dart", "dialog_trap.dart"):
             (tmp / name).write_text("void main() {}\n", encoding="utf-8")
         problems = mirror.literal_problems(tmp)
         self.assertEqual(len(problems), 2, f"литералы не названы: {problems}")
@@ -716,10 +751,344 @@ class FlutterMirrorTest(unittest.TestCase):
                       "второй литерал текста блока не присоединён")
 
     def test_new_production_files_are_policed(self):
-        """production-код шага 3 под проверкой литералов: ни hex, ни размера числом."""
-        for name in ("video_card.dart", "access.dart", "player.dart"):
+        """production-код шага 3 и 4 под проверкой литералов: ни hex, ни размера числом."""
+        for name in ("video_card.dart", "access.dart", "player.dart",
+                     "grid_cells.dart", "bulk_bar.dart", "dialog_trap.dart"):
             self.assertIn(name, mirror.PRODUCTION_FILES,
-                          f"{name} не под сверкой литералов - экран может писать цвета числом")
+                          f"{name} не под сверкой литералов - экран может писать "
+                          "цвета и размеры числом")
+
+    # -- грид ячеек строки (шаг 4) -----------------------------------------------
+
+    def test_grid_cells_match_canon(self):
+        """Ячейки грида - полный состав LIST_COLS: порядок, подписи, гейты, веса."""
+        self.assertEqual(mirror.grid_problems(), [], mirror.grid_problems())
+        grid = (mirror.LIB / "grid_cells.dart").read_text(encoding="utf-8")
+        cells = mirror.dart_row_cells(grid)
+        cols = mirror.js_all_list_cols()
+        self.assertEqual(len(cells), len(cols),
+                         f"ячеек {len(cells)} != колонок канона {len(cols)}")
+        self.assertEqual([c[0] for c in cells], [c[0] for c in cols],
+                         "ключи ячеек не в порядке LIST_COLS")
+        self.assertEqual([(c[3], c[4]) for c in cells],
+                         [(c[4], c[5]) for c in cols],
+                         "весы wide/narrow не канонные px-ширины LIST_COLS")
+
+    def test_grid_label_drift_is_named(self):
+        grid = (mirror.LIB / "grid_cells.dart").read_text(encoding="utf-8")
+        patched = _patch(grid, "(key: 'channel', label: 'Канал'",
+                         "(key: 'channel', label: 'Каналы'")
+        problems = mirror.grid_problems(grid_text=patched)
+        self.assertTrue(any("LIST_COLS" in line for line in problems), problems)
+
+    def test_grid_weight_drift_is_named(self):
+        grid = (mirror.LIB / "grid_cells.dart").read_text(encoding="utf-8")
+        patched = _patch(grid, "wide: 190, narrow: 130", "wide: 195, narrow: 130")
+        problems = mirror.grid_problems(grid_text=patched)
+        self.assertTrue(any("wide/narrow" in line for line in problems), problems)
+
+    def test_grid_gate_typo_is_named(self):
+        grid = (mirror.LIB / "grid_cells.dart").read_text(encoding="utf-8")
+        patched = _patch(grid, "gate: 'col_views'", "gate: 'col_vieww'")
+        problems = mirror.grid_problems(grid_text=patched)
+        self.assertTrue(any("не в схеме настроек" in line for line in problems), problems)
+
+    def test_grid_breakpoint_drift_is_named(self):
+        grid = (mirror.LIB / "grid_cells.dart").read_text(encoding="utf-8")
+        patched = _patch(grid, "const double kGridNarrowPx = 900;",
+                         "const double kGridNarrowPx = 800;")
+        problems = mirror.grid_problems(grid_text=patched)
+        self.assertTrue(any("kGridNarrowPx" in line for line in problems), problems)
+
+    def test_grid_sort_key_outside_order_cols_is_named(self):
+        grid = (mirror.LIB / "grid_cells.dart").read_text(encoding="utf-8")
+        patched = _patch(grid, "'comments': 'comments'", "'comments': 'kommenty'")
+        problems = mirror.grid_problems(grid_text=patched)
+        self.assertTrue(any("ORDER_COLS" in line for line in problems), problems)
+
+    def test_grid_size_unit_drift_is_named(self):
+        grid = (mirror.LIB / "grid_cells.dart").read_text(encoding="utf-8")
+        patched = _patch(grid, "'МиБ'", "'МБ'")
+        problems = mirror.grid_problems(grid_text=patched)
+        self.assertTrue(any("единицы размера" in line for line in problems), problems)
+
+    def test_grid_tag_slice_drift_is_named(self):
+        grid = (mirror.LIB / "grid_cells.dart").read_text(encoding="utf-8")
+        patched = _patch(grid, "list.take(3)", "list.take(4)")
+        problems = mirror.grid_problems(grid_text=patched)
+        self.assertTrue(any("первые три тега" in line for line in problems), problems)
+
+    def test_grid_checkbox_aria_drift_is_named(self):
+        grid = (mirror.LIB / "grid_cells.dart").read_text(encoding="utf-8")
+        patched = _patch(grid, "const String kSelectAllTitle = 'Выбрать всё на странице';",
+                         "const String kSelectAllTitle = 'Выбрать всё в странице';")
+        problems = mirror.grid_problems(grid_text=patched)
+        self.assertTrue(any("не повторает канонную подпись" in line for line in problems),
+                        problems)
+
+    # -- панель целей (шаг 4) -----------------------------------------------------
+
+    def test_toolbar_targets_match_sel_bar(self):
+        """Построенные цели - канонный порядок sel-bar и канонные права."""
+        self.assertEqual(mirror.toolbar_problems(), [], mirror.toolbar_problems())
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        self.assertEqual(mirror._dart_named_list(bulk, "kToolbarBuilt", "bulk_bar.dart"),
+                         ["Пометить…", "Операции…", "Скачать", "Снять выбор"],
+                         "цели панели не в канонном порядке sel-bar")
+        scopes_map = mirror._dart_map(bulk, "kToolbarScopes", "bulk_bar.dart")
+        self.assertEqual(scopes_map["Скачать"], "queue",
+                         "«Скачать» подписывает не то право, что data-need канона")
+
+    def test_toolbar_order_drift_is_named(self):
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "<String>[kMarkLabel, kBulkLabel, kDownloadLabel, kClearLabel]",
+                         "<String>[kBulkLabel, kMarkLabel, kDownloadLabel, kClearLabel]")
+        problems = mirror.toolbar_problems(bulk_text=patched)
+        self.assertTrue(any("порядок построенных" in line for line in problems), problems)
+
+    def test_toolbar_unnamed_target_is_named(self):
+        """Снятая цель без причины: полоса выглядела бы полной молча."""
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "<String>[kMarkLabel, kBulkLabel, kDownloadLabel, kClearLabel]",
+                         "<String>[kMarkLabel, kBulkLabel, kDownloadLabel]")
+        problems = mirror.toolbar_problems(bulk_text=patched)
+        self.assertTrue(any("не построены и не названы" in line for line in problems),
+                        problems)
+
+    def test_toolbar_not_built_without_wave_is_named(self):
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "'переименование папки не построено: волна W3'",
+                         "'переименование папки не построено'")
+        problems = mirror.toolbar_problems(bulk_text=patched)
+        self.assertTrue(any("не называет волну" in line for line in problems), problems)
+
+    def test_toolbar_scope_drift_is_named(self):
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "kDownloadLabel: 'queue',", "kDownloadLabel: 'sources',")
+        problems = mirror.toolbar_problems(bulk_text=patched)
+        self.assertTrue(any("канон требует" in line for line in problems), problems)
+
+    def test_toolbar_invented_target_is_named(self):
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "<String>[kMarkLabel, kBulkLabel, kDownloadLabel, kClearLabel]",
+                         "<String>['Выкачать всё', kMarkLabel, kBulkLabel, kClearLabel]")
+        problems = mirror.toolbar_problems(bulk_text=patched)
+        self.assertTrue(any("которых нет в каноне sel-bar" in line for line in problems),
+                        problems)
+
+    # -- тексты панели, диалогов и сводок (шаг 4) ----------------------------------
+
+    def test_bulk_dialog_texts_match_canon(self):
+        self.assertEqual(mirror.bulk_texts_problems(), [], mirror.bulk_texts_problems())
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        hint = mirror._js_concat_text(mirror.JS.read_text(encoding="utf-8"),
+                                      "Пустые поля не меняются", "в строке поиска.")
+        self.assertEqual(mirror._dart_joined_constant(bulk, "kMarkHint", "bulk_bar.dart"),
+                         hint, "подсказка диалога пометок не канонный текст")
+
+    def test_summary_text_drift_is_named(self):
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "const String kQueuedPrefix = 'В очередь: '",
+                         "const String kQueuedPrefix = 'В очереди: '")
+        problems = mirror.bulk_texts_problems(bulk_text=patched)
+        self.assertTrue(any("kQueuedPrefix" in line for line in problems), problems)
+
+    def test_dialog_hint_drift_is_named(self):
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "'Пустые поля не меняются: отмечается только то, что вы заполнили. '",
+                         "'Пустые поля не трогаются: отмечается только то, что вы заполнили. '")
+        problems = mirror.bulk_texts_problems(bulk_text=patched)
+        self.assertTrue(any("подсказки" in line for line in problems), problems)
+
+    def test_plural_forms_drift_is_named(self):
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "kRowPlural = <String>['строка', 'строки', 'строк']",
+                         "kRowPlural = <String>['строка', 'строки', 'строчки']")
+        problems = mirror.bulk_texts_problems(bulk_text=patched)
+        self.assertTrue(any("kRowPlural" in line for line in problems), problems)
+
+    def test_singular_title_drift_is_named(self):
+        """Особая форма канона «Пометить: 1 строку» (app.js:1376) не теряется."""
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "n == 1 ? ' строку' : ' строк'",
+                         "n == 1 ? ' строки' : ' строк'")
+        problems = mirror.bulk_texts_problems(bulk_text=patched)
+        self.assertTrue(any("singular-форму" in line for line in problems), problems)
+
+    def test_mark_prefix_drift_is_named(self):
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "const String kMarkPrefix = 'Пометить: '",
+                         "const String kMarkPrefix = 'Пометка: '")
+        problems = mirror.bulk_texts_problems(bulk_text=patched)
+        self.assertTrue(any("kMarkPrefix" in line for line in problems), problems)
+
+    # -- проводки массовых целей (шаг 4) -------------------------------------------
+
+    def test_bulk_payloads_match_backend(self):
+        self.assertEqual(mirror.payload_problems(), [], mirror.payload_problems())
+
+    def test_invented_payload_key_is_named(self):
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "'ids': widget.ids, 'confirm': true}",
+                         "'ids': widget.ids, 'confirm': true, 'force': true}")
+        problems = mirror.payload_problems(bulk_text=patched)
+        self.assertTrue(any("ключ выдуман" in line for line in problems), problems)
+
+    def test_remove_rows_without_confirm_is_named(self):
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "'bulk_remove_rows', <String, Object?>{'ids': widget.ids, 'confirm': true}",
+                         "'bulk_remove_rows', <String, Object?>{'ids': widget.ids}")
+        problems = mirror.payload_problems(bulk_text=patched)
+        self.assertTrue(any("без confirm" in line for line in problems), problems)
+
+    def test_server_refusal_text_is_not_duplicated(self):
+        """Клиент не выдумывает текст отказа бэка: он приходит из ответа."""
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "const String kDeleteCancelled = 'Удаление отменено';",
+                         "const String kDeleteCancelled = 'Удаление отменено';\n"
+                         "const String kInventedRefusal = 'Нужно явное подтверждение удаления';")
+        problems = mirror.payload_problems(bulk_text=patched)
+        self.assertTrue(any("дублирует серверный отказ" in line for line in problems),
+                        problems)
+
+    def test_adult_confirm_read_lost_is_named(self):
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "res['adult_confirm'] == true", "res['adult_gate'] == true")
+        problems = mirror.payload_problems(bulk_text=patched)
+        self.assertTrue(any("adult_confirm" in line for line in problems), problems)
+
+    def test_adult_confirm_repeat_is_named(self):
+        """После adult_confirm цель не повторяется: спрашивание «мне есть 18» - W3."""
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "· $kAdultGateNotBuilt');\n      return null;",
+                         "· $kAdultGateNotBuilt');\n      return res;")
+        problems = mirror.payload_problems(bulk_text=patched)
+        self.assertTrue(any("повторяет цель" in line for line in problems), problems)
+
+    def test_mark_whitelist_drift_is_named(self):
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "kMarkFieldKeys = <String>['user_rating', 'user_tags', 'notes', 'watched']",
+                         "kMarkFieldKeys = <String>['user_rating', 'user_tags', 'notes', "
+                         "'watched', 'status']")
+        problems = mirror.payload_problems(bulk_text=patched)
+        self.assertTrue(any("whitelist repo.save_fields" in line for line in problems),
+                        problems)
+
+    def test_mark_field_outside_whitelist_write_is_named(self):
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "fields['notes'] = _notes.text.trim();",
+                         "fields['status'] = _notes.text.trim();")
+        problems = mirror.payload_problems(bulk_text=patched)
+        self.assertTrue(any("пишет поля" in line for line in problems), problems)
+
+    def test_folder_key_drift_is_named(self):
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "${folder['total'] ?? 0}", "${folder['count'] ?? 0}")
+        problems = mirror.payload_problems(bulk_text=patched)
+        self.assertTrue(any("папки читаются с ключами" in line for line in problems),
+                        problems)
+
+    def test_collections_list_lost_is_named(self):
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "widget.facade.call('collections_list', null)",
+                         "widget.facade.call('folders', null)")
+        problems = mirror.payload_problems(bulk_text=patched)
+        self.assertTrue(any("collections_list" in line for line in problems), problems)
+
+    def test_scope_missing_near_call_is_named(self):
+        """Право подписывается рядом с вызовом - иначе 403 придёт молча."""
+        snippet = (
+            "const String kAdultGateNotBuilt = 'не построен: волна W3';\n"
+            "const String kNoSettingsJump = 'не построен: волны W3';\n"
+            "const List<String> kMarkFieldKeys =\n"
+            "    <String>['user_rating', 'user_tags', 'notes', 'watched'];\n"
+            "if (res['adult_confirm'] == true) {\n"
+            "  notice('$kAdultGateNotBuilt');\n"
+            "  return null;\n"
+            "}\n"
+            "await bulkCall(facade, access, 'bulk_download',\n"
+            "    <String, Object?>{'ids': ids, 'storage_id': sid},\n"
+            "    'library', notice);\n"
+        )
+        problems = mirror.payload_problems(bulk_text=snippet, library_text=snippet)
+        self.assertTrue(any("цель bulk_download: право queue не подписано" in line
+                            for line in problems), problems)
+
+    # -- механизм диалога §3.8 (шаг 4) ---------------------------------------------
+
+    def test_dialog_mechanism_matches_canon(self):
+        self.assertEqual(mirror.dialog_mechanism_problems(), [],
+                         mirror.dialog_mechanism_problems())
+
+    def test_escape_trap_lost_is_named(self):
+        trap = (mirror.LIB / "dialog_trap.dart").read_text(encoding="utf-8")
+        patched = _patch(trap, "if (key == LogicalKeyboardKey.escape) {",
+                         "if (key == LogicalKeyboardKey.enter) {")
+        problems = mirror.dialog_mechanism_problems(trap_text=patched)
+        self.assertTrue(any("LogicalKeyboardKey.escape" in line for line in problems),
+                        problems)
+
+    def test_disabled_focus_filter_lost_is_named(self):
+        trap = (mirror.LIB / "dialog_trap.dart").read_text(encoding="utf-8")
+        patched = _patch(trap, "if (candidate.canRequestFocus) targets.add(candidate);",
+                         "targets.addAll(scope.traversalDescendants);")
+        problems = mirror.dialog_mechanism_problems(trap_text=patched)
+        self.assertTrue(any("canRequestFocus" in line for line in problems), problems)
+
+    def test_dialog_scope_lost_is_named(self):
+        """Обход ведётся по scope'у диалога: без него цели, которые строит
+        контрол сам (сегменты рейтинга), остаются вне круга Tab."""
+        trap = (mirror.LIB / "dialog_trap.dart").read_text(encoding="utf-8")
+        patched = _patch(trap, "scope.traversalDescendants", "_order")
+        problems = mirror.dialog_mechanism_problems(trap_text=patched)
+        self.assertTrue(any("scope.traversalDescendants" in line for line in problems),
+                        problems)
+        patched2 = _patch(trap, "final FocusScopeNode scope;", "final FocusNode scope;")
+        problems2 = mirror.dialog_mechanism_problems(trap_text=patched2)
+        self.assertTrue(any("FocusScopeNode scope" in line for line in problems2), problems2)
+
+    def test_close_exit_name_lost_is_named(self):
+        trap = (mirror.LIB / "dialog_trap.dart").read_text(encoding="utf-8")
+        patched = _patch(trap, "label: 'Закрыть'", "label: 'Крестик'")
+        problems = mirror.dialog_mechanism_problems(trap_text=patched)
+        self.assertTrue(any("не называет выход" in line for line in problems), problems)
+
+    def test_decline_default_lost_is_named(self):
+        """Разрушительный диалог: Enter должен вести отказ, не принятие (§3.8)."""
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "exitName: 'decline',", "exitName: 'accept',")
+        problems = mirror.dialog_mechanism_problems(bulk_text=patched)
+        self.assertTrue(any("разрушительный диалог" in line for line in problems), problems)
+
+    def test_non_danger_dialog_exit_default_lost_is_named(self):
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "exitName: 'exit',", "exitName: 'accept',")
+        problems = mirror.dialog_mechanism_problems(bulk_text=patched)
+        self.assertTrue(any("не ведут вход на крестик" in line for line in problems),
+                        problems)
+
+    def test_confirm_dialog_missing_is_named(self):
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "=> ConfirmDialog(", "=> DangerSheet(")
+        problems = mirror.dialog_mechanism_problems(bulk_text=patched)
+        self.assertTrue(any("не строит ConfirmDialog" in line for line in problems),
+                        problems)
+
+    def test_accept_without_check_is_named(self):
+        bulk = (mirror.LIB / "bulk_bar.dart").read_text(encoding="utf-8")
+        patched = _patch(bulk, "onPressed: _checked ? () => Navigator.of(context).pop(true) : null,",
+                         "onPressed: () => Navigator.of(context).pop(true),")
+        problems = mirror.dialog_mechanism_problems(bulk_text=patched)
+        self.assertTrue(any("не включается галкой" in line for line in problems), problems)
+
+    def test_dialog_barriers_read_veil_token(self):
+        """Каждый showDialog барьера читает veilColor темы - не литерал --veil."""
+        self.assertEqual(mirror.token_usage_problems(), [], mirror.token_usage_problems())
+        total = sum((mirror.LIB / name).read_text(encoding="utf-8").count("veilColor(")
+                    for name in ("library_view.dart", "bulk_bar.dart", "video_card.dart"))
+        self.assertGreaterEqual(total, 4,
+                                f"veilColor прочитан {total} раз: затемнение диалогов "
+                                "писалось бы литералом")
 
 
 if __name__ == "__main__":

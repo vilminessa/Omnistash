@@ -558,6 +558,12 @@ class VideoCardDialogState extends State<VideoCardDialog> {
     }
   }
 
+  /// «Скачать» карточки: ОДНА строка в очередь тем же `enqueue`, что панель
+  /// выделения. Канон после успеха скрывает оверлей и идёт на вкладку
+  /// очереди (`switchTab("queue")`, ui_src/app.js:3887-3888): панель очереди
+  /// как экран Flutter ещё не построена (шаг W2 дальше - очередь/журнал
+  /// панелями), поэтому карточка остаётся открытой, а сводка называется на
+  /// месте - расхождение формы названо, молчания нет.
   Future<void> _download() async {
     if (!widget.access.has('queue')) {
       setState(() => _notice = widget.access.denial('queue'));
