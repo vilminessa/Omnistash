@@ -214,13 +214,20 @@ void main() {
     await pumpFrames(tester);
     expect(find.text('Выбрано: 3'), findsOneWidget,
         reason: 'галка «выбрать всё» не повела все загруженные строки (#sel-all)');
+    // Ряд вида (шаг 4б) и панель мультивыбора сдвигают список вниз: последняя
+    // строка уходит за нижний край вьюпорта и остаётся смонтированной в
+    // cacheExtent - её узел семантики в дереве есть, но finder со
+    // skipOffstage его пропускает (факт дампа прогона: «Клип 2» найден 0 при
+    // узле в merged-дереве и skipOffstage=false даёт 1). Выбор строки вне
+    // экрана ведётся канонным DOM (#sel-all ставит checked всем строкам
+    // страницы), поэтому selected сверяется со skipOffstage: false.
     for (final String label in <String>[
       'Клип 0, в индексе, Канал 0, 2:05, видео, обложка есть',
       'Клип 1, в индексе, Канал 1, 2:06, видео, нет обложки',
       'Клип 2, в индексе, Канал 2, 2:07, видео, обложка есть',
     ]) {
-      expect(tester.getSemantics(find.bySemanticsLabel(label)).flagsCollection
-          .isSelected.toBoolOrNull(), true,
+      expect(tester.getSemantics(find.bySemanticsLabel(label, skipOffstage: false))
+          .flagsCollection.isSelected.toBoolOrNull(), true,
           reason: 'строка "$label" не выбрана - AT не объявит selected');
     }
     final counterFlags =

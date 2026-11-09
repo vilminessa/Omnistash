@@ -38,6 +38,15 @@
 /// до «Принять», вход - «Отклонить», отказ бэка без `confirm:true`
 /// называется текстом сервера).
 ///
+/// Шаг 4б: вид библиотеки (`view_mode` - список/плитка и `tile_size` -
+/// мелкая/средняя/крупная из настроек, те же ключи и `save_setting` канона
+/// `view-list-btn`/`view-grid-btn`/`.size-btn`, app.js:7210-7223) и плитки с
+/// обложками (`tiles.dart`: `TILE` числа канона, `tileCols` формула,
+/// ленивые превью `get_thumbs` батчем по появлению на экране с LRU-кэшем
+/// канона; заглушка называется подписью канона «нет обложки»). Шапка колонок
+/// в режиме плитки скрывается - тот же канон `$("grid-head").hidden = grid`
+/// (app.js:2974-2985).
+///
 /// Сортировка колонок построена на шаге W2 (ниже): порядок строк приходит от
 /// сервера через аргумент `order` - тот же, что `ensureRange` в ui_src/app.js, а
 /// при пустой колонке сервер держит `uploaded_at DESC`, как браузерный
@@ -58,6 +67,7 @@ import 'bulk_bar.dart';
 import 'grid_cells.dart';
 import 'player.dart';
 import 'theme.dart';
+import 'tiles.dart';
 import 'video_card.dart';
 
 /// Форма ответа списка строк - один источник правды: app/repo.py: list_videos.
@@ -180,12 +190,51 @@ class _LibraryHomeState extends State<LibraryHome> {
   String _sortCol = '';
   String _sortDir = 'desc';
 
+  /// Вид библиотеки и размер плитки - те же `state.viewMode`/`state.tileSize`
+  /// канона (app.js:67-68), приходят из снимка настроек `get_initial`
+  /// (`view_mode`, `tile_size`; схемы и choices сверяет mirror-страж) и
+  /// переживают перезапуск окна, как браузер.
+  String _viewMode = 'list';
+  String _tileSize = 'medium';
+
+  /// Кэш и очередь обложек - тот же канон `thumbCache`/`thumbQueue`/
+  /// `thumbTimer` (app.js:2989-3042): обложка спрашивается, только когда
+  /// плитка появляется на экране (здесь - когда её строит `GridView.builder`,
+  /// который рисует видимые ячейки), батчем до `kThumbBatchMax` ид и с
+  /// коалесингом `kThumbDebounceMs`. Отсутствие в ответе кэшируется
+  /// пустышкой, чтобы не спрашивать одно и то же на каждой прокрутке.
+  final ThumbCache _thumbs = ThumbCache();
+  final Set<int> _thumbQueue = <int>{};
+  Timer? _thumbTimer;
+
+  /// Id батчей, ответ которых ещё не пришёл (`await` идёт): повторная
+  /// перерисовка не ставит тот же id в очередь повторно - канон снимает ids
+  /// из `thumbQueue` до вызова (app.js:3024-3025), и пока ответ не пришёл
+  /// `img` остаётся без src, а `data-vid` не возвращается в очередь до
+  /// следующего появления на экране.
+  final Set<int> _thumbInFlight = <int>{};
+
+  /// Причина отказа обложек: канон `.catch` снимает ids из очереди молча
+  /// (app.js:3038-3040) - здесь отказ назван текстом, молчания нет
+  /// (расхождение формы названо).
+  String? _thumbError;
+
+  /// Узлы фокуса play-кнопок плиток: канон обходит чекбокс и play-кнопку
+  /// плитки (`tabindex` у `.tile` нет), а цели переключателей вида строит
+  /// `SegmentedButton` сам - именованный список их не покрывает (тот же факт
+  /// шага 4 для ряда рейтинга).
+  final Map<int, FocusNode> _playNodes = <int, FocusNode>{};
+
   @override
   void initState() {
     super.initState();
     final col = widget.settings['sort_col'];
     _sortCol = col is String ? col : '';
     _sortDir = widget.settings['sort_dir'] == 'asc' ? 'asc' : 'desc';
+    _viewMode = widget.settings['view_mode'] == 'grid' ? 'grid' : 'list';
+    _tileSize = kTileSizes.containsKey(widget.settings['tile_size'])
+        ? widget.settings['tile_size'] as String
+        : 'medium';
     _loadFirst();
     _loadAccess();
     _loadStorages();
@@ -195,6 +244,7 @@ class _LibraryHomeState extends State<LibraryHome> {
   @override
   void dispose() {
     _poll?.cancel();
+    _thumbTimer?.cancel();
     for (final FocusNode node in _rowNodes.values) {
       node.dispose();
     }
@@ -203,6 +253,10 @@ class _LibraryHomeState extends State<LibraryHome> {
       node.dispose();
     }
     _barNodes.clear();
+    for (final FocusNode node in _playNodes.values) {
+      node.dispose();
+    }
+    _playNodes.clear();
     super.dispose();
   }
 
@@ -256,6 +310,12 @@ class _LibraryHomeState extends State<LibraryHome> {
       if (live.contains(id) || id == _openRowId) continue;
       _rowNodes.remove(id)?.dispose();
     }
+    // Play-кнопки плиток живут теми же id: узел исчезнувшей строки снимается,
+    // иначе фокус уходил бы в disposed узел (тот же факт прогона шага 3).
+    for (final id in _playNodes.keys.toList()) {
+      if (live.contains(id) || id == _openRowId) continue;
+      _playNodes.remove(id)?.dispose();
+    }
   }
 
   /// Вход в список с клавиатуры: первая строка получает фокус, как roving
@@ -294,6 +354,12 @@ class _LibraryHomeState extends State<LibraryHome> {
         _selected.clear();
         _storages = const <Map<String, Object?>>[];
         _storageId = '';
+        // Обложки принадлежат фасаду: кэш и очередь прежнего транспорта не
+        // имеют смысла (битые id остались бы пустышками навсегда).
+        _thumbs.clear();
+        _thumbQueue.clear();
+        _thumbInFlight.clear();
+        _thumbError = null;
       });
       _loadFirst();
       _loadAccess();
@@ -309,6 +375,19 @@ class _LibraryHomeState extends State<LibraryHome> {
         _sortDir = newDir;
       });
       _loadFirst();
+    }
+    // Вид и размер плитки - `applyViewState` канона (app.js:2974-2985):
+    // разметка меняется без перезагрузки строк (порядок запроса тот же), и
+    // кэш обложек сохраняется - превью уже прочитаны с диска.
+    final mode = widget.settings['view_mode'] == 'grid' ? 'grid' : 'list';
+    final size = kTileSizes.containsKey(widget.settings['tile_size'])
+        ? widget.settings['tile_size'] as String
+        : 'medium';
+    if (mode != _viewMode || size != _tileSize) {
+      setState(() {
+        _viewMode = mode;
+        _tileSize = size;
+      });
     }
   }
 
@@ -408,6 +487,132 @@ class _LibraryHomeState extends State<LibraryHome> {
         ? null
         : 'порядок применён к списку, но не сохранён в настройках: '
             '${refusals.join('; ')}');
+  }
+
+  /// Узел фокуса play-кнопки плитки (тот же приём, что узлы строк: узел
+  /// переживает перерисовку, узел исчезнувшей строки снимается).
+  FocusNode _playNode(int id) {
+    final FocusNode? existing = _playNodes[id];
+    if (existing != null) return existing;
+    final FocusNode created = FocusNode();
+    _playNodes[id] = created;
+    return created;
+  }
+
+  /// Переключение вида библиотеки - тот же канон (`view-list-btn`/
+  /// `view-grid-btn`, app.js:7210-7215: `save_setting` пишется только при
+  /// изменении, иначе вызова нет). Разметка меняется сразу, отказ записи
+  /// называется текстом - вид остаётся применённым к списку.
+  Future<void> _setViewMode(String mode) async {
+    final String value = mode == 'grid' ? 'grid' : 'list';
+    if (value == _viewMode) return;
+    setState(() => _viewMode = value);
+    await _persistSetting('view_mode', value, 'вид применён к списку, '
+        'но не сохранён в настройках');
+  }
+
+  /// Размер плитки - тот же канон (`.size-btn`, app.js:7216-7223: пишется
+  /// только при изменении; `tile_size` действует в режиме плитки, и колонок
+  /// столько, сколько влезло - ширину окна решает `tileCols`, не настройка).
+  Future<void> _setTileSize(String size) async {
+    if (!kTileSizes.containsKey(size) || size == _tileSize) return;
+    setState(() => _tileSize = size);
+    // Кэш обложек не зависит от размера: прочитанные data-URI те же файлы,
+    // только в другой ячейке (канон thumbCache держит по id, не по размеру).
+    await _persistSetting('tile_size', size, 'размер плитки применён, '
+        'но не сохранён в настройках');
+  }
+
+  /// Запись одной настройки (`save_setting` тем же ключом, что браузер:
+  /// app.js `saveSetting`; читателю ключа сервер отказывает - отказ
+  /// называется текстом, локальное значение остаётся применённым).
+  Future<void> _persistSetting(String key, String value, String note) async {
+    try {
+      final Map<String, Object?> res = await widget.facade.call(
+          'save_setting', <String, Object?>{'key': key, 'value': value});
+      final String? refusal = _refusalOf(res);
+      setState(() => _persistError = refusal == null
+          ? null
+          : '$note: $refusal');
+    } catch (error) {
+      setState(() => _persistError = '$note: $error');
+    }
+  }
+
+  /// Обложка строки для плитки: кэш читается по id (тот же канон
+  /// `paintCachedThumbs`), `has_thumb == false` - заглушка без запроса
+  /// (`tileHtml` app.js:3535-3538: обложку рисует только когда файл есть),
+  /// отсутствующая в кэше обложка ставится в очередь и спрашивается батчем.
+  /// Возвращает `(bytes, awaiting)`.
+  ({Uint8List? bytes, bool awaiting}) _thumbFor(Map<String, Object?> row) {
+    final Object? rawId = row['id'];
+    if (rawId is! num) return (bytes: null, awaiting: false);
+    final int id = rawId.toInt();
+    if (row['has_thumb'] != true) return (bytes: null, awaiting: false);
+    if (_thumbs.has(id)) return (bytes: _thumbs.of(id), awaiting: false);
+    if (_thumbInFlight.contains(id)) return (bytes: null, awaiting: true);
+    _thumbQueue.add(id);
+    // Тот же коалесинг канона (`scheduleThumbLoad` app.js:3020-3042):
+    // плитки, появившиеся в одном кадре, спрашиваются одним вызовом;
+    // timer ставится один раз на кадр.
+    _thumbTimer ??= Timer(Duration(milliseconds: kThumbDebounceMs), () {
+      _thumbTimer = null;
+      _flushThumbBatch();
+    });
+    return (bytes: null, awaiting: true);
+  }
+
+  /// Батч обложек: ids снимаются из очереди до вызова (тот же канон
+  /// app.js:3024-3025), не больше `kThumbBatchMax` за раз - сверх лимита
+  /// бэкенд отказывает текстом (`app/gui.py:3232-3234`), и очередь дробится
+  /// следующим батчем. Ответ `{thumbs: {id: data-URI}}` кладётся в LRU-кэш;
+  /// чего в ответе нет - пустышка («нет обложки»), чтобы не спрашивать
+  /// повторно. Отказ назван текстом (канон `.catch` снимает ids молча -
+  /// расхождение формы названо).
+  Future<void> _flushThumbBatch() async {
+    if (_thumbQueue.isEmpty) return;
+    final List<int> ids = _thumbQueue.take(kThumbBatchMax).toList();
+    for (final int id in ids) {
+      _thumbQueue.remove(id);
+      _thumbInFlight.add(id);
+    }
+    try {
+      final Map<String, Object?> res = await widget.facade.call(
+          'get_thumbs', <String, Object?>{'ids': ids});
+      final String? refusal = _refusalOf(res);
+      setState(() {
+        for (final int id in ids) {
+          _thumbInFlight.remove(id);
+        }
+        if (refusal != null) {
+          // Отказ назван текстом (канон `.catch` снимает ids молча и держит
+          // img без src - расхождение формы названо). Пустышка кэшируется,
+          // чтобы отказ не спрашивался на каждой перерисовке кадра: плитка
+          // называется заглушкой «нет обложки» вместе с текстом отказа.
+          _thumbError = 'обложки не прочитаны: $refusal';
+          for (final int id in ids) {
+            _thumbs.remember(id, null);
+          }
+          return;
+        }
+        final Object? raw = res['thumbs'];
+        final Map<Object?, Object?> thumbs =
+            raw is Map ? raw : const <Object?, Object?>{};
+        _thumbError = null;
+        for (final int id in ids) {
+          final Object? uri = thumbs['$id'] ?? thumbs[id];
+          _thumbs.remember(id, decodeThumbDataUri(uri));
+        }
+      });
+    } catch (error) {
+      setState(() {
+        for (final int id in ids) {
+          _thumbInFlight.remove(id);
+          _thumbs.remember(id, null);
+        }
+        _thumbError = 'обложки не прочитаны: $error';
+      });
+    }
   }
 
   Future<void> _pollJournal() async {
@@ -862,6 +1067,69 @@ class _LibraryHomeState extends State<LibraryHome> {
     );
   }
 
+  /// Ячейка «Ещё» - та же цель догрузки следующей страницы, что в списке
+  /// (канон подгружает страницы по прокрутке `ensureRange`, app.js:3308;
+  /// отдельная цель названа расхождением формы шага 1). В режиме плитки она
+  /// занимает ту же ячейку сетки, чтобы ряд не рассыпался.
+  Widget _moreCell(BuildContext context) {
+    return Semantics(
+      label: 'загрузить ещё строки: осталось $_total из ${_total - _rows.length}',
+      child: FilledButton(
+        onPressed: _loadMore,
+        child: Text('Ещё (${_total - _rows.length})'),
+      ),
+    );
+  }
+
+  /// Режим плиток канона (`#grid-rows.tiles`, app.css:647-651 + `tileCols`
+  /// app.js:2967-2972): колонок столько, сколько влезло по ширине контейнера,
+  /// зазор - `gap` размерного ряда, высота ячейки - `row` канона (виртуализация
+  /// считает по ней, поэтому `childAspectRatio` = w/row, а не по содержимому).
+  /// `GridView.builder` строит только видимые ячейки - тот же признак
+  /// «появилось на экране», что `requestThumbsForWindow` канона (app.js:3044-3055).
+  Widget _buildTiles(BuildContext context, double width) {
+    final ({double w, double row, double gap}) cfg =
+        kTileSizes[_tileSize] ?? kTileSizes['medium']!;
+    final int cols = tileColsFor(width, _tileSize);
+    final int itemCount = _rows.length + (_rows.length < _total ? 1 : 0);
+    return GridView.builder(
+      padding: EdgeInsets.all(cfg.gap),
+      itemCount: itemCount,
+      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: cols,
+        mainAxisSpacing: cfg.gap,
+        crossAxisSpacing: cfg.gap,
+        childAspectRatio: cfg.w / cfg.row,
+      ),
+      itemBuilder: (BuildContext ctx, int index) {
+        if (index >= _rows.length) return _moreCell(ctx);
+        return _buildTile(ctx, index);
+      },
+    );
+  }
+
+  /// Плитка строки: обложка лениво (`_thumbFor` ставит id в очередь при
+  /// первом построении ячейки - тот же канон `requestThumbsForWindow`,
+  /// вызываемый из `renderGridRows`), чекбокс «Выбрать плитку», play-кнопка,
+  /// бейджи статуса/рейтинга/«просмотрено», название и подпись.
+  Widget _buildTile(BuildContext context, int index) {
+    final String themeId = themeIdOf(context);
+    final Map<String, Object?> row = _rows[index];
+    final int id = row['id'] is num ? (row['id'] as num).toInt() : index;
+    final bool picked = _selected.contains(id);
+    final ({Uint8List? bytes, bool awaiting}) thumb = _thumbFor(row);
+    return tileCard(
+      context, themeId, row,
+      picked: picked,
+      bytes: thumb.bytes,
+      awaiting: thumb.awaiting,
+      onToggle: () => _toggleSelected(id),
+      onOpen: () => _openCard(row, id, _rowNode(id)),
+      onPlay: () => _play(id),
+      playNode: _playNode(id),
+    );
+  }
+
   /// Шапка колонок канона (`renderGridHead` из ui_src/app.js + `applyListColumns`):
   /// тот же состав видимых колонок и те же веса, что строки - `headerCells`
   /// из grid_cells.dart (скрытая гейтом `col_*` колонка не рисуется ни там,
@@ -911,6 +1179,29 @@ class _LibraryHomeState extends State<LibraryHome> {
               ],
             ),
           ),
+          // Ряд вида библиотеки канона (`#view-toggle` и `#size-toggle`,
+          // ui_src/index.html:109-124): в DOM он стоит перед панелью
+          // мультивыбора (109 < 173) - здесь тем же порядком. Активная цель
+          // - та, что соответствует настройке (`applyViewState`
+          // app.js:2974-2985), ряд размера скрыт в списке (`hidden = !grid`
+          // app.js:2979 - скрытый контрол не в Tab-обходе). Форма названа
+          // расхождением: канонный toolbar (`display:flex`, контролы
+          // `flex:0 0 auto`, app.css:595-606) не переносится - окно канона
+          // держит минимальную ширину 940, при которой ряд умещается; Flutter
+          // окно такой гарантии не имеет (тестовое 800 px), поэтому ряд
+          // переносится `Wrap` с тем же зазором --s-3, что toolbar.
+          Padding(
+            padding: EdgeInsets.symmetric(horizontal: kMetrics.s4),
+            child: Wrap(
+              spacing: kMetrics.s3,
+              runSpacing: kMetrics.s3,
+              children: [
+                viewToggle(context, _viewMode, (String mode) => _setViewMode(mode)),
+                sizeToggle(context, _tileSize, _viewMode == 'grid',
+                    (String size) => _setTileSize(size)),
+              ],
+            ),
+          ),
           // Панель мультивыбора канона (`sel-bar` index.html:173): в DOM она
           // стоит перед шапкой колонок (173 < 218) - здесь тем же порядком,
           // появляется только при nonzero выборе. Узлы целей регистрируются
@@ -935,10 +1226,14 @@ class _LibraryHomeState extends State<LibraryHome> {
               onDownload: _downloadSelected,
               onClear: _clearSelection,
             ),
-          LayoutBuilder(
-            builder: (BuildContext context, BoxConstraints constraints) =>
-                _buildHeader(context, constraints.maxWidth),
-          ),
+          // Шапка колонок рисуется только в списке: тот же канон
+          // `$("grid-head").hidden = grid` (app.js:2974-2985) - в режиме
+          // плитки колонок нет, шапка не имеет смысла.
+          if (_viewMode != 'grid')
+            LayoutBuilder(
+              builder: (BuildContext context, BoxConstraints constraints) =>
+                  _buildHeader(context, constraints.maxWidth),
+            ),
           if (_error != null)
             Padding(
               padding: EdgeInsets.symmetric(horizontal: kMetrics.s4, vertical: kMetrics.s2),
@@ -953,32 +1248,34 @@ class _LibraryHomeState extends State<LibraryHome> {
                   style: theme.textTheme.bodySmall?.copyWith(
                       color: theme.colorScheme.error)),
             ),
+          if (_thumbError != null)
+            Padding(
+              padding: EdgeInsets.symmetric(horizontal: kMetrics.s4, vertical: kMetrics.s2),
+              child: Text(_thumbError!,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.error)),
+            ),
           Expanded(
             child: _loading
                 ? Center(child: Text('загрузка списка…', style: theme.textTheme.bodySmall))
                 : LayoutBuilder(
-                    builder: (BuildContext context, BoxConstraints constraints) =>
-                        ListView.builder(
-                      itemCount: _rows.length + (more ? 1 : 0),
-                      itemExtent: rowHeight(fontPxOf(context)),
-                      itemBuilder: (BuildContext context, int index) {
-                        if (index >= _rows.length) {
-                          return Semantics(
-                            label: 'загрузить ещё строки: осталось $_total из '
-                                '${_total - _rows.length}',
-                            child: FilledButton(
-                              onPressed: _loadMore,
-                              child: Text('Ещё (${_total - _rows.length})'),
-                            ),
-                          );
-                        }
-                        // Ширина доступной строке - ширина списка: breakpoint
-                        // узкого экрана канона (`max-width: 900px`) сверяется
-                        // по ней, а не по ширине окна (расхождение формы
-                        // названо в grid_cells.dart).
-                        return _buildRow(context, index, constraints.maxWidth);
-                      },
-                    ),
+                    builder: (BuildContext context, BoxConstraints constraints) {
+                      if (_viewMode == 'grid') {
+                        return _buildTiles(context, constraints.maxWidth);
+                      }
+                      return ListView.builder(
+                        itemCount: _rows.length + (more ? 1 : 0),
+                        itemExtent: rowHeight(fontPxOf(context)),
+                        itemBuilder: (BuildContext context, int index) {
+                          if (index >= _rows.length) return _moreCell(context);
+                          // Ширина доступной строке - ширина списка: breakpoint
+                          // узкого экрана канона (`max-width: 900px`) сверяется
+                          // по ней, а не по ширине окна (расхождение формы
+                          // названо в grid_cells.dart).
+                          return _buildRow(context, index, constraints.maxWidth);
+                        },
+                      );
+                    },
                   ),
           ),
           // Живый регион: эквивалент aria-live у панели журнала - статус

@@ -403,9 +403,10 @@ class FlutterMirrorTest(unittest.TestCase):
         # Файлы шагов W2-3 и W2-4 под тем же guard-ом: пустые стабы, иначе
         # страж назвал бы их отсутствие как расхождение, а не литералы в
         # theme.dart (факт: grid_cells/bulk_bar/dialog_trap добавлены в
-        # PRODUCTION_FILES на шаге 4).
+        # PRODUCTION_FILES на шаге 4, tiles.dart - на шаге 4б).
         for name in ("video_card.dart", "access.dart", "player.dart",
-                     "grid_cells.dart", "bulk_bar.dart", "dialog_trap.dart"):
+                     "grid_cells.dart", "bulk_bar.dart", "dialog_trap.dart",
+                     "tiles.dart"):
             (tmp / name).write_text("void main() {}\n", encoding="utf-8")
         problems = mirror.literal_problems(tmp)
         self.assertEqual(len(problems), 2, f"литералы не названы: {problems}")
@@ -1013,6 +1014,176 @@ class FlutterMirrorTest(unittest.TestCase):
         problems = mirror.payload_problems(bulk_text=snippet, library_text=snippet)
         self.assertTrue(any("цель bulk_download: право queue не подписано" in line
                             for line in problems), problems)
+
+    # -- вид библиотеки и плитки с обложками (шаг 4б) -----------------------------
+
+    def test_tiles_match_canon(self):
+        """Числа TILE, лимиты обложек, формула колонок, подписи и проводка - канон."""
+        self.assertEqual(mirror.tiles_problems(), [], mirror.tiles_problems())
+
+    def test_tile_size_numbers_drift_is_named(self):
+        tiles = (mirror.LIB / "tiles.dart").read_text(encoding="utf-8")
+        patched = _patch(tiles, "'medium': (w: 240, row: 218, gap: 10)",
+                         "'medium': (w: 241, row: 218, gap: 10)")
+        problems = mirror.tiles_problems(tiles_text=patched)
+        self.assertTrue(any("TILE medium" in line for line in problems), problems)
+
+    def test_thumb_batch_limit_drift_is_named(self):
+        tiles = (mirror.LIB / "tiles.dart").read_text(encoding="utf-8")
+        patched = _patch(tiles, "const int kThumbBatchMax = 100;",
+                         "const int kThumbBatchMax = 101;")
+        problems = mirror.tiles_problems(tiles_text=patched)
+        self.assertTrue(any("THUMB_BATCH канона" in line for line in problems), problems)
+        self.assertTrue(any("THUMB_BATCH_LIMIT бэка" in line for line in problems),
+                        "лимит бэка (app/gui.py:70) не назван - клиент шлёт больше, "
+                        "чем сервер принимает")
+
+    def test_thumb_cache_limit_drift_is_named(self):
+        tiles = (mirror.LIB / "tiles.dart").read_text(encoding="utf-8")
+        patched = _patch(tiles, "const int kThumbCacheMax = 400;",
+                         "const int kThumbCacheMax = 399;")
+        problems = mirror.tiles_problems(tiles_text=patched)
+        self.assertTrue(any("THUMB_CACHE_MAX" in line for line in problems), problems)
+
+    def test_thumb_debounce_drift_is_named(self):
+        tiles = (mirror.LIB / "tiles.dart").read_text(encoding="utf-8")
+        patched = _patch(tiles, "const int kThumbDebounceMs = 120;",
+                         "const int kThumbDebounceMs = 200;")
+        problems = mirror.tiles_problems(tiles_text=patched)
+        self.assertTrue(any("коалесинг" in line for line in problems), problems)
+
+    def test_play_button_size_drift_is_named(self):
+        tiles = (mirror.LIB / "tiles.dart").read_text(encoding="utf-8")
+        patched = _patch(tiles, "const double kTilePlayPx = 44;",
+                         "const double kTilePlayPx = 40;")
+        problems = mirror.tiles_problems(tiles_text=patched)
+        self.assertTrue(any("tile-play" in line for line in problems), problems)
+
+    def test_thumb_aspect_drift_is_named(self):
+        tiles = (mirror.LIB / "tiles.dart").read_text(encoding="utf-8")
+        patched = _patch(tiles, "aspectRatio: 16 / 9,", "aspectRatio: 4 / 3,")
+        problems = mirror.tiles_problems(tiles_text=patched)
+        self.assertTrue(any("aspectRatio" in line for line in problems), problems)
+
+    def test_tile_cols_formula_drift_is_named(self):
+        tiles = (mirror.LIB / "tiles.dart").read_text(encoding="utf-8")
+        patched = _patch(tiles, "(width - 2 + cfg.gap)", "(width + cfg.gap)")
+        problems = mirror.tiles_problems(tiles_text=patched)
+        self.assertTrue(any("tileColsFor" in line for line in problems), problems)
+
+    def test_tile_row_height_drift_is_named(self):
+        """Высота ряда виртуализации канона считается по TILE.row (app.css:642-646)."""
+        lib = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
+        patched = _patch(lib, "childAspectRatio: cfg.w / cfg.row,",
+                         "childAspectRatio: cfg.w / 218.0,")
+        problems = mirror.tiles_problems(library_text=patched)
+        self.assertTrue(any("cfg.row" in line for line in problems), problems)
+
+    def test_tile_check_label_rename_is_named(self):
+        tiles = (mirror.LIB / "tiles.dart").read_text(encoding="utf-8")
+        patched = _patch(tiles, "const String kTileCheckAria = 'Выбрать плитку';",
+                         "const String kTileCheckAria = 'Выбрать элемент';")
+        problems = mirror.tiles_problems(tiles_text=patched)
+        self.assertTrue(any("kTileCheckAria" in line for line in problems), problems)
+
+    def test_view_group_label_drift_is_named(self):
+        tiles = (mirror.LIB / "tiles.dart").read_text(encoding="utf-8")
+        patched = _patch(tiles, "const String kViewGridLabel = 'Плиткой с превью';",
+                         "const String kViewGridLabel = 'Плиткой';")
+        problems = mirror.tiles_problems(tiles_text=patched)
+        self.assertTrue(any("view-toggle" in line for line in problems), problems)
+
+    def test_invented_segment_value_is_named(self):
+        tiles = (mirror.LIB / "tiles.dart").read_text(encoding="utf-8")
+        patched = _patch(tiles, "ButtonSegment<String>(value: 'small'",
+                         "ButtonSegment<String>(value: 'tiny'")
+        problems = mirror.tiles_problems(tiles_text=patched)
+        self.assertTrue(any("choices" in line for line in problems), problems)
+
+    def test_invented_setting_key_is_named(self):
+        lib = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
+        patched = _patch(lib, "_persistSetting('view_mode'",
+                         "_persistSetting('view_layout'")
+        problems = mirror.tiles_problems(library_text=patched)
+        self.assertTrue(any("view_mode/tile_size" in line for line in problems),
+                        "выдуманный ключ настройки не назван - запись уйдёт "
+                        "настройке вне схемы")
+
+    def test_thumb_target_rename_is_named(self):
+        lib = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
+        patched = _patch(lib, "'get_thumbs'", "'get_previews'")
+        problems = mirror.tiles_problems(library_text=patched)
+        self.assertTrue(any("get_thumbs" in line for line in problems), problems)
+
+    def test_backend_thumb_refusal_duplication_is_named(self):
+        lib = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
+        patched = _patch(lib, "'обложки не прочитаны: $refusal'",
+                         "'обложки не прочитаны: обложка не скачана'")
+        problems = mirror.tiles_problems(library_text=patched)
+        self.assertTrue(any("дублирует отказ бэка" in line for line in problems),
+                        problems)
+
+    def test_thumb_mime_drift_is_named(self):
+        tiles = (mirror.LIB / "tiles.dart").read_text(encoding="utf-8")
+        patched = _patch(tiles, "'image/avif',", "'image/gif',")
+        problems = mirror.tiles_problems(tiles_text=patched)
+        self.assertTrue(any("THUMB_MIME" in line for line in problems), problems)
+
+    def test_lru_eviction_drift_is_named(self):
+        tiles = (mirror.LIB / "tiles.dart").read_text(encoding="utf-8")
+        patched = _patch(tiles, "_entries.remove(_entries.keys.first);",
+                         "_entries.remove(_entries.keys.last);")
+        problems = mirror.tiles_problems(tiles_text=patched)
+        self.assertTrue(any("LRU-кэш" in line for line in problems), problems)
+
+    def test_inflight_guard_lost_is_named(self):
+        """Батч в полёте не ставит тот же id в очередь повторно (факт прогона
+        группы плиток: без guard'а один id спрашивается дважды за кадр)."""
+        lib = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
+        patched = _patch(lib, "_thumbInFlight", "_thumbIgnored")
+        problems = mirror.tiles_problems(library_text=patched)
+        self.assertTrue(any("_thumbInFlight" in line or "батч в полёте" in line
+                            for line in problems), problems)
+
+    def test_queue_drain_before_call_lost_is_named(self):
+        lib = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
+        patched = _patch(lib, "_thumbQueue.remove(id);", "// removed")
+        problems = mirror.tiles_problems(library_text=patched)
+        self.assertTrue(any("ids не снимаются" in line for line in problems), problems)
+
+    def test_silent_thumb_refusal_is_named(self):
+        lib = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
+        patched = _patch(lib, "_thumbError", "_thumbSilent")
+        problems = mirror.tiles_problems(library_text=patched)
+        self.assertTrue(any("отказ чтения обложек молчит" in line for line in problems),
+                        problems)
+
+    def test_grid_header_hidden_drift_is_named(self):
+        lib = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
+        patched = _patch(lib, "if (_viewMode != 'grid')", "if (_viewMode == 'grid')")
+        problems = mirror.tiles_problems(library_text=patched)
+        self.assertTrue(any("шапка колонок" in line for line in problems), problems)
+
+    def test_size_toggle_hidden_drift_is_named(self):
+        tiles = (mirror.LIB / "tiles.dart").read_text(encoding="utf-8")
+        patched = _patch(tiles, "if (!gridMode) return const SizedBox.shrink();",
+                         "if (gridMode) return const SizedBox.shrink();")
+        problems = mirror.tiles_problems(tiles_text=patched)
+        self.assertTrue(any("ряд размера" in line for line in problems), problems)
+
+    def test_save_setting_guard_lost_is_named(self):
+        """Канон пишет save_setting только при изменении (app.js:7210-7223)."""
+        lib = (mirror.LIB / "library_view.dart").read_text(encoding="utf-8")
+        patched = _patch(lib, "if (value == _viewMode) return;", "if (false) return;")
+        problems = mirror.tiles_problems(library_text=patched)
+        self.assertTrue(any("save_setting" in line for line in problems), problems)
+
+    def test_scrim_roles_not_consumed_is_named(self):
+        tiles = (mirror.LIB / "tiles.dart").read_text(encoding="utf-8")
+        patched = _patch(tiles, "final Color scrim = roleColor(themeId, 'scrim');",
+                         "final Color scrim = theme.colorScheme.surface;")
+        problems = mirror.tiles_problems(tiles_text=patched)
+        self.assertTrue(any("scrim" in line for line in problems), problems)
 
     # -- механизм диалога §3.8 (шаг 4) ---------------------------------------------
 

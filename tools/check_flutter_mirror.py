@@ -31,7 +31,19 @@ app/http/server.py. На шаге грида и группы (W2, шаг 4) св
 клиенте), механизм диалога §3.8 (`dialogExit`/`dialogEnter`: выход
 `-decline`/`-close`, Enter на выход, Escape, disabled пропускаются) и
 потребление новых токенов: барьеры диалогов (не менее четырёх) читают
-`veilColor`. Плюс проверка, что production-код Flutter не держит
+`veilColor`. На шаге плиток (W2, шаг 4б) сверяются числа `TILE` против
+    app.js:28-32, лимиты батча и кэша обложек и коалесинг против
+    app.js:33-34, 3020-3042 и `THUMB_BATCH_LIMIT` бэка, формула `tileCols`
+    против app.js:2967-2972, 44 px play-кнопки и 16/9 обложки против
+    app.css:670-691, подписи плитки и ряда вида против `tileHtml` и
+    index.html:109-124, ключи и `choices` `view_mode`/`tile_size` против
+    схемы настроек и guard записи «только при изменении», проводка
+    `get_thumbs` (`ids`/`thumbs`, право `read` из scopes, `has_thumb` из
+    app/repo.py, LRU-кэш и снимание ids до вызова) против app.js и бэка,
+    типы `THUMB_MIME` и тексты отказов бэка (не дублируются в клиенте),
+    скрытие шапки и ряда размера (`hidden` из `applyViewState`) и
+    потребление `--scrim`/`--on-scrim`/`--surface-2` плиткой. Плюс проверка,
+    что production-код Flutter не держит
 литералов: ни hex-цвета вне токенов, ни размера или длительности числом -
 имена ролей читаются из реестра, барьер диалога читает --veil темы, кольцо
 строки - --focus-ring.
@@ -72,10 +84,14 @@ DB = ROOT / "app" / "db.py"
 # docs/FLUTTER-TRANSITION.md §9 - это мерка, а не дизайн-токен.
 # Шаг 4 добавил ячейки грида, панель целей и диалог-механизм: они тоже
 # production-код (ширины колонок - канонные px из LIST_COLS, не числа из
-# головы; тексты - канонные строки app.js/index.html, не выдуманные).
+# головы; тексты - канонные строки app.js/index.html, не выдуманные). Шаг 4б
+# добавил плитки и ряд вида (tiles.dart): его числа - канонный TILE и
+# лимиты обложек из app.js/app.css/gui.py, подписи - строки tileHtml и
+# index.html, и он под сверкой стража.
 PRODUCTION_FILES = ("theme.dart", "library_view.dart", "app.dart", "tabs.dart",
                     "video_card.dart", "access.dart", "player.dart",
-                    "grid_cells.dart", "bulk_bar.dart", "dialog_trap.dart")
+                    "grid_cells.dart", "bulk_bar.dart", "dialog_trap.dart",
+                    "tiles.dart")
 
 # Статусы без отдельного правила в CSS (.status[data-s=...]) читаются базовой
 # подписью --muted: known и unavailable не имеют своей роли - это названо
@@ -1532,6 +1548,332 @@ def payload_problems(bulk_text: str | None = None, library_text: str | None = No
     return problems
 
 
+def js_tile_sizes(js_src: str) -> dict[str, tuple[int, int, int]]:
+    """Размерный ряд канона `TILE` (ui_src/app.js:28-32): w, row, gap px."""
+    block = re.search(r"var TILE = \{([\s\S]*?)\};", js_src)
+    if not block:
+        raise AssertionError("в ui_src/app.js нет блока TILE - сверка плиток "
+                             "потеряла источник")
+    out = {name: (int(w), int(row), int(gap)) for name, w, row, gap in
+           re.findall(r"([a-z]+):\s*\{\s*w:\s*(\d+),\s*row:\s*(\d+),\s*gap:\s*(\d+)\s*\}",
+                      block.group(1))}
+    if not out:
+        raise AssertionError("TILE пустой - сверка плиток потеряла источник")
+    return out
+
+
+def dart_tile_sizes(tiles_src: str) -> dict[str, tuple[float, float, float]]:
+    """Размерный ряд Flutter `kTileSizes` (tiles.dart) тем же разбором."""
+    out = {name: (float(w), float(row), float(gap)) for name, w, row, gap in
+           re.findall(r"'([a-z]+)':\s*\(w:\s*([\d.]+),\s*row:\s*([\d.]+),\s*gap:\s*([\d.]+)\)",
+                      tiles_src)}
+    if not out:
+        raise AssertionError("в tiles.dart нет kTileSizes с числами канона - "
+                             "размерный ряд написан на глаз")
+    return out
+
+
+def _js_int(js_src: str, name: str) -> int:
+    m = re.search(rf"var {name} = (\d+);", js_src)
+    if not m:
+        raise AssertionError(f"в ui_src/app.js нет {name} - сверка потеряла источник")
+    return int(m.group(1))
+
+
+def _dart_int(tiles_src: str, name: str) -> int | None:
+    m = re.search(rf"const int {name} = (\d+);", tiles_src)
+    return int(m.group(1)) if m else None
+
+
+def css_tile_rule(css_src: str, rule: str) -> str:
+    block = re.search(rf"\.{rule} \{{([\s\S]*?)\}}", css_src)
+    if not block:
+        raise AssertionError(f"в ui_src/app.css нет .{rule} - сверка потеряла источник")
+    return block.group(1)
+
+
+def html_toggle_labels(html_src: str, group_id: str) -> list[str]:
+    """aria-label ряда переключателей канона (ui_src/index.html:109-124):
+    первой - подпись группы `role="group"`, далее - подписи целей по порядку."""
+    block = re.search(rf'id="{group_id}"[\s\S]*?</span>', html_src)
+    if not block:
+        raise AssertionError(f"в ui_src/index.html нет ряда id={group_id} - "
+                             "сверка потеряла источник подписей")
+    return re.findall(r'aria-label="([^"]+)"', block.group(0))
+
+
+def tiles_problems(tiles_text: str | None = None,
+                   library_text: str | None = None) -> list[str]:
+    """Плитки и вид библиотеки (W2, шаг 4б) против канона и бэка.
+
+    Числа `TILE`, лимиты обложек (`THUMB_BATCH`/`THUMB_CACHE_MAX` и
+    `THUMB_BATCH_LIMIT` бэка), коалесинг 120 мс, формула `tileCols`, 44 px
+    play-кнопки и 16/9 обложки, подписи `tileHtml` и ряда
+    `view-toggle`/`size-toggle`, ключи и `choices` `view_mode`/`tile_size`
+    со схемы, проводка `get_thumbs` (ключ `ids`, ответ `thumbs`, право `read`
+    из scopes, `has_thumb` из repo.py, LRU-кэш, снятие ids из очереди до
+    вызова), типы `THUMB_MIME`, скрытие шапки/размера по `applyViewState`,
+    guard `save_setting` «только при изменении» и тексты отказов бэка,
+    которые клиент не дублирует.
+    """
+    tiles = (tiles_text if tiles_text is not None
+             else (LIB / "tiles.dart").read_text(encoding="utf-8"))
+    lib = (library_text if library_text is not None
+           else (LIB / "library_view.dart").read_text(encoding="utf-8"))
+    js = JS.read_text(encoding="utf-8")
+    css = CSS.read_text(encoding="utf-8")
+    html = HTML.read_text(encoding="utf-8")
+    gui = GUI.read_text(encoding="utf-8")
+    repo_src = REPO.read_text(encoding="utf-8")
+    combined = tiles + "\n" + lib
+    problems: list[str] = []
+
+    # -- размерный ряд и лимиты обложек --------------------------------------
+    js_sizes = js_tile_sizes(js)
+    dart_sizes = dart_tile_sizes(tiles)
+    if sorted(js_sizes) != sorted(dart_sizes):
+        problems.append(f"kTileSizes Flutter {sorted(dart_sizes)} != канон TILE "
+                        f"{sorted(js_sizes)} - размерный ряд не совпадает по составу")
+    for name, expected in js_sizes.items():
+        got = dart_sizes.get(name)
+        if got is not None and tuple(float(v) for v in expected) != got:
+            problems.append(f"TILE {name}: Flutter {got} != канон app.js {expected} "
+                            "- ширина/ряд/зазор плитки написаны на глаз")
+    batch_js = _js_int(js, "THUMB_BATCH")
+    cache_js = _js_int(js, "THUMB_CACHE_MAX")
+    batch_dart = _dart_int(tiles, "kThumbBatchMax")
+    cache_dart = _dart_int(tiles, "kThumbCacheMax")
+    gui_batch = re.search(r"THUMB_BATCH_LIMIT = (\d+)", gui)
+    if batch_dart is None or batch_dart != batch_js:
+        problems.append(f"kThumbBatchMax = {batch_dart} != THUMB_BATCH канона "
+                        f"{batch_js} (app.js:34) - батч обложек не канонный")
+    if gui_batch is None or (batch_dart is not None and batch_dart != int(gui_batch.group(1))):
+        problems.append(f"kThumbBatchMax = {batch_dart} != THUMB_BATCH_LIMIT бэка "
+                        f"{gui_batch.group(1) if gui_batch else '?'} (app/gui.py:70) - "
+                        "клиент шлёт id больше, чем сервер принимает")
+    if cache_dart is None or cache_dart != cache_js:
+        problems.append(f"kThumbCacheMax = {cache_dart} != THUMB_CACHE_MAX канона "
+                        f"{cache_js} (app.js:33) - кэш обложек не канонный")
+    debounce_js = re.search(r"function scheduleThumbLoad\([\s\S]*?\}, (\d+)\);", js)
+    if not debounce_js:
+        raise AssertionError("в app.js нет setTimeout в scheduleThumbLoad - "
+                             "сверка коалесинга потеряла источник")
+    debounce_dart = _dart_int(tiles, "kThumbDebounceMs")
+    if debounce_dart is None or debounce_dart != int(debounce_js.group(1)):
+        problems.append(f"kThumbDebounceMs = {debounce_dart} != коалесинг канона "
+                        f"{debounce_js.group(1)} мс (app.js:3041) - плитки одного "
+                        "кадре спрашивают обложки не одним батчем")
+
+    # -- геометрия плитки из CSS -----------------------------------------------
+    play_block = css_tile_rule(css, "tile-play")
+    play_px = set(re.findall(r"(?:width|height): (\d+)px", play_block))
+    if len(play_px) != 1:
+        raise AssertionError(f".tile-play держит размеры {sorted(play_px)} - "
+                             "сверка play-кнопки потеряла однозначный источник")
+    play_dart = re.search(r"const double kTilePlayPx = (\d+);", tiles)
+    if play_dart is None or int(play_dart.group(1)) != int(next(iter(play_px))):
+        problems.append(f"kTilePlayPx = {play_dart.group(1) if play_dart else '?'} != "
+                        f".tile-play {next(iter(play_px))} px (app.css:690-691) - "
+                        "play-кнопка не канонного размера")
+    thumb_block = css_tile_rule(css, "tile-thumb")
+    aspect_js = re.search(r"aspect-ratio: (\d+) / (\d+)", thumb_block)
+    if not aspect_js:
+        raise AssertionError(".tile-thumb не объявляет aspect-ratio - сверка "
+                             "обложки потеряла источник")
+    aspect_dart = re.search(r"aspectRatio: (\d+) / (\d+)", tiles)
+    if not aspect_dart or (aspect_dart.group(1), aspect_dart.group(2)) != (
+            aspect_js.group(1), aspect_js.group(2)):
+        dart_pair = (f"{aspect_dart.group(1)}/{aspect_dart.group(2)}"
+                     if aspect_dart else "не объявлен")
+        problems.append(f"обложка Flutter aspectRatio {dart_pair} != "
+                        f"канон .tile-thumb {aspect_js.group(1)}/{aspect_js.group(2)} "
+                        "(app.css:673) - форма превью не канонная")
+    cols_js = re.search(r'clientWidth - (\d+)', js)
+    cols_dart = re.search(r"width - (\d+) \+ cfg\.gap\) / \(cfg\.w \+ cfg\.gap", tiles)
+    if not cols_js or int(cols_js.group(1)) != 2:
+        raise AssertionError("tileCols канона не читает ширину с минусом рамки - "
+                             "сверка формулы потеряла источник")
+    if not cols_dart or int(cols_dart.group(1)) != int(cols_js.group(1)):
+        problems.append("tileColsFor Flutter не повторяет формулу канона "
+                        "(width - 2 + gap)/(w + gap) - число колонок решается не "
+                        "шириной контейнера (app.js:2967-2972)")
+    if "Math.max(1, Math.floor((width + cfg.gap) / (cfg.w + cfg.gap))" not in js:
+        raise AssertionError("формула tileCols в app.js не найдена - источник потерен")
+    if "cols < 1 ? 1 : cols" not in tiles:
+        problems.append("tileColsFor не держит минимум 1 колонку - узкий экран "
+                        "даёт ноль (канон Math.max(1, ...) app.js:2971)")
+    if "cfg.w / cfg.row" not in lib:
+        problems.append("_buildTiles не задаёт высоту ряда канонным cfg.row "
+                        "(aspect w/row) - виртуализация канона считает по row "
+                        "(app.css:642-646, paintGrid cfg.row)")
+
+    # -- подписи плитки и ряда вида --------------------------------------------
+    consts = _dart_string_consts(tiles)
+    tile_start = js.find("function tileHtml")
+    if tile_start < 0:
+        raise AssertionError("в app.js нет tileHtml - сверка подписей плитки "
+                             "потеряла источник")
+    tile_block = js[tile_start:tile_start + 1200]
+    for name, needle in (("kNoThumbLabel", "нет обложки"),
+                         ("kTileCheckAria", "Выбрать плитку"),
+                         ("kTilePlayAria", "Открыть в плеере")):
+        if needle not in tile_block:
+            raise AssertionError(f"подпись {needle!r} не в tileHtml - источник потерен")
+        got = consts.get(name)
+        if got is None:
+            problems.append(f"tiles.dart не объявляет {name} - подпись канона "
+                            f"{needle!r} не перенесена")
+        elif got != needle:
+            problems.append(f"подпись {name} = {got!r} != канон tileHtml {needle!r} "
+                            "- клиент выдумывает слово")
+    if "нет обложки" not in js:
+        raise AssertionError("заглушка noThumbNode не найдена в app.js - источник потерен")
+    view_labels = html_toggle_labels(html, "view-toggle")
+    size_labels = html_toggle_labels(html, "size-toggle")
+    expected_view = [consts.get("kViewToggleAria"), consts.get("kViewListLabel"),
+                     consts.get("kViewGridLabel")]
+    expected_size = [consts.get("kSizeToggleAria"), consts.get("kSizeSmallLabel"),
+                     consts.get("kSizeMediumLabel"), consts.get("kSizeLargeLabel")]
+    for labels, expected, gid in ((view_labels, expected_view, "view-toggle"),
+                                  (size_labels, expected_size, "size-toggle")):
+        if len(expected) != len(labels) or any(
+                got is None or got != want for got, want in zip(expected, labels)):
+            problems.append(f"подписи ряда {gid} Flutter {expected} != канон "
+                            f"index.html {labels} - группа или цель названа не тем текстом")
+
+    # -- настройки вида и размера ------------------------------------------------
+    fields = {item["key"]: item for item in settings_schema.FIELDS}
+    choice_ids = {item["key"]: {c[0] for c in item.get("choices") or []}
+                  for item in settings_schema.FIELDS}
+    for key in ("view_mode", "tile_size"):
+        if key not in fields:
+            problems.append(f"ключ {key} не в схеме настроек - save_setting "
+                            "пишется настройке, которой нет")
+    dart_values = set(re.findall(r"ButtonSegment<String>\(value: '([a-z]+)'", tiles))
+    canon_values = choice_ids.get("view_mode", set()) | choice_ids.get("tile_size", set())
+    if dart_values != canon_values:
+        problems.append(f"значения ряда вида Flutter {sorted(dart_values)} != choices "
+                        f"схемы {sorted(canon_values)} - выдуманный или потерянный variant")
+    for key, default, declaration in (("view_mode", "list", "String _viewMode = 'list';"),
+                                      ("tile_size", "medium", "String _tileSize = 'medium';")):
+        item = fields.get(key)
+        if item is not None and item.get("default") != default:
+            problems.append(f"дефолт {key} в схеме {item.get('default')!r} != Flutter "
+                            f"{default!r} - два клиента стартуют с разным видом")
+        if declaration not in lib:
+            problems.append(f"{declaration!r} не в library_view.dart - дефолт {key} "
+                            "не объявлен как в схеме")
+    if "_persistSetting('view_mode'" not in lib or "_persistSetting('tile_size'" not in lib:
+        problems.append("library_view.dart не пишет через _persistSetting ключи "
+                        "view_mode/tile_size - выбор вида не переживёт перезапуск "
+                        "(saveSetting канона app.js:7210-7223)")
+    if 'if (state.viewMode !== "list") saveSetting("view_mode", "list")' not in js \
+            or 'if (state.viewMode !== "grid") saveSetting("view_mode", "grid")' not in js:
+        raise AssertionError("guard записи вида в каноне не найден - источник потерен")
+    if "if (value == _viewMode) return;" not in lib or "size == _tileSize" not in lib:
+        problems.append("переключение вида/размера пишет save_setting даже без "
+                        "изменения - канон app.js:7210-7223 пишет только при разнице")
+    if '$("grid-head").hidden = grid' not in js or '$("size-toggle").hidden = !grid' not in js:
+        raise AssertionError("скрытие шапки/размера в applyViewState канона не найдено - "
+                             "источник потерен")
+    if "if (_viewMode != 'grid')" not in lib:
+        problems.append("шапка колонок не скрывается в режиме плитки - канон "
+                        '"grid-head" hidden = grid (app.js:2974-2985)')
+    if "if (!gridMode) return const SizedBox.shrink();" not in tiles:
+        problems.append("ряд размера не скрывается в списке - канон "
+                        '"size-toggle" hidden = !grid (app.js:2979) - '
+                        "скрытый контрол обязан не быть в обходе")
+
+    # -- проводка обложек: цель, ключи, кэш, очередь ---------------------------
+    if "'get_thumbs'" not in lib:
+        problems.append("get_thumbs не вызывается из production Dart - плитки не "
+                        "имеют пути к обложке (канон scheduleThumbLoad app.js:3027)")
+    required = scopes.scope_for("get_thumbs")
+    if required != "read":
+        problems.append(f"цель get_thumbs экспортируется с правом {required!r} != read "
+                        "(app/http/scopes.py) - сверка права потеряла источник")
+    server_keys = _gui_keys("get_thumbs", gui)
+    if "ids" not in server_keys:
+        raise AssertionError("app/gui.py get_thumbs не читает ids - источник потерен")
+    if "'ids'" not in lib or "{'ids': ids}" not in lib:
+        problems.append("get_thumbs вызывается без ключа ids - проводка не канонная "
+                        "(app.js:3027 { ids: ids })")
+    thumbs_block = gui[gui.find("def get_thumbs"):gui.find("def get_thumbs") + 900]
+    if '"thumbs"' not in thumbs_block:
+        raise AssertionError("app/gui.py get_thumbs не возвращает thumbs - источник потерен")
+    if "res['thumbs']" not in lib:
+        problems.append("Flutter не читает ответ thumbs - обложки ответа не доходят")
+    if '"has_thumb"' not in repo_src:
+        raise AssertionError("app/repo.py не ставит has_thumb (1453) - источник потерен")
+    if "'has_thumb'" not in lib:
+        problems.append("has_thumb не читается из строки выборки - канон tileHtml "
+                        "рисует обложку только когда файл есть (app.js:3535)")
+    if "_thumbInFlight" not in lib:
+        problems.append("батч в полёте не блокирует повторную постановку в очередь - "
+                        "один id спрашивается несколько раз в одном кадре, канон же "
+                        "снимает ids из thumbQueue до вызова (app.js:3024-3025)")
+    if "_thumbQueue.remove(id)" not in lib:
+        problems.append("ids не снимаются из очереди до вызова get_thumbs - канон "
+                        "thumbQueue.delete(id) до call (app.js:3025)")
+    if "thumbQueue.delete(id)" not in js:
+        raise AssertionError("снятие ids из очереди в каноне не найдено - источник потерен")
+    if ".slice(0, THUMB_BATCH)" not in js:
+        raise AssertionError("нарезка батча в каноне не найдена - источник потерен")
+    if "take(kThumbBatchMax)" not in lib:
+        problems.append("очередь не режется лимитом kThumbBatchMax - батч может "
+                        "превысить лимит бэка и получить отказ текстом")
+    if "thumbCache.delete(thumbCache.keys().next().value)" not in js:
+        raise AssertionError("LRU-вытеснение канона не найдено (rememberThumb) - "
+                             "источник потерен")
+    if "_entries.keys.first" not in tiles:
+        problems.append("LRU-кэш Flutter не снимает старейший - кэш растёт без "
+                        "вытеснения (rememberThumb app.js:2996-2998)")
+    if "capacity = kThumbCacheMax" not in tiles:
+        problems.append("ThumbCache не держит capacity из kThumbCacheMax - лимит кэша "
+                        "написан на глаз")
+    if 'rememberThumb(id, "")' not in js:
+        raise AssertionError("кэш пустышки в каноне не найден (ids.forEach) - источник потерен")
+    if "_thumbs.remember(id, decodeThumbDataUri(uri))" not in lib:
+        problems.append("ответ кэшируется не по всем ids батча - отсутствие обложки "
+                        "не запоминается пустышкой и спрашивается повторно "
+                        "(app.js:3034-3036)")
+    if "_thumbError" not in lib:
+        problems.append("отказ чтения обложек молчит - канон .catch снимает ids без "
+                        "текста (app.js:3038-3040), здесь отказ обязан быть назван")
+
+    # -- типы обложек и тексты отказов бэка ------------------------------------
+    mime_js = set(re.findall(r': "([^"]+)"',
+                             re.search(r"THUMB_MIME = \{([\s\S]*?)\}", gui).group(1)))
+    dart_mime_match = re.search(r"kThumbMimes = <String>\{([\s\S]*?)\}", tiles)
+    if not dart_mime_match:
+        problems.append("kThumbMimes не объявлен - типы data-URI бэка не сверены")
+    else:
+        dart_mime = set(re.findall(r"'([^']+)'", dart_mime_match.group(1)))
+        if dart_mime != mime_js:
+            problems.append(f"kThumbMimes {sorted(dart_mime)} != THUMB_MIME бэка "
+                            f"{sorted(mime_js)} (app/gui.py:71-73) - картинка иного "
+                            "типа показана как обложка")
+    dart_code = _strip_comments(combined)
+    for refused in ("слишком много id за раз", "обложка не скачана",
+                    "не прочиталась или слишком большая"):
+        if refused in gui and refused in dart_code:
+            problems.append(f"production Dart дублирует отказ бэка {refused!r} - "
+                            "текст приходит из ответа, клиент его не выдумывает")
+
+    # -- потребление токенов плиткой --------------------------------------------
+    if "var(--scrim)" not in play_block or "var(--on-scrim)" not in play_block:
+        raise AssertionError(".tile-play не читает --scrim/--on-scrim - источник потерен")
+    if "'scrim'" not in tiles or "'on-scrim'" not in tiles:
+        problems.append("tiles.dart не читает роли scrim/on-scrim - подложка "
+                        "play-кнопки написана литералом (app.css:696-697)")
+    if "var(--surface-2)" not in thumb_block:
+        raise AssertionError(".tile-thumb не читает --surface-2 - источник потерен")
+    if "surfaceContainerLow" not in tiles:
+        problems.append("подложка обложки не читает --surface-2 темы (surfaceContainerLow) - "
+                        "пустая превью-ячейка красится литералом (app.css:675)")
+    return problems
+
+
 def _gui_keys(name: str, gui_src: str) -> set[str]:
     """Ключи запроса, которые цель читает: `request.get("k")` и
     `(request or {}).get("k")` (тот же ключ в другой форме записи -
@@ -1771,6 +2113,7 @@ def problems() -> list[str]:
     out += toolbar_problems()
     out += bulk_texts_problems()
     out += payload_problems()
+    out += tiles_problems()
     out += dialog_mechanism_problems()
     out += route_problems()
     out += canon_texts_problems()
@@ -1806,7 +2149,14 @@ def main(argv: list[str]) -> int:
           f"{len(js_sel_bar_targets())} (построенные и названные с волной), "
           "проводки bulk_* и whitelist пометок сверены с app/gui.py и "
           "app/repo.py, механизмы диалогов §3.8 сверены с dialogExit "
-          "ui_src/app.js")
+"ui_src/app.js; плитки: рядов TILE "
+          f"{len(js_tile_sizes(JS.read_text(encoding='utf-8')))} с чисел app.js, "
+          "лимиты батча/кэша и коалесинг сверены с app.js и THUMB_BATCH_LIMIT бэка, "
+          "формула колонок и 44 px play - с app.css, подписи плитки и ряда вида - с "
+          "tileHtml и index.html, ключи и choices view_mode/tile_size - со схемы "
+          "настроек, проводка get_thumbs (ids/thumbs, has_thumb, LRU, право read) - "
+          "с app.js, repo.py, gui.py и scopes, тексты отказов бэка в клиенте не "
+          "дублируются")
     return 0
 
 

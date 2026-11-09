@@ -14,9 +14,16 @@
 /// и отказ с `adult_confirm` (текст _bulk_adult app/gui.py:772-775). Каждый
 /// bulk-вызов пишется в `bulkRequests` именем и телом: тест сверяет тела
 /// проводок, а не «по ощущению».
+///
+/// Шаг 4б добавляет обложки плиток в той же форме ответа бэкенда
+/// (app/gui.py:3196-3241): `get_thumbs` -> `{"thumbs": {id: data-URI}}` с
+/// лимитом 100 ид (отказ текстом бэка) и `get_thumb` ->
+/// `{"ok":true,"data":...}` / `{"ok":false,"reason":...}`; вызовы `get_thumbs`
+/// пишутся в `thumbRequests` списком id - тест сверяет батч и коалесинг.
 
 library;
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:omnistash_ui/access.dart';
@@ -79,6 +86,10 @@ class FakeFacade implements Facade {
     this.adultConfirm = false,
     this.collections = const <Map<String, Object?>>[],
     this.collectionsRefusal,
+    this.thumbUris = const <String, String>{},
+    this.thumbsRefusal,
+    this.thumbReason,
+    this.thumbPending = false,
   });
 
   final String theme;
@@ -140,6 +151,24 @@ class FakeFacade implements Facade {
   /// created_at, total) и отказ чтения.
   final List<Map<String, Object?>> collections;
   final String? collectionsRefusal;
+
+  /// Обложки (`get_thumbs`/`get_thumb` -> app/gui.py:3196-3241): id ->
+  /// data-URI локального файла обложки. Чего нет в этом наборе, бэкенд
+  /// молча не кладёт в ответ (битый или пропавший файл), и плитка показывает
+  /// заглушку; для одной обложки отказ называется текстом бэка
+  /// (`thumbReason` - «обложка не скачана» app/gui.py:3207).
+  final Map<String, String> thumbUris;
+  final String? thumbsRefusal;
+  final String? thumbReason;
+
+  /// Батч обложек, который не отвечает (мок «ответ ещё не пришёл»): плитка
+  /// остаётся в состоянии ожидания - пустая подложка `--surface-2` без
+  /// подписи, как канон `img` без src (app.js:3003-3010, 3053-3060).
+  final bool thumbPending;
+
+  /// Проводка батчей обложек: список id каждого вызова `get_thumbs` - тест
+  /// сверяет размер батча и дробление очереди, а не «по ощущению».
+  final List<List<int>> thumbRequests = <List<int>>[];
 
   final List<String> calls = <String>[];
   final List<Map<String, Object?>?> sortRequests = <Map<String, Object?>?>[];
@@ -353,6 +382,43 @@ class FakeFacade implements Facade {
           'removed': bulkRemovedRows ?? count,
           'gone': bulkGone,
         };
+      case 'get_thumbs':
+        // Форма ответа app/gui.py:3214-3241: {"thumbs": {id: data-URI}};
+        // сверх лимита бэкенд отказывает своим текстом (3232-3234), битые и
+        // пропавшие файлы молча не попадают в ответ - заглушка называется
+        // подписью канона, а не выдуманным текстом.
+        final request = arg as Map<String, Object?>;
+        final List<int> ids = (request['ids'] as List? ?? const <Object?>[])
+            .map((Object? v) => v is num ? v.toInt() : 0).toList();
+        thumbRequests.add(ids);
+        if (ids.length > 100) {
+          // Тот же текст лимита бэкенда (app/gui.py:3233-3234).
+          return <String, Object?>{'error': 'слишком много id за раз: '
+              '${ids.length} (максимум 100)'};
+        }
+        if (thumbsRefusal != null) return <String, Object?>{'error': thumbsRefusal!};
+        if (thumbPending) {
+          // Мок «ответ ещё не пришёл»: батч висит, плитка остаётся в
+          // ожидании (канон img без src - пустая подложка без подписи).
+          return Completer<Map<String, Object?>>().future;
+        }
+        final Map<String, Object?> thumbs = <String, Object?>{};
+        for (final int id in ids) {
+          final String? uri = thumbUris['$id'];
+          if (uri != null) thumbs['$id'] = uri;
+        }
+        return <String, Object?>{'thumbs': thumbs};
+      case 'get_thumb':
+        // app/gui.py:3196-3212: {"ok":true,"data":uri} либо {"ok":false,
+        // "reason":...} - текст бэкенда, клиент его не выдумывает.
+        final request = arg as Map<String, Object?>;
+        final int id = request['id'] is num ? (request['id'] as num).toInt() : 0;
+        final String? uri = thumbUris['$id'];
+        if (uri == null) {
+          return <String, Object?>{'ok': false,
+            'reason': thumbReason ?? 'обложка не скачана'};
+        }
+        return <String, Object?>{'ok': true, 'data': uri};
       default:
         return <String, Object?>{'error': 'цель не подменена в тесте: $name'};
     }
@@ -374,6 +440,9 @@ Map<String, Object?> row(int id, {
   List<String> platformTags = const <String>['lofi', 'live'],
   Object userRating = 0,
   String? watchedAt,
+  String mediaKind = 'video',
+  String? mediaLabel,
+  bool? hasThumb,
 }) =>
     <String, Object?>{
       'id': id,
@@ -382,10 +451,13 @@ Map<String, Object?> row(int id, {
       'status_label': label,
       'channel': 'Канал ${id % 3}',
       'duration_s': 125 + id,
-      'media_kind': 'video',
-      'media_label': 'видео',
+      'media_kind': mediaKind,
+      'media_label': mediaLabel ?? (mediaKind == 'audio' ? 'аудио' : 'видео'),
       'user_rating': userRating,
-      'has_thumb': id % 2 == 0,
+      // Отметка «обложка есть» - тот же источник, что app/repo.py:1453
+      // (`row["has_thumb"] = row["id"] in thumbs`); по умолчанию чередование
+      // из прежних фиктур шага 3 оставлено как есть.
+      'has_thumb': hasThumb ?? (id % 2 == 0),
       'uploaded_at': uploadedAt,
       'size': size,
       'view_count': viewCount,

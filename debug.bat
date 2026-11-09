@@ -215,9 +215,10 @@ rem 12708 MB commit (факт прогона при потолке 12288), а г
 rem dropdown рейтинга - 6265 MB при 6144 и 6496 MB в отдельном файле из трёх
 rem тестов (факт прогона: spike не накопление, а стоимость диалога с
 rem overlay). Поэтому группы гонятся отдельными процессами: 13 core, 7 grid,
-rem 4 bulk под 6144 MB (наблюдённые пики 729-757 MB), 3 marks, 3 dialogs и 4
-rem danger под 8192 MB - минимальный жизнеспособный потолок для диалоговой
-rem группы, kill выше него держится.
+rem 4 bulk под 6144 MB (наблюдённые пики 729-757 MB); после переложения ряда
+rem рейтинга на SegmentedButton дешёвые и диалоговые группы - 3 marks, 3
+rem dialogs и 4 danger тоже под 6144 (наблюдённые пики 745-756 MB), kill выше
+rem потолка держится.
 python ..\tools\run_capped.py --cmd "flutter test test\library_view_test.dart" --max-mem-mb 6144
 set "rc=%errorlevel%"
 if not "%rc%"=="0" (cd .. & goto after)
@@ -234,6 +235,16 @@ python ..\tools\run_capped.py --cmd "flutter test test\library_dialogs_test.dart
 set "rc=%errorlevel%"
 if not "%rc%"=="0" (cd .. & goto after)
 python ..\tools\run_capped.py --cmd "flutter test test\library_danger_test.dart" --max-mem-mb 6144
+set "rc=%errorlevel%"
+if not "%rc%"=="0" (cd .. & goto after)
+rem Шаг 4б: вид библиотеки и плитки с обложками - 21 тест (17 widget + 4 pure).
+rem Первый прогон группы падал на RenderFlex overflow ряда переключателей вида
+rem (Row с overflow печатает ошибку каждый кадр - факт probe'а: 8.45 GB commit,
+rem тот же класс раздувания, что строка канона). Ряд переложен на Wrap (канон
+rem toolbar не переносится при min-width 940 - расхождение формы названо), и
+rem SegmentedButton дёшев с перестройкой: наблюдённый пик группы 768 MB под
+rem 6144 (flutter_tester 214 MB).
+python ..\tools\run_capped.py --cmd "flutter test test\library_tiles_test.dart" --max-mem-mb 6144
 set "rc=%errorlevel%"
 cd ..
 goto after
